@@ -8,6 +8,7 @@ import 'app_views/app_view.dart';
 import 'backend.dart';
 import 'characters/character.dart';
 import 'controls.dart';
+import 'errands/tab_screens.dart' show BrowserWatch;
 import 'explorer.dart' show FilesPane;
 import 'highlights.dart';
 import 'history/export_job.dart' show ReplayJobBanner;
@@ -21,11 +22,13 @@ import 'selection.dart' show Unselectable;
 import 'pane_chrome.dart';
 import 'map.dart';
 import 'monitors_overview.dart' show MonitorsOverview;
+import 'open_place.dart' show OpenPlace, openTarget, whyGone;
 import 'mobile/back.dart'
     show BackHandle, CallbackBackToken, PhoneBack, PhoneBackScope;
 import 'mobile/haptics.dart';
 import 'mobile/device.dart' show WindowControls, windowControls;
 import 'mobile/metrics.dart';
+import 'needs_you_focus.dart' show behindFocusMode;
 import 'settings_view.dart';
 import 'viewers/registry.dart';
 import 'zoom.dart' show ZoomScope;
@@ -35,6 +38,7 @@ import 'ipad/document_host.dart' show ipadDocumentPane;
 import 'ipad/workbench.dart' show keyboardOverWindow;
 import 'review_answer.dart' show ReviewFrame;
 import 'usage_view.dart';
+import 'visible_codes.dart';
 
 /// A pane is at least this wide and this tall (docs/IDENTITY.md, "Panes
 /// and viewers").
@@ -199,6 +203,30 @@ ViewNode withFiles(ViewNode root, Project project, {PaneFit? fit}) =>
       share: 1 / 4,
       fit: fit,
     );
+
+/// The kind of an agent's browser's pane: its live view, watch only, in
+/// that agent's own layout.
+const browserKind = 'browser';
+
+/// The pane showing the agent's browser in [root], or null.
+ViewNode? browserPane(ViewNode root) {
+  for (final leaf in leaves(root)) {
+    if (leaf.leaf.kind == browserKind) return leaf;
+  }
+  return null;
+}
+
+/// [root] with the agent's browser right of the conversation, as [withPage]
+/// places a page, taking a third of the conversation's share.
+ViewNode withBrowser(ViewNode root, {PaneFit? fit}) => _besideChat(
+  root,
+  ViewNode(
+    id: newPaneId(browserKind),
+    leaf: ViewLeaf(kind: browserKind),
+  ),
+  share: 1 / 3,
+  fit: fit,
+);
 
 /// The pane showing [appId]'s [view] in [root] (empty: its first), or
 /// null. [first] is the id of the app's first view, so a pane opened by
@@ -820,6 +848,10 @@ class _PaneLayoutState extends State<PaneLayout> {
                 paneId: node.id,
               ),
               _ when leaf.kind == appKind => AppPane(leaf: leaf),
+              // Its page fits the pane: no scroll around it.
+              _ when leaf.kind == browserKind => InPane(
+                child: BrowserWatch(agentId: agent.id),
+              ),
               _ => Builder(
                 builder: (context) {
                   // While an ask to review it waits, its answer's bar.
@@ -950,7 +982,7 @@ class _ExpandedPaneState extends State<ExpandedPane> {
         child: Row(
           children: [
             Flexible(
-              child: _BandChip(
+              child: BandChip(
                 label: 'Back to ${widget.agent.name}',
                 onTap: widget.onBack,
                 leading: (color) => Row(
@@ -971,7 +1003,7 @@ class _ExpandedPaneState extends State<ExpandedPane> {
             const Spacer(),
             if (widget.opened.isNotEmpty)
               Flexible(
-                child: _BandChip(
+                child: BandChip(
                   label: widget.opened.length == 1
                       ? '${widget.agent.name} opened '
                             '${paneTitle(widget.opened.single, AppScope.of(context).workspace.workspace)}'
@@ -986,46 +1018,49 @@ class _ExpandedPaneState extends State<ExpandedPane> {
       ),
     );
     final still = MediaQuery.disableAnimationsOf(context);
-    return Focus(
-      focusNode: _node,
-      onKeyEvent: _key,
-      child: TweenAnimationBuilder<double>(
-        tween: Tween(begin: still ? 1 : 0, end: 1),
-        duration: Motion.base,
-        curve: Curves.easeOut,
-        builder: (context, opacity, child) =>
-            Opacity(opacity: opacity, child: child),
-        child: ColoredBox(
-          color: palette.canvas,
-          child: Padding(
-            // Below an iPad's status bar, not its window controls: the
-            // band sits beside them. Above the on-screen keyboard, so a
-            // field being written in (a review's answer) stays in sight.
-            padding: EdgeInsets.only(
-              top: math.max(
-                0,
-                MediaQuery.paddingOf(context).top - controls.top,
+    return Offstage(
+      offstage: behindFocusMode(context),
+      child: Focus(
+        focusNode: _node,
+        onKeyEvent: _key,
+        child: TweenAnimationBuilder<double>(
+          tween: Tween(begin: still ? 1 : 0, end: 1),
+          duration: Motion.base,
+          curve: Curves.easeOut,
+          builder: (context, opacity, child) =>
+              Opacity(opacity: opacity, child: child),
+          child: ColoredBox(
+            color: palette.canvas,
+            child: Padding(
+              // Below an iPad's status bar, not its window controls: the
+              // band sits beside them. Above the on-screen keyboard, so a
+              // field being written in (a review's answer) stays in sight.
+              padding: EdgeInsets.only(
+                top: math.max(
+                  0,
+                  MediaQuery.paddingOf(context).top - controls.top,
+                ),
+                bottom: keyboardOverWindow(context),
               ),
-              bottom: keyboardOverWindow(context),
-            ),
-            child: MediaQuery.removeViewInsets(
-              context: context,
-              removeBottom: true,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Unselectable(child: band),
-                  // A History video being made shows here too, under the
-                  // band, as over the window it covers (Matt, Bruno 52981):
-                  // the pane makes room for it rather than going under it.
-                  Expanded(
-                    child: MediaQuery.removePadding(
-                      context: context,
-                      removeTop: true,
-                      child: ReplayJobBanner(child: widget.child),
+              child: MediaQuery.removeViewInsets(
+                context: context,
+                removeBottom: true,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Unselectable(child: band),
+                    // A History video being made shows here too, under the
+                    // band, as over the window it covers: the pane makes room
+                    // for it rather than going under it.
+                    Expanded(
+                      child: MediaQuery.removePadding(
+                        context: context,
+                        removeTop: true,
+                        child: ReplayJobBanner(child: widget.child),
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
           ),
@@ -1038,8 +1073,9 @@ class _ExpandedPaneState extends State<ExpandedPane> {
 /// A 28px capsule in the expanded pane's band, like the agent bar's back
 /// chip: what's at its start, then [label]. Taller when large text needs
 /// it.
-class _BandChip extends StatelessWidget {
-  const _BandChip({
+class BandChip extends StatelessWidget {
+  const BandChip({
+    super.key,
     required this.label,
     required this.onTap,
     required this.leading,
@@ -1394,9 +1430,13 @@ class _PaneState extends State<Pane> {
     final agent = widget.agent;
     final node = widget.node;
     final isChat = node.leaf.kind == chatKind;
-    // The conversation and a page (Settings…) under a header of their own;
-    // a file's viewer fills its header with its details and controls.
-    final ownHeader = isChat || pageOfKind(node.leaf.kind) != null;
+    // The conversation, a page (Settings…) and an agent's browser under a
+    // header of their own; a file's viewer fills its header with its
+    // details and controls.
+    final ownHeader =
+        isChat ||
+        pageOfKind(node.leaf.kind) != null ||
+        node.leaf.kind == browserKind;
     final backend = AppScope.of(context);
     Widget header(
       String details,
@@ -1405,7 +1445,16 @@ class _PaneState extends State<Pane> {
     }) => PaneHeader(
       drag: PaneDrag(agent.id, node.id),
       glyph: (color) => paneGlyph(agent, node.leaf, color),
-      title: paneTitle(node.leaf, backend.workspace.workspace),
+      title: node.leaf.kind == browserKind
+          ? "${agent.name}'s browser"
+          : paneTitle(node.leaf, backend.workspace.workspace),
+      titleSpan: node.leaf.kind == appKind
+          ? appViewTitleSpan(
+              node.leaf,
+              backend.workspace.workspace,
+              muted: Palette.of(context).textMuted,
+            )
+          : null,
       details: details,
       controls: controls,
       pinned: pinned,
@@ -1422,7 +1471,15 @@ class _PaneState extends State<Pane> {
               Expanded(child: widget.child),
             ],
           )
-        : PaneChrome(header: header, reloads: _reloads, child: widget.child);
+        : PaneChrome(
+            header: header,
+            reloads: _reloads,
+            // Expanded, its header names the app over the whole window:
+            // an app's view goes without its own "From" line.
+            child: widget.expanded && node.leaf.kind == appKind
+                ? ChromeNamesApp(child: widget.child)
+                : widget.child,
+          );
     final target = DragTarget<PaneDrag>(
       onWillAcceptWithDetails: (details) =>
           details.data.agentId == agent.id && details.data.paneId != node.id,
@@ -1475,18 +1532,52 @@ class _PaneState extends State<Pane> {
 /// A pane's kind for an app's view (ViewLeaf.app_id, view and params).
 const appKind = 'app';
 
-/// An app's view as Claktory's chrome names it: the app's name first,
-/// always, then the view's title ("Charts · Days"), since the title is the
-/// app's own words and could pass itself off as Claktory's (Fugo's rule);
-/// "This app" for an app [workspace] doesn't have (or none was given). A
-/// view titled as its app is named once ("Charts", not "Charts · Charts").
+/// An app's view as Claktory's chrome names it: the app's name and "app",
+/// which no page of Claktory's own says ("Calendar app"), then the view's
+/// title ("Charts app · Right now"), the app's own words and so never
+/// first; "This app" for an app [workspace] doesn't have (or none was
+/// given). A view titled as its app is named once ("Charts app").
 String appViewTitle(ViewLeaf leaf, Workspace? workspace) {
+  final (:name, :title) = _appViewNames(leaf, workspace);
+  return title.isEmpty ? '$name app' : '$name app · $title';
+}
+
+/// [appViewTitle] for a header, "app" in [muted].
+TextSpan appViewTitleSpan(
+  ViewLeaf leaf,
+  Workspace? workspace, {
+  required Color muted,
+}) {
+  final (:name, :title) = _appViewNames(leaf, workspace);
+  return TextSpan(
+    children: [
+      TextSpan(text: name),
+      TextSpan(
+        text: ' app',
+        style: TextStyle(color: muted),
+      ),
+      if (title.isNotEmpty) TextSpan(text: ' · $title'),
+    ],
+  );
+}
+
+/// The app's name as Claktory holds it ("This" for an unknown one) and the
+/// view's title, both one line with what would hide or reorder them shown
+/// by its code.
+({String name, String title}) _appViewNames(
+  ViewLeaf leaf,
+  Workspace? workspace,
+) {
+  String line(String text) => visibleCodes(
+    text.replaceAll(RegExp('[\r\n\t\u0085\u2028\u2029]+'), ' ').trim(),
+  );
   final app = workspace == null ? null : _appOf(workspace, leaf.appId);
-  final name = app == null || app.name.isEmpty ? 'This app' : app.name;
-  final title = leaf.title.trim();
-  return title.isEmpty || title.toLowerCase() == name.toLowerCase()
-      ? name
-      : '$name · $title';
+  final name = app == null || app.name.trim().isEmpty ? 'This' : line(app.name);
+  final title = line(leaf.title);
+  final same =
+      title.toLowerCase() == name.toLowerCase() ||
+      title.toLowerCase() == '${name.toLowerCase()} app';
+  return (name: name, title: same ? '' : title);
 }
 
 /// An app's view in a pane: [AppView], over the backend, framed with the
@@ -1507,17 +1598,43 @@ class AppPane extends StatelessWidget {
         // The pane's header (or a phone's page header), as a viewer has
         // one; its title names the app ([appViewTitle]).
         return PaneScaffold(
-          body: AppView(
-            transport: backend,
-            appId: leaf.appId,
-            appName: name ?? '',
-            view: leaf.view,
-            params: leaf.params,
+          // Where its entries open (a calendar's).
+          body: OpenPlace(
+            gone: (target) => whyGone(backend, target),
+            open: openTarget,
+            child: _KeepsHeader(
+              keep: ChromeNamesApp.of(context),
+              child: AppView(
+                transport: backend,
+                appId: leaf.appId,
+                appName: name ?? '',
+                view: leaf.view,
+                params: leaf.params,
+              ),
+            ),
           ),
         );
       },
     );
   }
+}
+
+/// Under a header that names the app, its view's scrolling stops here: a
+/// phone's page header, which slides away as a document is read down,
+/// stays over the app's view, since only it says whose view this is.
+class _KeepsHeader extends StatelessWidget {
+  const _KeepsHeader({required this.keep, required this.child});
+
+  final bool keep;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => keep
+      ? NotificationListener<ScrollUpdateNotification>(
+          onNotification: (_) => true,
+          child: child,
+        )
+      : child;
 }
 
 AppInfo? _appOf(Workspace workspace, String id) {
@@ -1548,11 +1665,22 @@ class _AppGlyph extends StatelessWidget {
             child: Center(child: Dot(color: color)),
           );
         }
-        return ExtensionGlyph(
-          icon: app.icon,
-          name: app.name,
-          color: color,
-          size: 14,
+        // In its tile, as the dock shows it: never bare, so it can't pass
+        // for one of Claktory's own glyphs.
+        return Container(
+          width: 14,
+          height: 14,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(3),
+            border: Border.all(color: Palette.of(context).hairline),
+          ),
+          child: ExtensionGlyph(
+            icon: app.icon,
+            name: app.name,
+            color: color,
+            size: 10,
+          ),
         );
       },
     );
@@ -1565,6 +1693,7 @@ String paneTitle(ViewLeaf leaf, [Workspace? workspace]) {
   if (leaf.kind == chatKind) return 'Conversation';
   if (leaf.kind == filesKind) return 'Files';
   if (leaf.kind == appKind) return appViewTitle(leaf, workspace);
+  if (leaf.kind == browserKind) return 'Browser';
   return switch (pageOfKind(leaf.kind)) {
     AppPage.settings => 'Settings',
     AppPage.marketplace => 'Marketplace',
@@ -1582,6 +1711,14 @@ Widget paneGlyph(Agent agent, ViewLeaf leaf, Color color) {
   if (leaf.kind == chatKind) return AgentCharacter(agent: agent, size: 14);
   if (leaf.kind == filesKind) return FolderGlyph(color: color);
   if (leaf.kind == appKind) return _AppGlyph(appId: leaf.appId, color: color);
+  if (leaf.kind == browserKind) {
+    return ExtensionGlyph(
+      icon: 'monitor',
+      name: 'Browser',
+      color: color,
+      size: 14,
+    );
+  }
   return switch (pageOfKind(leaf.kind)) {
     AppPage.settings => SizedBox.square(
       dimension: 14,
@@ -1634,6 +1771,7 @@ class PaneHeader extends StatelessWidget {
     required this.drag,
     required this.glyph,
     required this.title,
+    this.titleSpan,
     this.details = '',
     this.controls = const [],
     this.pinned = const [],
@@ -1646,6 +1784,9 @@ class PaneHeader extends StatelessWidget {
   final PaneDrag drag;
   final Widget Function(Color color) glyph;
   final String title;
+
+  /// [title] drawn in parts (an app's, "app" muted), when it has them.
+  final InlineSpan? titleSpan;
   final String details;
   final List<Widget> controls;
 
@@ -1699,8 +1840,8 @@ class PaneHeader extends StatelessWidget {
               children: [
                 ConstrainedBox(
                   constraints: BoxConstraints(maxWidth: constraints.maxWidth),
-                  child: Text(
-                    title,
+                  child: Text.rich(
+                    titleSpan ?? TextSpan(text: title),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: titleStyle,

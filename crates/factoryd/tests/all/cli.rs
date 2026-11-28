@@ -68,42 +68,53 @@ async fn an_api_key_comes_on_stdin_and_a_wrong_one_is_refused() {
     let (addr, _factory) = start_with(&dir, Scripted::signed_out()).await;
     let argv = cli(&dir, addr, "provider key scripted --json", "").await;
     assert_eq!((argv.exit, argv.json["error"].as_str()), (Exit::Refused, Some("usage")), "only with --stdin");
-    let wrong = cli(&dir, addr, "provider key scripted --stdin --json", "sk-wrong\n").await;
-    assert_eq!((wrong.exit, wrong.json["error"].as_str()), (Exit::Refused, Some("sign_in_failed")), "{wrong:?}");
+    // Signing in to a model provider is the person's: an agent's command
+    // is refused, and nothing is signed in.
     let added = cli(&dir, addr, "provider key scripted --stdin --json", "sk-good\n").await;
-    assert_eq!(ok(&added)["provider"], "scripted");
+    assert_eq!((added.exit, added.json["error"].as_str()), (Exit::Refused, Some("person_only")), "{added:?}");
     let status = cli(&dir, addr, "status --json", "").await;
-    assert_eq!(ok(&status)["providers"][0]["signed_in"], true);
+    assert_eq!(ok(&status)["providers"][0]["signed_in"], false);
     // The key is nowhere in what was printed.
     assert!(!added.json.to_string().contains("sk-good") && !added.text.contains("sk-good"));
 }
 
+/// The person makes a pairing code in the app, as the person: the code and
+/// the new device's id.
+async fn person_pairs(addr: std::net::SocketAddr, name: &str) -> (String, String) {
+    use factory_protocol::v1::{self, client_message::Body as Request, server_message::Body};
+    let (mut person, _, _) = crate::common::Client::connect(addr).await;
+    let made = person.request(Request::CreatePairing(v1::CreatePairing { name: name.into(), host: String::new() })).await;
+    match made.body {
+        Body::PairingCode(made) => (made.code, made.device_id),
+        other => panic!("a code, got {other:?}"),
+    }
+}
+
 #[tokio::test]
-async fn devices_are_paired_without_waiting_and_allowed_once_they_ask() {
+async fn devices_are_listed_and_only_the_person_pairs_allows_or_removes_them() {
     let dir = temp_dir();
     let (addr, factory) = start(&dir).await;
     factory.set_tunnel_online_wait(Duration::from_millis(100));
-    let pair = cli(&dir, addr, r#"pair "Matt's iPhone" --no-wait --json"#, "").await;
-    let json = ok(&pair).clone();
-    assert!(json["code"].as_str().is_some_and(|code| code.starts_with("factory://")), "{json}");
-    assert_eq!((json["device_id"].as_str(), json["expires_in"].as_u64()), (Some("matt-s-iphone"), Some(600)), "{json}");
-    // The shape agents read (#245): the same state as devices says.
-    assert_eq!(keys(&json), ["code", "device_id", "expires_in", "ok", "state"]);
-    assert_eq!(json["state"], "code_unused");
+    // Seeing a code is the person's: pair asks their devices, and
+    // the command never holds the code.
+    let pair = cli(&dir, addr, r#"pair "Matt's iPhone" --json"#, "").await;
+    assert_eq!(ok(&pair)["device_id"], "matt-s-iphone", "{pair:?}");
+    assert!(!pair.json.to_string().contains("factory://") && !pair.text.contains("factory://"), "{pair:?}");
     let devices = cli(&dir, addr, "devices --json", "").await;
     assert_eq!(ok(&devices)["devices"][0]["state"], "code_unused");
     assert_eq!(keys(&devices.json["devices"][0]), ["connected", "expires_in", "id", "last_seen_ms", "name", "state"]);
     // A code nobody used yet isn't a paired device (Abbacchio, a fresh Linux install).
     let status = cli(&dir, addr, "status", "").await;
     assert!(status.text.ends_with(", 0 devices."), "{}", status.text);
-    // Not yet: the device has to use its code first.
-    let early = cli(&dir, addr, r#"allow "matt's iphone" --json"#, "").await;
-    assert_eq!((early.exit, early.json["error"].as_str()), (Exit::NeedsHuman, Some("not_waiting")), "{early:?}");
+    // Allowing is the person's, on their devices: the command says where.
+    let allow = cli(&dir, addr, r#"allow "matt's iphone" --json"#, "").await;
+    assert_eq!((allow.exit, allow.json["error"].as_str()), (Exit::Refused, Some("person_only")), "{allow:?}");
+    assert!(allow.text.contains("Settings → Devices"), "{allow:?}");
     let nobody = cli(&dir, addr, "allow d-404 --json", "").await;
     assert_eq!((nobody.exit, nobody.json["error"].as_str()), (Exit::Refused, Some("not_found")));
     let gone = cli(&dir, addr, "unpair matt-s-iphone --json", "").await;
-    assert_eq!(ok(&gone)["unpaired"], "matt-s-iphone");
-    assert_eq!(ok(&cli(&dir, addr, "devices --json", "").await)["devices"], Value::Array(Vec::new()));
+    assert_eq!((gone.exit, gone.json["error"].as_str()), (Exit::Refused, Some("person_only")), "{gone:?}");
+    assert_eq!(ok(&cli(&dir, addr, "devices --json", "").await)["devices"][0]["id"], "matt-s-iphone", "still there");
 }
 
 #[tokio::test]
@@ -134,21 +145,21 @@ async fn another_users_claktory_says_so() {
 }
 
 /// Arjun's #191 test: a server has no screen, and its first device stayed
-/// "First device". A code made without a name takes the device's own, and
-/// the agent allows it in one step with the digits the person reads.
+/// "First device". A code made without a name takes the device's own;
+/// agents' commands list it waiting, never with its digits, and can't
+/// allow it: only the person can, with the digits it shows.
 #[tokio::test]
-async fn a_device_paired_without_a_name_gives_its_own_and_is_allowed_by_its_digits() {
+async fn a_device_paired_without_a_name_gives_its_own_and_only_the_person_allows_it() {
+    use crate::common::{Client, View, apply_request};
     use crate::remote::{dial, hello_as, new_device, next, number, open, parse};
-    use factory_protocol::v1::server_message::Body;
+    use factory_protocol::v1::{self, client_message::Body as Request, server_message::Body};
     let dir = temp_dir();
     let (addr, factory) = start(&dir).await;
     factory.set_tunnel_online_wait(Duration::from_millis(100));
-    let pair = cli(&dir, addr, "pair --no-wait --json", "").await;
-    let made = ok(&pair).clone();
-    let id = made["device_id"].as_str().expect("an id").to_owned();
+    let (code, id) = person_pairs(addr, "").await;
     assert_eq!(ok(&cli(&dir, addr, "devices --json", "").await)["devices"][0]["name"], "New device");
 
-    let code = parse(made["code"].as_str().expect("a code"));
+    let code = parse(&code);
     let device = new_device().await;
     let connection = dial(&device, &code, &code.addresses).await.expect("a code is waiting: let in");
     let mut socket = open(&connection).await;
@@ -165,108 +176,188 @@ async fn a_device_paired_without_a_name_gives_its_own_and_is_allowed_by_its_digi
     let status = cli(&dir, addr, "status", "").await;
     assert!(status.text.ends_with(", 0 devices, 1 waiting to be allowed."), "{}", status.text);
 
-    // Other digits: it may be someone else's device, so nothing is allowed.
-    let other = if shows == "0000" { "0001" } else { "0000" };
-    // Without --json too, the flag first or after the device (Arjun's finding).
-    let wrong = cli(&dir, addr, &format!("allow --number {other} {id}"), "").await;
-    assert_eq!((wrong.exit, wrong.json["error"].as_str()), (Exit::Refused, Some("wrong_number")), "{wrong:?}");
-    assert_eq!(wrong.text, "That's not the number Matt's MacBook shows. 2 tries left.");
-    // Without the number, nothing is allowed, and the digits aren't said.
+    // An agent's command can't allow it, with the right digits or without,
+    // and says no digits.
     let bare = cli(&dir, addr, &format!("allow {id}"), "").await;
-    assert_eq!((bare.exit, bare.json["error"].as_str()), (Exit::Refused, Some("needs_number")), "{bare:?}");
-    assert_eq!(
-        bare.text,
-        format!(
-            "A device calling itself \"Matt's MacBook\" is waiting. Allow it only if its screen shows the number you type: in a terminal on this computer, run factoryd allow {id} and type the 4 digits on its screen. Over SSH, connect with ssh -t, or it isn't a terminal."
-        )
-    );
+    assert_eq!((bare.exit, bare.json["error"].as_str()), (Exit::Refused, Some("person_only")), "{bare:?}");
     assert!(!bare.text.contains(&shows) && !bare.json.to_string().contains(&format!("\"{shows}\"")));
-    // devices says the same, never the digits (Abbacchio's row 705, Fugo).
     let listed = cli(&dir, addr, "devices --no-wait", "").await;
-    assert_eq!(listed.text, format!("{id}  {}", bare.text));
+    assert_eq!(listed.text, format!("{id}  {}", factoryd::cli::waiting_sentence(&id, "Matt's MacBook")));
     assert!(!listed.text.contains(&shows) && !listed.json.to_string().contains(&format!("\"{shows}\"")));
     let allowed = cli(&dir, addr, &format!(r#"allow "Matt's MacBook" --number {shows} --json"#), "").await;
-    assert_eq!((ok(&allowed)["allowed"].as_str(), allowed.json.get("number")), (Some(id.as_str()), None));
+    assert_eq!((allowed.exit, allowed.json["error"].as_str()), (Exit::Refused, Some("person_only")), "{allowed:?}");
+    let status = cli(&dir, addr, "status", "").await;
+    assert!(status.text.ends_with(", 0 devices, 1 waiting to be allowed."), "{}", status.text);
+
+    // The person allows it, with the digits it shows.
+    let (mut person, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    let allow = v1::ApproveDevice { device_id: id.clone(), number: shows, ..Default::default() };
+    assert!(matches!(apply_request(&mut person, &mut view, Request::ApproveDevice(allow)).await, Body::Ack(_)));
     assert!(matches!(next(&mut socket).await, Some(Body::Welcome(_))));
     let status = cli(&dir, addr, "status", "").await;
     assert!(status.text.ends_with(", 1 device."), "{}", status.text);
 
-    // Fugo's rule (#245): once a device is in, a program lets no other in,
-    // with its digits or without; a person at a terminal still can.
-    let second = ok(&cli(&dir, addr, "pair --no-wait --json", "").await).clone();
-    let second_id = second["device_id"].as_str().expect("an id").to_owned();
-    let code = parse(second["code"].as_str().expect("a code"));
+    // Nor the next one: a device that's in allows new ones.
+    let (code, second_id) = person_pairs(addr, "").await;
+    let code = parse(&code);
     let phone = new_device().await;
     let connection = dial(&phone, &code, &code.addresses).await.expect("let in");
     let mut socket = open(&connection).await;
     assert!(matches!(hello_as(&mut socket, &code.token, "iPad").await, Body::PairingPending(_)));
     let shows = number(&code, &phone.id().to_string());
-    for line in [
-        format!("allow {second_id} --number {shows} --json"),
-        format!("allow {second_id} --json"),
-        format!("allow {second_id} --number {shows}"),
-        format!("allow {second_id} --number {shows} --no-wait"),
-    ] {
+    for line in [format!("allow {second_id} --number {shows} --json"), format!("allow {second_id} --json")] {
         let refused = cli(&dir, addr, &line, "").await;
-        assert_eq!((refused.exit, refused.json["error"].as_str()), (Exit::Refused, Some("has_devices")), "{line}: {refused:?}");
-        assert_eq!(refused.text, factoryd::cli::HAS_DEVICES);
+        assert_eq!((refused.exit, refused.json["error"].as_str()), (Exit::Refused, Some("person_only")), "{line}: {refused:?}");
     }
-    // At a terminal too, --no-wait or --json is a program's (Fugo 35297).
-    for line in [format!("allow {second_id} --number {shows} --no-wait"), format!("allow {second_id} --number {shows} --json")] {
-        let mut flags = Flags::parse(&shell_words(&line)).expect("ours");
-        flags.interactive = true;
-        let refused = run(&Instance { home: home(&dir), addr }, &flags, String::new).await;
-        assert_eq!(refused.json["error"].as_str(), Some("has_devices"), "{line}: {refused:?}");
-    }
-    let waiting = ok(&cli(&dir, addr, "devices --json", "").await).clone();
-    assert!(
-        waiting["devices"]
-            .as_array()
-            .expect("devices")
-            .iter()
-            .any(|device| device["id"] == second_id.as_str() && device["state"] == "waiting")
-    );
-    // A person at a terminal (ssh -t) who leaves the digits out is asked
-    // for them (Matt's case, Fugo 35297): the backend still checks them.
-    let at_terminal = |typed: &str| {
-        let mut flags = Flags::parse(&shell_words(&format!("allow {second_id}"))).expect("ours");
-        flags.interactive = true;
-        flags.typed = Some(typed.to_owned());
-        flags
-    };
-    let other = if shows == "0000" { "0001" } else { "0000" };
-    let wrong = run(&Instance { home: home(&dir), addr }, &at_terminal(other), String::new).await;
-    assert_eq!((wrong.exit, wrong.json["error"].as_str()), (Exit::Refused, Some("wrong_number")), "{wrong:?}");
-    assert_eq!(wrong.text, "That's not the number iPad shows. 2 tries left.");
-    let allowed = run(&Instance { home: home(&dir), addr }, &at_terminal(&shows), String::new).await;
-    assert_eq!(ok(&allowed)["allowed"].as_str(), Some(second_id.as_str()));
-    assert!(matches!(next(&mut socket).await, Some(Body::Welcome(_))));
 }
 
-/// Arjun's installer runs plain `factoryd pair` in a terminal: without a
-/// name it makes a "New device" code, which the device names (#73).
-#[tokio::test]
-async fn factoryd_pair_without_a_name_makes_a_code_the_device_names() {
-    // With a terminal it would wait there for the device.
-    if std::fs::OpenOptions::new().read(true).open("/dev/tty").is_ok() {
-        return;
-    }
-    let dir = temp_dir();
-    let (_addr, _factory) = start(&dir).await;
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_factoryd"))
-        .arg("pair")
-        .env("FACTORY_HOME", dir.join("home"))
+/// `factoryd` itself, against the Claktory in `dir`.
+fn factoryd(dir: &Path, addr: std::net::SocketAddr, args: &[&str]) -> std::process::Output {
+    std::process::Command::new(env!("CARGO_BIN_EXE_factoryd"))
+        .args(args)
+        .env("HOME", dir)
+        .env("FACTORY_HOME", home(dir).root())
+        .env("FACTORY_PORT", addr.port().to_string())
         .stdin(std::process::Stdio::null())
         .output()
-        .expect("factoryd pair");
-    let printed = String::from_utf8_lossy(&output.stdout);
-    assert!(output.status.success(), "{printed}{}", String::from_utf8_lossy(&output.stderr));
-    assert!(printed.contains("factory://?t="), "{printed}");
-    // No terminal (Matt's ssh without -t): how to be asked for the digits.
-    assert!(printed.contains("run factoryd allow") && printed.contains("connect with ssh -t"), "{printed}");
+        .expect("factoryd")
+}
+
+/// `factoryd pair` asks the person's devices and prints no code:
+/// the device waits for its code as Add a device makes it, and its card is
+/// in the admin agent's conversation, marked as the command line's, where
+/// the person's app gets the code. Without a name the device names itself;
+/// the same name again is the same device, and only 3 wait at once.
+#[tokio::test]
+async fn factoryd_pair_asks_the_persons_devices_and_prints_no_code() {
+    use crate::common::{Client, View, apply_request};
+    use factory_protocol::v1::{self, client_message::Body as Request, entry::Kind, server_message::Body};
+    let dir = temp_dir();
+    let (addr, factory) = start(&dir).await;
+    factory.set_tunnel_online_wait(Duration::from_millis(100));
+    let output = tokio::task::spawn_blocking({
+        let dir = dir.clone();
+        move || factoryd(&dir, addr, &["pair"])
+    })
+    .await
+    .expect("ran");
+    let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    assert!(output.status.success(), "{printed}");
+    assert!(!printed.contains("factory://") && printed.contains("Needs you"), "{printed}");
     let devices = factoryd::remote::devices(&home(&dir)).expect("devices");
     let made = devices.iter().find(|device| !device.local).expect("a device");
     assert_eq!((made.name.as_str(), made.unnamed), ("New device", true));
+    let again = cli(&dir, addr, "pair --json", "").await;
+    assert_eq!(ok(&again)["device_id"].as_str(), Some(made.id.as_str()), "the same one");
+
+    let (mut person, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    apply_request(&mut person, &mut view, Request::SelectAgent(v1::SelectAgent { agent_id: "rivet".into() })).await;
+    let card = view
+        .entries
+        .iter()
+        .find_map(|entry| match &entry.kind {
+            Some(Kind::DevicePairing(pairing)) => Some(pairing.clone()),
+            _ => None,
+        })
+        .expect("its card in Rivet's conversation");
+    assert!(card.from_command_line && card.agent_id == "rivet" && card.device_id == made.id, "{card:?}");
+    let shown = person.request(Request::ShowPairingCode(v1::ShowPairingCode { pairing_id: card.id.clone() })).await;
+    assert!(matches!(&shown.body, Body::PairingCode(code) if code.code.starts_with("factory://")), "{:?}", shown.body);
+
+    for name in ["Phone", "Tablet"] {
+        ok(&cli(&dir, addr, &format!("pair {name} --json"), "").await);
+    }
+    let more = cli(&dir, addr, "pair Laptop --json", "").await;
+    assert_eq!(more.exit, Exit::Refused, "{more:?}");
+    let waiting = factoryd::remote::devices(&home(&dir)).expect("devices").into_iter().filter(|device| !device.local).count();
+    assert_eq!(waiting, 3);
+}
+
+/// A pairing card that's the first entry of Rivet's conversation is at seq
+/// 0: the Workspace says it waits, and every entry of its waiting_versions
+/// carries its key on the wire, since an app reading a keyless one drops
+/// the whole Workspace.
+#[tokio::test]
+async fn a_card_at_seq_0_reaches_the_app_with_no_keyless_version() {
+    use crate::common::{Client, View};
+    use prost::Message;
+    #[derive(Clone, PartialEq, prost::Message)]
+    struct WireEntry {
+        #[prost(uint64, optional, tag = "1")]
+        key: Option<u64>,
+        #[prost(uint64, optional, tag = "2")]
+        value: Option<u64>,
+    }
+    #[derive(Clone, PartialEq, prost::Message)]
+    struct WireAgent {
+        #[prost(message, repeated, tag = "55")]
+        waiting_versions: Vec<WireEntry>,
+    }
+
+    let dir = temp_dir();
+    let (addr, _factory) = start(&dir).await;
+    ok(&cli(&dir, addr, "pair Phone --no-wait --json", "").await);
+    let (mut person, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    view.follow(&mut person, |view| !view.agent("rivet").waiting_seqs.is_empty()).await;
+    let rivet = view.agent("rivet");
+    assert_eq!(rivet.waiting_seqs, [0], "the card is the conversation's first entry");
+    let wire = WireAgent::decode(rivet.encode_to_vec().as_slice()).expect("an Agent");
+    assert!(wire.waiting_versions.iter().all(|entry| entry.key.is_some() && entry.value.is_some()), "{wire:?}");
+}
+
+/// With no admin agent to show the card, `factoryd pair` asks nothing: it
+/// says to add the device in Settings → Devices, and no device waits.
+#[tokio::test]
+async fn factoryd_pair_with_no_admin_agent_makes_nothing() {
+    use crate::common::{Client, View, apply_request};
+    use factory_protocol::v1::{self, client_message::Body as Request};
+    let dir = temp_dir();
+    let (addr, factory) = start(&dir).await;
+    factory.set_tunnel_online_wait(Duration::from_millis(100));
+    let (mut person, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    let off = v1::ExtensionChange { id: "agents".into(), enabled: Some(false), ..Default::default() };
+    let update = v1::UpdateAgent { agent_id: "rivet".into(), extension: Some(off), ..Default::default() };
+    apply_request(&mut person, &mut view, Request::UpdateAgent(update)).await;
+    let pair = cli(&dir, addr, "pair Phone --json", "").await;
+    assert_eq!(pair.exit, Exit::Refused, "{pair:?}");
+    assert!(pair.text.contains("Settings → Devices → Add a device"), "{pair:?}");
+    assert!(factoryd::remote::devices(&home(&dir)).unwrap_or_default().iter().all(|device| device.local));
+}
+
+/// `factoryd pair --show-code` prints the first device's code only on a
+/// new install: never once a device is allowed, the Claktory has been
+/// signed in or an agent has run.
+#[test]
+fn the_installers_code_is_only_for_a_new_install() {
+    use factoryd::remote::Device;
+    let dir = temp_dir();
+    let home = home(&dir);
+    std::fs::create_dir_all(home.root()).expect("home");
+    assert_eq!(factoryd::remote::first_code_refused(&home), None, "a new install");
+
+    let account = home.root().join("account");
+    std::fs::create_dir_all(&account).expect("account");
+    std::fs::write(account.join("account.json"), r#"{"step":"asked"}"#).expect("account.json");
+    assert_eq!(factoryd::remote::first_code_refused(&home), None, "asked to sign in, never signed in");
+    std::fs::write(account.join("account.json"), r#"{"signed_in_ms":5}"#).expect("account.json");
+    assert!(factoryd::remote::first_code_refused(&home).is_some(), "signed in once");
+    std::fs::remove_file(account.join("account.json")).expect("rm");
+
+    let db = rusqlite::Connection::open(home.db_path()).expect("db");
+    db.execute_batch("CREATE TABLE runs (id INTEGER);").expect("runs");
+    assert_eq!(factoryd::remote::first_code_refused(&home), None, "no agent ran");
+    db.execute("INSERT INTO runs VALUES (1)", []).expect("a run");
+    assert!(factoryd::remote::first_code_refused(&home).is_some(), "an agent ran");
+    db.execute("DELETE FROM runs", []).expect("none");
+
+    let allowed = Device { id: "phone".to_owned(), name: "Phone".to_owned(), endpoint_id: "ab".repeat(32), ..Device::default() };
+    std::fs::create_dir_all(home.root().join("remote")).expect("remote");
+    std::fs::write(home.root().join("remote/devices.json"), serde_json::to_vec(&[allowed]).expect("json")).expect("devices");
+    assert!(factoryd::remote::first_code_refused(&home).is_some(), "a device is in");
 }
 
 /// `factoryd devices` in a terminal, from the devices file: a waiting

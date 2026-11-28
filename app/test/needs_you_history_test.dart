@@ -1,15 +1,19 @@
-// Needs you's History (Matt's ask): what the person already answered,
+// Needs you's History: what the person already answered,
 // approved, declined or dismissed in the last 30 days, newest first, found
 // by agent or words, each opening the conversation at its card.
+import 'dart:convert';
+
 import 'package:factory_app/forms.dart' show AgentSettingsForm;
 import 'package:factory_app/controls.dart' show ExtensionGlyph;
 import 'package:factory_app/inbox.dart';
+import 'package:factory_app/pane_chrome.dart' show PaneChrome;
 import 'package:factory_app/pipes.dart' show PortalGlyph;
 import 'package:factory_app/needs_you_history.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart';
 import 'package:factory_app/taint_label.dart';
 import 'package:fixnum/fixnum.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -154,7 +158,7 @@ void main() {
         outcome: NeedsYouOutcome.NEEDS_YOU_OUTCOME_DENIED,
         ago: const Duration(days: 4),
       ),
-      // A comment sent back with Submit (#370).
+      // A comment sent back with Submit.
       _record(
         'june',
         'Ship the migration tonight?',
@@ -199,8 +203,8 @@ void main() {
     expect(find.text('Nothing is waiting for your answer.'), findsOneWidget);
   });
 
-  // Zucchero's row 708: the backend counts a yes answered; only a written
-  // answer has words. Secco's 1f050cdff: an Execute card as its card says.
+  // The backend counts a yes answered; only a written
+  // answer has words. An Execute card reads as its card says.
   testWidgets('a yes reads Approved; an Execute card its heading, its '
       'command and how it ran', (tester) async {
     await _openHistory(tester, [
@@ -231,7 +235,7 @@ void main() {
     );
   });
 
-  // Abbacchio's row 1645 (Ghiaccio's d43343d6d): an errand's cards in
+  // An errand's cards in
   // History read as their cards ended, under Claktory's heading, never
   // "Answered" or the page's words.
   testWidgets("an errand's cards read as their cards ended", (tester) async {
@@ -1265,6 +1269,82 @@ void _historyKinds() {
       find.text('June: “Deploys the Android app to Play”'),
       findsOneWidget,
     );
+  });
+
+  NeedsYouRecord sealed() =>
+      _record(
+          'june',
+          'June sealed passline.md',
+          kind: NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_SEALED,
+          outcome: NeedsYouOutcome.NEEDS_YOU_OUTCOME_CHANGED,
+          seq: 40,
+        )
+        ..agentReason = 'The pass line as agreed with Fred'
+        ..sealedPath = '/Users/me/factory/passline.md';
+
+  testWidgets("a file an agent sealed: Claktory's sentence, the note in the "
+      'agent\'s words, and a click opens the file beside its conversation', (
+    tester,
+  ) async {
+    final harness = await _openHistory(tester, [sealed()]);
+    expect(find.text('June sealed passline.md'), findsOneWidget);
+    expect(
+      find.text('June: “The pass line as agreed with Fred”'),
+      findsOneWidget,
+    );
+    expect(find.text('Undo'), findsNothing);
+    expect(find.bySemanticsLabel(RegExp('June sealed')), findsOneWidget);
+    expect(
+      tester.getSemantics(find.bySemanticsLabel(RegExp('June sealed'))).hint,
+      'Open file',
+    );
+    await tester.tap(find.text('June sealed passline.md'));
+    await settle(tester);
+    expect(
+      harness.backend.sent.lastWhere((m) => m.hasSelectAgent()).selectAgent,
+      SelectAgent(agentId: 'june'),
+    );
+    final layout = harness.backend.sent.lastWhere((m) => m.hasSetLayout());
+    expect(layout.setLayout.agentId, 'june');
+    expect(
+      layout.setLayout.root.toString(),
+      contains('/Users/me/factory/passline.md'),
+    );
+    expect(harness.backend.reveal.value, isNull);
+  });
+
+  testWidgets('a sealed file on a phone: a click pushes its viewer', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final records = [sealed()];
+    final harness = Harness(_workspace()..selectedAgentId = 'june')
+      ..backend.needsYouHistory = records
+      ..backend.appliesLayouts = true;
+    harness.backend.files['/Users/me/factory/passline.md'] = FileContent(
+      path: '/Users/me/factory/passline.md',
+      mime: 'text/markdown',
+      data: utf8.encode('The pass line.'),
+      size: Int64(14),
+    );
+    await harness.show(tester, size: const Size(393, 852));
+    await settle(tester);
+    harness.page.value = AppPage.inbox;
+    await pumpFrames(tester);
+    await tester.tap(find.text('History'));
+    await settle(tester);
+    await settle(tester);
+    await tester.tap(find.text('June sealed passline.md'));
+    // Frames, and the file's fetch.
+    for (var i = 0; i < 4; i++) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 50)),
+      );
+      await pumpFrames(tester);
+    }
+    expect(find.byType(PaneChrome), findsOneWidget);
+    expect(find.text('The pass line.', findRichText: true), findsOneWidget);
   });
 
   testWidgets('a protected place dismissed, then let in: says so (item 12)', (

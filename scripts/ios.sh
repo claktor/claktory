@@ -26,6 +26,7 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$root/scripts/xcode-shim/use.sh"
 dev=false
 run=false
 target=""

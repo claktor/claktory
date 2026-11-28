@@ -1,10 +1,11 @@
 //! `POST /v1/reports/ai` (Report this reply): a reported reply is kept 30
 //! days with nothing of who sent it; unsigned ones are limited by address,
 //! signed ones by their Claktory's key, and all together by a ceiling a
-//! day; anything but a clean report is refused.
+//! day; anything but a clean report is refused. Claktory's team reads them
+//! on the server with `claktory-account ai-reports`, which only reads.
 
 use claktory_account::protocol::*;
-use claktory_account::server::db;
+use claktory_account::server::{self, db};
 use serde_json::json;
 
 use crate::support::*;
@@ -156,4 +157,68 @@ async fn only_a_clean_report_is_kept() {
         AiReport { text: "\"\n".repeat(AI_REPORT_TEXT_MAX / 2), ..report(&format!("{}a", "a\n".repeat(AI_REPORT_NOTE_MAX / 2 - 1))) };
     let answer = instance.post(AI_REPORT_PATH, &code, ip).await;
     assert_eq!(answer.status, 200, "16 KB of quotes and line breaks, twice that in JSON: {}", answer.text());
+}
+
+#[tokio::test]
+async fn the_team_reads_kept_reports_a_page_at_a_time_and_a_report_cant_act_on_their_terminal() {
+    let instance = start().await;
+    let hostile = AiReport {
+        text: "fine\n#9 2026-01-01 00:00 UTC · Fake · v0 · nowhere\n\u{1b}]0;owned\u{7}\u{1b}[2J\u{9b}31m \u{202E}desrever\r".into(),
+        ..report("Look\tclosely.")
+    };
+    for sent in [report("First."), hostile, report("")] {
+        assert_eq!(instance.post(AI_REPORT_PATH, &sent, "198.51.124.1").await.status, 200);
+    }
+    let conn = rusqlite::Connection::open(&instance.db).expect("the database");
+
+    let (page, more) = server::reports::kept(&conn, START, 0, 2).expect("kept");
+    assert_eq!(page.iter().map(|kept| kept.id).collect::<Vec<_>>(), [1, 2]);
+    assert!(more);
+    assert_eq!((page[0].note.as_str(), page[0].model.as_str(), page[0].received), ("First.", "Claude Opus 4.5", START - START.rem_euclid(3600)));
+    let (rest, more) = server::reports::kept(&conn, START, 2, 2).expect("kept");
+    assert_eq!((rest.iter().map(|kept| kept.id).collect::<Vec<_>>(), more), (vec![3], false));
+    assert_eq!(server::reports::text(&page, true).lines().last(), Some("More follow: --after 2"));
+
+    let shown = server::reports::text(&page[1..], false);
+    assert!(!shown.chars().any(|character| character != '\n' && character != '\t' && character.is_control()), "{shown:?}");
+    assert!(!shown.contains('\u{202E}'), "{shown:?}");
+    assert!(shown.contains("\\u{001B}]0;owned\\u{0007}\\u{001B}[2J\\u{009B}31m \\u{202E}desrever\\u{000D}"), "{shown}");
+    assert!(shown.starts_with("#2 "), "{shown}");
+    assert!(shown.lines().skip(1).all(|line| line.is_empty() || line.starts_with("  │ ") || line.ends_with(':')), "{shown}");
+    assert!(shown.contains("  │ #9 2026-01-01"), "a reply's line can't pass for a report's heading: {shown}");
+
+    // Past its 30 days, it's no longer kept, purged yet or not.
+    let past = START - START.rem_euclid(3600) + 30 * 86_400 + 1;
+    assert_eq!(server::reports::kept(&conn, past, 0, 50).expect("kept"), (vec![], false));
+}
+
+#[test]
+fn ai_reports_only_reads_the_database() {
+    let dir = tempfile::tempdir().expect("a folder");
+    let path = dir.path().join("account.db");
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("now").as_secs() as i64;
+    {
+        let conn = db::open(&path).expect("the database");
+        for note in ["One.", "Two."] {
+            db::add_ai_report(&conn, &report(note), now).expect("kept");
+        }
+    }
+    let before = std::fs::read(&path).expect("the file");
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_claktory-account"))
+            .arg("ai-reports")
+            .arg("--db")
+            .arg(&path)
+            .args(args)
+            .output()
+            .expect("ran");
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).expect("utf-8")
+    };
+    let answer: serde_json::Value = serde_json::from_str(&run(&["--format", "json", "--most", "1"])).expect("json");
+    assert_eq!(answer["reports"].as_array().map(Vec::len), Some(1));
+    assert_eq!((answer["reports"][0]["note"].as_str(), answer["next_after"].as_i64()), (Some("One."), Some(1)));
+    let text = run(&["--after", "1"]);
+    assert!(text.starts_with("#2 ") && text.contains("  │ Two.") && !text.contains("More follow"), "{text}");
+    assert_eq!(std::fs::read(&path).expect("the file"), before, "nothing written");
 }

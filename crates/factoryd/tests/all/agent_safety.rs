@@ -29,31 +29,34 @@ use tokio_tungstenite::tungstenite::Message as Frame;
 
 const WAIT: Duration = Duration::from_secs(60);
 
-// A's interface (Giorno 42047, 42182; Fugo 42067, 42185). Until A lands
-// these stand in for it; when it does, each becomes what its comment says.
+// A's interface.
 
-/// ERROR_CODE_PERSON_ONLY. A: `ErrorCode::PersonOnly as i32`.
-const PERSON_ONLY: i32 = 18;
+/// ERROR_CODE_PERSON_ONLY.
+const PERSON_ONLY: i32 = ErrorCode::PersonOnly as i32;
 
 /// The gate: whether a Tool connection may send `body`; everything else is
-/// refused with PERSON_ONLY. A: `factoryd::authority::tool_allowed(body)`.
+/// refused with PERSON_ONLY. Checked against TOOL_ALLOWED and
+/// SETTINGS_ALLOWED below, so a change to the gate shows here.
 fn tool_allowed(body: &client_message::Body) -> bool {
-    match body {
+    let allowed = factoryd::authority::tool_allowed(body);
+    let listed = match body {
         client_message::Body::UpdateSettings(update) => settings_allowed(update),
         _ => TOOL_ALLOWED.contains(&name(body).as_str()),
-    }
+    };
+    assert_eq!(allowed, listed, "the gate and this test's allowlist disagree on {}", name(body));
+    allowed
 }
 
-/// Where the Mac app's socket is. A: `factoryd::authority::app_socket_path(&factory)`.
-fn app_socket(dir: &Path) -> PathBuf {
-    home(dir).root().join("app.sock")
+/// Where the Mac app's socket is.
+fn app_socket(factory: &factoryd::Factory) -> PathBuf {
+    factoryd::authority::app_socket_path(factory)
 }
 
 /// What a Tool connection may send (the allowlist, Fugo 42185, Giorno
 /// 42182): Hello, the settings `factoryd settings set` changes, Add a device
 /// without a code (B's RequestAddDevice) and calling off a move. Nothing
 /// goes on it without a reason sent to Fugo first.
-const TOOL_ALLOWED: &[&str] = &["Hello", "UpdateSettings", "RequestAddDevice", "CancelMove"];
+const TOOL_ALLOWED: &[&str] = &["Hello", "UpdateSettings", "RequestAddDevice", "CancelMove", "AccountAuthorize"];
 
 /// The fields of UpdateSettings a Tool connection may set: what `factoryd
 /// settings set` takes (Giorno 42182). Any other is refused.
@@ -105,6 +108,9 @@ const NEVER_FOR_TOOLS: &[&str] = &[
     "RevealSecret",
     "ShowRecoveryKey",
     "NewRecoveryKey",
+    // A recovery-codes card's codes: the person's alone.
+    "ShowRecoveryCodes",
+    "KeepRecoveryCodes",
     "SetSecretCard",
     "SetSecretSites",
     "SetSecretAskEachTime",
@@ -119,6 +125,10 @@ const NEVER_FOR_TOOLS: &[&str] = &[
     "DmEnrollLeaf",
     "BrowserCapability",
     "BrowserGrant",
+    // Watching an agent's browser tab, and clicking or typing in it.
+    "WatchAgentTab",
+    "AgentTabFrameAck",
+    "AgentTabInput",
     "RegisterNotifications",
     // Not in the protocol yet (Fugo 42660): D's switch, and the account key's removal.
     "SetCommandContainment",
@@ -134,7 +144,6 @@ const NOT_YET: &[&str] = &[
     "SetSecretSites",
     "RequestAddDevice",
     "SetCommandContainment",
-    "UnpairAccountKey",
 ];
 
 /// Requests that act on the process itself: only the gate's answer for them
@@ -174,6 +183,9 @@ struct Agent {
     socket: WebSocketStream<TcpStream>,
     next_id: u64,
     device_id: String,
+    /// The name and color its Welcome gave.
+    name: String,
+    color: String,
     workspace: v1::Workspace,
     /// Every Workspace it was given, patches applied, in order.
     seen: Vec<v1::Workspace>,
@@ -204,6 +216,8 @@ impl Agent {
             socket,
             next_id: 2,
             device_id: welcome.device_id,
+            name: welcome.name,
+            color: welcome.color,
             workspace: Default::default(),
             seen: Vec::new(),
             replies: Vec::new(),
@@ -310,7 +324,6 @@ fn pending(view: &View) -> Vec<v1::PendingDevice> {
 /// INVALID_REQUEST or NOT_FOUND. NEVER_FOR_TOOLS stays off the allowlist
 /// whatever it becomes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "#546 A"]
 async fn a_tool_connection_is_refused_everything_off_its_allowlist() {
     let dir = temp_dir();
     let (addr, _factory) = start(&dir).await;
@@ -353,7 +366,6 @@ async fn a_tool_connection_is_refused_everything_off_its_allowlist() {
 /// factory.proto, so a new one is refused unless it's added to
 /// SETTINGS_ALLOWED.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "#546 A"]
 async fn a_tool_connection_changes_only_the_settings_the_cli_sets() {
     let dir = temp_dir();
     let (addr, _factory) = start(&dir).await;
@@ -399,7 +411,6 @@ async fn a_tool_connection_changes_only_the_settings_the_cli_sets() {
 /// still waits. The person's connection then allows it with the same digits,
 /// so the refusal wasn't for anything else.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "#546 A"]
 async fn a_tool_connection_cant_allow_a_waiting_device_even_with_its_digits() {
     let dir = temp_dir();
     let (addr, factory) = start(&dir).await;
@@ -411,7 +422,8 @@ async fn a_tool_connection_cant_allow_a_waiting_device_even_with_its_digits() {
     view.follow(&mut client, |view| pending(view).len() == 1).await;
     let right = crate::remote::number(&code, &device.id().to_string());
 
-    let allow = client_message::Body::ApproveDevice(v1::ApproveDevice { device_id: id.clone(), number: right.clone(), ..Default::default() });
+    let allow =
+        client_message::Body::ApproveDevice(v1::ApproveDevice { device_id: id.clone(), number: right.clone(), ..Default::default() });
     let deny = client_message::Body::DenyDevice(v1::DenyDevice { device_id: id.clone() });
     for request in [allow.clone(), deny] {
         let answer = agent.request(request).await;
@@ -432,7 +444,6 @@ async fn a_tool_connection_cant_allow_a_waiting_device_even_with_its_digits() {
 /// connection is refused, and no reply to it ever carries a code; nor does
 /// CreatePairing hand it one (G2).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "#546 A"]
 async fn a_tool_connection_never_gets_a_pairing_code() {
     let dir = temp_dir();
     let (addr, factory) = start(&dir).await;
@@ -511,7 +522,6 @@ fn digits_and_codes(seen: &[v1::Workspace]) -> Vec<String> {
 /// person's own app included (Fugo 42045 (a)), and a tool connection's
 /// Workspaces carry no code, whether it takes whole Workspaces or patches.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "#546 A"]
 async fn no_connection_is_sent_a_waiting_devices_digits() {
     let dir = temp_dir();
     let (addr, factory) = start(&dir).await;
@@ -538,7 +548,6 @@ async fn no_connection_is_sent_a_waiting_devices_digits() {
 /// shows its digits to compare; a tool connection's Workspaces carry none,
 /// whole or patched.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "#546 A"]
 async fn a_tool_connection_is_never_sent_a_pipes_digits() {
     let (dir_a, dir_b) = (temp_dir(), temp_dir());
     let (addr_a, a) = start(&dir_a).await;
@@ -588,7 +597,6 @@ async fn a_tool_connection_is_never_sent_a_pipes_digits() {
 /// Path 14, G1 (A): a move at CONFIRM: the person's app shows its digits; a
 /// tool connection's Workspaces carry none.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "#546 A"]
 async fn a_tool_connection_is_never_sent_a_moves_digits() {
     let source = temp_dir();
     let (addr, _factory) = start(&source).await;
@@ -674,7 +682,6 @@ fn files_under(dir: &Path, out: &mut Vec<PathBuf>) {
 /// tried as Hello.token, and any it welcomes must be refused ApproveDevice
 /// as a Tool connection is. Today remote/local-pairing's does.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "#546 A"]
 async fn no_file_under_home_opens_a_persons_connection() {
     let dir = temp_dir();
     let (addr, factory) = start(&dir).await;
@@ -720,11 +727,10 @@ async fn no_file_under_home_opens_a_persons_connection() {
 /// user's connection, refused too, is Abbacchio's to try in a sandbox.)
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "#546 A"]
 async fn the_app_socket_turns_away_a_binary_that_isnt_claktorys_app() {
     let dir = temp_dir();
-    let (_addr, _factory) = start(&dir).await;
-    let path = app_socket(&dir);
+    let (_addr, factory) = start(&dir).await;
+    let path = app_socket(&factory);
     let stream = match tokio::net::UnixStream::connect(&path).await {
         Ok(stream) => stream,
         // No local person authority at all on Linux (agents-and-pairing.md, A).
@@ -744,12 +750,14 @@ async fn the_app_socket_turns_away_a_binary_that_isnt_claktorys_app() {
     }
 }
 
-/// A6 (A): the loopback port turns away, before Welcome, a Hello with no
-/// token, a wrong one, and the person token a Claktory before A left in
-/// remote/local-pairing; that file is gone once A has started.
+/// A6 (A): the loopback port turns away, before Welcome, a Hello with a
+/// wrong token and the person token a Claktory before A left in
+/// remote/local-pairing; that file is gone once A has started. A Hello with
+/// no token at all (an app from before A, its pairing code gone) is welcomed
+/// only to read Claktory's version, so it says it's too old, and refused
+/// everything else.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "#546 A"]
-async fn the_loopback_port_turns_away_no_token_a_wrong_one_and_the_old_person_token() {
+async fn the_loopback_port_welcomes_an_old_app_only_to_its_version_and_turns_away_wrong_tokens() {
     use sha2::Digest as _;
     let dir = temp_dir();
     // What a Claktory before A left: this Mac's app's pairing code and its
@@ -762,9 +770,32 @@ async fn the_loopback_port_turns_away_no_token_a_wrong_one_and_the_old_person_to
     std::fs::write(remote.join("devices.json"), local.to_string()).expect("devices.json");
     std::fs::write(remote.join("local-pairing"), format!("factory://?t={old}&name=Old%20Mac\n")).expect("local-pairing");
 
-    let (addr, _factory) = start(&dir).await;
+    let (addr, factory) = start(&dir).await;
     assert!(!remote.join("local-pairing").exists(), "remote/local-pairing is still there");
-    for (case, token) in [("no token", String::new()), ("a wrong token", "a".repeat(64)), ("the old person token", old)] {
+    // As the old app asks: with patches.
+    let mut outdated = Agent::hello(addr, "", true).await.expect("an old app hears the version");
+    assert_eq!(outdated.device_id, "", "no device");
+    assert_eq!((outdated.name.as_str(), outdated.color.as_str()), ("", ""), "not even this Claktory's name");
+    assert_eq!(outdated.workspace, v1::Workspace { version: factoryd::update::VERSION.to_owned(), ..v1::Workspace::default() });
+    for probe in [
+        client_message::Body::ApproveDevice(v1::ApproveDevice::default()),
+        client_message::Body::UpdateSettings(v1::UpdateSettings { name: Some("Mine".into()), ..Default::default() }),
+        client_message::Body::CancelMove(v1::CancelMove::default()),
+    ] {
+        let answer = outdated.request(probe).await;
+        assert!(matches!(&answer, Body::Error(error) if error.code() == ErrorCode::Unauthorized), "{answer:?}");
+    }
+    assert_eq!(outdated.seen.len(), 1, "nothing more of the Workspace");
+    // The state moves on: a device waits and the name changes. The old app
+    // is sent none of it.
+    let (mut client, mut view) = person(addr, &factory).await;
+    let (_code, _id, _device, _link, _waiting) = crate::remote::waiting_device(&mut client, &mut view, "Phone").await;
+    let rename = client_message::Body::UpdateSettings(v1::UpdateSettings { name: Some("Renamed".into()), ..Default::default() });
+    assert!(matches!(apply_request(&mut client, &mut view, rename).await, Body::Ack(_)));
+    let answer = outdated.request(client_message::Body::CancelMove(v1::CancelMove::default())).await;
+    assert!(matches!(&answer, Body::Error(error) if error.code() == ErrorCode::Unauthorized), "{answer:?}");
+    assert_eq!(outdated.seen.len(), 1, "the old app is sent no more of the Workspace");
+    for (case, token) in [("a wrong token", "a".repeat(64)), ("the old person token", old)] {
         match Agent::hello(addr, &token, false).await {
             Err(Some(Body::Error(error))) if error.code() == ErrorCode::Unauthorized => {}
             Err(other) => panic!("{case}: expected UNAUTHORIZED before Welcome, got {other:?}"),
@@ -868,7 +899,6 @@ async fn run(dir: &Path, addr: SocketAddr, args: &[&str], terminal: bool) -> std
 /// Add a device card on the person's devices. Its JSON line has the
 /// device's id and when it ends, and no code or link.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "#546 B"]
 async fn factoryd_pair_prints_no_code() {
     let dir = temp_dir();
     let (addr, factory) = start(&dir).await;
@@ -899,7 +929,6 @@ async fn factoryd_pair_prints_no_code() {
 /// its own: exit 4 "not_running", nothing printed shaped like a code, and
 /// devices.json untouched (the offline path is gone).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "#546 B"]
 async fn factoryd_pair_with_no_claktory_running_makes_no_code() {
     let dir = temp_dir();
     let remote = home(&dir).root().join("remote");
@@ -922,7 +951,6 @@ async fn factoryd_pair_with_no_claktory_running_makes_no_code() {
 /// digits or not: exit 3 "person_only", the waiting device still waits and
 /// the paired one stays. `devices` still lists them, without the digits.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "#546 B"]
 async fn factoryd_device_commands_from_an_agent_change_nothing() {
     let dir = temp_dir();
     let (addr, factory) = start(&dir).await;
@@ -978,7 +1006,6 @@ async fn factoryd_device_commands_from_an_agent_change_nothing() {
 /// Path 5 (B): with no Claktory running, `deny` and `unpair` write nothing
 /// themselves: exit 4 "not_running", devices.json as it was.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "#546 B"]
 async fn factoryd_device_commands_with_no_claktory_running_write_nothing() {
     use sha2::Digest as _;
     let dir = temp_dir();
@@ -1016,7 +1043,7 @@ async fn receiving() -> (factoryd::move_wire::ReceiveCode, tokio::task::JoinHand
     };
     let task = tokio::spawn(async move {
         let _keep = target;
-        let options = Options { committed: false, local_only: true };
+        let options = Options { committed: false, local_only: true, ..Options::default() };
         let nowhere = SocketAddr::from(([127, 0, 0, 1], 1));
         let _ = factoryd::move_import::receive::receive(&there, nowhere, &options, &ui).await;
     });
@@ -1029,7 +1056,6 @@ async fn receiving() -> (factoryd::move_wire::ReceiveCode, tokio::task::JoinHand
 /// are refused, and so is `factoryd move <code>` run as an agent; no move
 /// starts (server-authorize.md, Moves 2).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "#546 moves"]
 async fn a_tool_connection_cant_start_or_confirm_a_move() {
     let dir = temp_dir();
     let (addr, _factory) = start(&dir).await;
@@ -1233,15 +1259,21 @@ const SHAPED: &[(&str, How)] = &[
     ("PairingCode.code", How::Reply(&["CreatePairing", "ShowPairingCode"])),
     ("PairingCode.link", How::Reply(&["CreatePairing", "ShowPairingCode"])),
     ("PipeInvite.code", How::Reply(&["CreatePipeInvite"])),
+    ("DeviceVouched.code", How::Reply(&["VouchDevice"])),
     ("RecoveryKey.key", How::Reply(&["ShowRecoveryKey", "NewRecoveryKey"])),
+    ("RecoveryCodes.codes", How::Reply(&["ShowRecoveryCodes"])),
+    ("AgentBrowserAccount.secret_id", How::Not("the id of the secret a browser account fills from, never its value")),
+    ("AgentBrowserAccount.secret_name", How::Not("the name of the secret a browser account fills from, never its value")),
     ("SecretEntry.value", How::Reply(&["RevealSecret"])),
     ("ConnectStarted.url", How::Reply(&["StartConnect"])),
     ("ConnectStarted.user_code", How::Reply(&["StartConnect"])),
     ("PipeShareOpened.url", How::Reply(&["OpenPipeShare"])),
     ("PipeShareOpened.fallback_url", How::Reply(&["OpenPipeShare"])),
     ("PendingDevice.number", How::Stripped),
+    ("ReportTypeRules.routing_tokens", How::Not("words that make a report field id read as routing; no secret")),
     ("Pipe.digits", How::Stripped),
     ("Move.digits", How::Stripped),
+    ("Move.approval_key", How::Not("the public account key of the device that approved a move")),
     ("LoginFlow.user_code", How::Stripped),
     ("PipeInvitePreview.code", How::Not("the code the client itself sent ReadPipeInvite, given back")),
     ("LoginFlow.url", How::Not("the provider's sign-in page")),
@@ -1254,6 +1286,10 @@ const SHAPED: &[(&str, How)] = &[
     ("MapBadge.key", How::Not("a map badge's id")),
     ("AppInfo.publisher_key", How::Not("an app publisher's public key")),
     ("AppPermissions.publisher_key", How::Not("an app publisher's public key")),
+    ("Arranged.token", How::Reply(&["ArrangeAgent"])),
+    ("ErrandHandoff.url", How::Not("the page a payment request opens, the agent's own page")),
+    ("NeedsYouRecord.codes_kept_as", How::Not("the name of the secret recovery codes were kept as, never the codes")),
+    ("SecretRequest.lookalike_secret_name", How::Not("the name of a login for another site, for the card's warning")),
     ("ClaktoryAccount.code_from", How::Not("the address the emailed code comes from")),
     ("Transcription.error_code", How::Not("why a recording wasn't transcribed, in a word")),
     ("PipeReport.refused_code", How::Not("why a report was refused, in a word")),
@@ -1273,6 +1309,9 @@ const SHAPED: &[(&str, How)] = &[
     ("ConnectChoices.secret_id", How::Not("a secret's id")),
     ("SecretUse.secret_id", How::Not("a secret's id")),
     ("SecretUse.secret_name", How::Not("a secret's name")),
+    ("NeedsYouRecord.secret_given_name", How::Not("a secret's name")),
+    ("VaultState.recovery_key_made_on", How::Not("the name of the Claktory that made the account's recovery key")),
+    ("VaultState.recovery_key_change_made_on", How::Not("the name of the Claktory that made a new account recovery key")),
 ];
 
 /// Whether a field's name is shaped like a code, a key, digits, a token or
@@ -1281,7 +1320,7 @@ fn shaped(field: &str) -> bool {
     const WORDS: &[&str] =
         &["code", "token", "digits", "number", "link", "secret", "passphrase", "key", "password", "pairing", "url", "value", "values"];
     let name = field.rsplit('.').next().unwrap_or(field);
-    name.split('_').any(|word| WORDS.contains(&word))
+    name.split('_').any(|word| WORDS.contains(&word) || word.strip_suffix('s').is_some_and(|one| WORDS.contains(&one)))
 }
 
 /// The structural sweep (Fugo 42141), the second check beside A1: every
@@ -1291,7 +1330,6 @@ fn shaped(field: &str) -> bool {
 /// a Tool connection's Workspace is one `digits_and_codes` looks for. A new
 /// field, or a classified one gone, fails it.
 #[test]
-#[ignore = "#546 A"]
 fn every_code_shaped_field_an_agent_could_be_sent_is_accounted_for() {
     let proto = proto();
     let mut found = std::collections::BTreeSet::new();
@@ -1846,7 +1884,7 @@ async fn an_agents_commands_cant_read_claktorys_keys() {
     )
     .await;
     assert!(linked.contains("LINK-DENIED"), "{linked}");
-    let socket = app_socket(&dir);
+    let socket = app_socket(&factory);
     let nc =
         ana_runs(&mut client, &mut view, &format!("printf x | nc -U -w 1 '{}' && echo SOCKET-OK || echo SOCKET-DENIED", socket.display()))
             .await;

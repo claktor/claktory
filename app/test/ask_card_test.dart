@@ -1,4 +1,4 @@
-// An agent's question card (#238): its words select and copy wherever it
+// An agent's question card: its words select and copy wherever it
 // shows, in a conversation and in Needs you, and a command in its body has
 // Copy beside it.
 import 'dart:io';
@@ -335,7 +335,7 @@ void main() {
     await harness.show(tester, size: const Size(320, 700));
     await settle(tester);
     // At this size the body is longer than 8 lines: its middle, the
-    // command, folds under Show all (Lucy's spec).
+    // command, folds under Show all.
     expect(find.text(_command), findsNothing);
     await tester.ensureVisible(find.text('Show all'));
     await tester.tap(find.text('Show all'));
@@ -499,7 +499,7 @@ void main() {
       final harness = await show(tester, procedure(done: 2));
       await tester.tap(find.text("Can't do this"));
       await settle(tester);
-      // Nothing sent: one state, the field asks (Lucy's §3.3).
+      // Nothing sent: one state, the field asks.
       expect(harness.backend.sent.where((m) => m.hasAnswerAsk()), isEmpty);
       expect(find.text('Done'), findsOneWidget);
       expect(find.text("What's in the way?"), findsOneWidget);
@@ -619,7 +619,7 @@ void main() {
       await harness.show(tester, size: const Size(393, 852));
       await settle(tester);
       // The steps' toggle has a finger's height, its words centred in it
-      // (Prosciutto: no gap under them).
+      // (no gap under them).
       final toggle = find.textContaining('1 step done', findRichText: true);
       final box = tester.getRect(
         find.ancestor(of: toggle, matching: find.byType(Pressable)).first,
@@ -1011,7 +1011,7 @@ void main() {
             ],
           ),
         );
-        // On a phone, as Zucchero found it: dragging the conversation puts
+        // On a phone, dragging the conversation puts
         // the keyboard away, so nothing focused keeps the card.
         debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
         addTearDown(() => debugDefaultTargetPlatformOverride = null);
@@ -1114,7 +1114,7 @@ void main() {
           _ask(),
           'After the release',
         );
-        // Typed: Submit, the words a reply (#370).
+        // Typed: Submit, the words a reply.
         await center(tester, find.text('Submit'));
         await tester.pump();
         await tester.tap(find.text('Submit'));

@@ -85,6 +85,20 @@ void _same(FileContent paced, FileContent one) {
 
 Pace _small() => Pace(least: 1000, most: 50000, first: 1000);
 
+/// A pace whose pieces are one size, and whose short ones another.
+class _Fixed extends Pace {
+  _Fixed() : super(least: 1000, first: 1000);
+
+  @override
+  int get next => 40000;
+
+  @override
+  int get quick => 5000;
+
+  @override
+  void took(int bytes, Duration elapsed) {}
+}
+
 void main() {
   test('the pace starts small, grows on a quick link, and keeps each '
       'piece to about its target on a slow one', () {
@@ -506,5 +520,45 @@ void main() {
       data: data,
     );
     expect(early, 9000);
+  });
+
+  test('while the person is doing something else, a big file\'s next '
+      'pieces are short ones, so what they asked for waits behind little '
+      'of it; then long again', () async {
+    final disk = _Disk(300000, 'application/pdf');
+    var busy = false;
+    disk.before = (read) => busy = read >= 2 && read < 5;
+    final paced = await pacedRead(
+      range: disk.read,
+      connected: ValueNotifier(true),
+      pace: _Fixed(),
+      hurry: () => busy,
+    );
+    _same(paced, disk.answer(0, 0, ''));
+    final asked = [for (final (_, size) in disk.asked) size];
+    expect(asked.take(6), [40000, 40000, 40000, 5000, 5000, 5000]);
+    expect(asked.skip(6), everyElement(lessThanOrEqualTo(40000)));
+    expect(asked[6], 40000);
+  });
+
+  test('a short piece is about 400 ms of the link, once its speed is '
+      'known; before, the first piece\'s size', () {
+    final pace = Pace();
+    expect(pace.quick, 64 * 1024);
+    // 100 ms away, 1 MB a second.
+    pace
+      ..took(65536, const Duration(microseconds: 165536))
+      ..took(262144, const Duration(microseconds: 362144));
+    for (var i = 0; i < 4; i++) {
+      pace.took(pace.next, Duration(microseconds: 100000 + pace.next));
+    }
+    expect(pace.next, greaterThan(1200000));
+    expect(pace.quick, inInclusiveRange(350000, 450000));
+    // Never more than a piece would be anyway.
+    final slow = Pace();
+    for (var i = 0; i < 8; i++) {
+      slow.took(slow.next, Duration(microseconds: slow.next * 1e6 ~/ 15000));
+    }
+    expect(slow.quick, slow.next);
   });
 }

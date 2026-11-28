@@ -398,7 +398,7 @@ async fn replace_all_rewrites_every_exact_occurrence() {
     tools.assert_lib(|| &expected);
 }
 
-/// Bruno 29528, 29755: bash's description names ripgrep and jq, each only
+/// Bash's description names ripgrep and jq, each only
 /// when it resolves on the PATH the agent's commands run with: telling
 /// agents to use a program they then can't run taught them to stop trying it.
 // Executable bits; on Windows the tools are Claktory's own, always there.

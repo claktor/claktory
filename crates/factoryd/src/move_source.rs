@@ -14,7 +14,7 @@
 //!   failure before the commit starts Claktory again, as it was.
 
 use std::collections::{BTreeSet, HashMap};
-use std::io::{self, IsTerminal, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
@@ -26,7 +26,7 @@ use tokio::sync::mpsc;
 
 use crate::encoding::{hex, unhex};
 use crate::home::Home;
-use crate::move_export::{self, ItemKind, Moved, Options, Place, Tree, size_text};
+use crate::move_export::{self, ItemKind, Options, Place, Tree, size_text};
 use crate::move_wire::{self, Entry, Frame, Kind, ReceiveCode};
 
 /// How long dialing the target may take (less in tests, where it's on
@@ -97,6 +97,13 @@ pub(crate) fn unanswered(machine: &str, problem: Problem) -> Problem {
 /// `<home>/moving`: the move's own key, its staging and (later) its state.
 pub(crate) fn moving_dir(home: &Home) -> PathBuf {
     home.root().join("moving")
+}
+
+/// The endpoint id this Claktory's move dials from (its key, made now if
+/// there's none yet): what it names taking a move with the account, the
+/// only one the other computer lets in.
+pub(crate) fn endpoint_id(home: &Home) -> Result<String, String> {
+    key(home).map(|key| key.public().to_string())
 }
 
 /// The move's key, made the first time: one source for the whole move.
@@ -506,7 +513,9 @@ impl Link {
     }
 
     /// This side's person confirmed the digits: says so, and waits for the
-    /// target's person.
+    /// target's person. The tests' whole move (`drive`); the app's waits on
+    /// its own (`move_run`).
+    #[cfg(test)]
     pub(crate) async fn confirm(&mut self) -> Result<(), Problem> {
         self.send_confirmed().await?;
         self.target_confirmed().await
@@ -821,77 +830,32 @@ pub(crate) async fn prepare(place: &Place, options: &Options, export_id: &str) -
     .map_err(|error| error.to_string())?
 }
 
-// ---- `factoryd move CODE` ----
+// ---- `factoryd move` ----
 
-const USAGE: &str = "usage: factoryd move CODE [--skip FOLDER]…";
+/// What `factoryd move` says: only the person starts a move, in the app.
+const PERSONS: &str = "Only you can start a move: open Claktory on this computer or a device connected to it, and choose Move to another computer… (Settings → General).";
 
-/// Asks a yes or no question on the terminal.
-fn ask(question: &str) -> bool {
-    print!("{question} [y/N] ");
-    let _ = io::stdout().flush();
-    let mut line = String::new();
-    io::stdin().read_line(&mut line).is_ok() && matches!(line.trim().to_lowercase().as_str(), "y" | "yes")
-}
-
-/// `factoryd [--dev] move CODE …`.
-pub fn main(dev: bool, args: &[String]) -> ExitCode {
-    let mut options = Options::default();
-    let mut code = None;
-    let mut args = args.iter();
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--skip" => match args.next() {
-                Some(folder) => options.skip.push(PathBuf::from(folder)),
-                None => return usage(),
-            },
-            flag if flag.starts_with('-') => return usage(),
-            text if code.is_none() => code = Some(text.to_owned()),
-            _ => return usage(),
-        }
+/// `factoryd [--dev] move …`: refused, whatever it's given
+/// (server-authorize.md, Moves 2). A move hands over everything, and a
+/// terminal can't tell the person from an agent's command, which can make
+/// itself one, so only the person starts a move, from Claktory's app. Exit
+/// 3 (`cli::Exit::Refused`); with --json, one line whose error is
+/// `person_only`, as the commands the tool token can't do say.
+pub fn main(_dev: bool, args: &[String]) -> ExitCode {
+    if args.iter().any(|arg| arg == "--json") {
+        println!("{}", serde_json::json!({"ok": false, "error": "person_only", "message": PERSONS}));
+    } else {
+        eprintln!("{PERSONS}");
     }
-    let Some(code) = code else { return usage() };
-    let Some(code) = ReceiveCode::parse(&code) else {
-        eprintln!("That isn't a receive code. Run factoryd receive on the other computer, and copy the code it shows.");
-        return ExitCode::from(2);
-    };
-    let Some(place) = Place::this_user(dev) else {
-        eprintln!("HOME isn't set.");
-        return ExitCode::from(2);
-    };
-    if !io::stdin().is_terminal() {
-        eprintln!("Run factoryd move in Terminal: it asks you to check six digits.");
-        return ExitCode::from(2);
-    }
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            eprintln!("{error}");
-            return ExitCode::from(3);
-        }
-    };
-    match runtime.block_on(drive(&place, &options, code, &mut Terminal)) {
-        Ok(text) => {
-            println!("{text}");
-            ExitCode::SUCCESS
-        }
-        Err(text) => {
-            eprintln!("{text}");
-            ExitCode::from(3)
-        }
-    }
-}
-
-fn usage() -> ExitCode {
-    eprintln!("{USAGE}");
-    ExitCode::from(2)
+    ExitCode::from(3)
 }
 
 /// What drives a move talks to: the person, wherever they are.
 pub(crate) trait Person: Send {
     /// Something to tell them.
     fn say(&mut self, text: &str);
-    /// Whether they see `digits` on `machine`.
+    /// Whether they see `digits` on `machine`. The tests' whole move only.
+    #[cfg(test)]
     fn digits_match(&mut self, _machine: &str, _digits: &str) -> bool {
         false
     }
@@ -921,21 +885,10 @@ pub(crate) trait Person: Send {
     fn redialed(&mut self, _machine: &str) {}
 }
 
-/// The person at this terminal.
-struct Terminal;
-
-impl Person for Terminal {
-    fn say(&mut self, text: &str) {
-        println!("{text}");
-    }
-
-    fn digits_match(&mut self, machine: &str, digits: &str) -> bool {
-        ask(&format!("Check that {machine} shows {digits}. Does it?"))
-    }
-}
-
 /// The whole move: pairing, pre-copy, the freeze, the last round, the
-/// commit. What happened, in a sentence, either way.
+/// commit. What happened, in a sentence, either way. The tests' (`factoryd
+/// move` drove it before #546; the app's is `move_run`).
+#[cfg(test)]
 pub(crate) async fn drive(place: &Place, options: &Options, code: ReceiveCode, person: &mut dyn Person) -> Result<String, String> {
     if !place.home.config_path().is_file() {
         return Err(format!("There's no Claktory at {}.", place.home.root().display()));
@@ -1027,13 +980,13 @@ pub(crate) async fn drive(place: &Place, options: &Options, code: ReceiveCode, p
         return Err(unfreeze(why));
     }
     // Fenced: from here the target is the Claktory, once it says done.
-    let moved = Moved {
+    let moved = move_export::Moved {
         export_id: export_id.clone(),
         epoch: copied.epoch,
         machine: crate::remote::machine_name().to_owned(),
         to: machine.clone(),
         to_os: link.target.os.clone(),
-        ..Moved::default()
+        ..move_export::Moved::default()
     };
     if let Err(refused) = move_export::tombstone(place, moved) {
         link.cancel(&refused.reason).await;

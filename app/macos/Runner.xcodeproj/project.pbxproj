@@ -38,10 +38,11 @@
 		C0EC71002B3C4D5E6F700041 /* Recorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0EC71002B3C4D5E6F700042 /* Recorder.swift */; };
 		C0EC71002B3C4D5E6F700043 /* AudioPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0EC71002B3C4D5E6F700044 /* AudioPlayer.swift */; };
 		4539F6FBE8B82CEEA47E226C /* ReplayWriter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 992F06E6E652D2ECCDDB6341 /* ReplayWriter.swift */; };
+		5A1E3C7F0B2D4E6F8A9C0D11 /* BackendPeer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B2F4D8A1C3E5F7A9B0D1E22 /* BackendPeer.swift */; };
+		7C3A5E9B2D4F6A8C0E1B2F33 /* OlderApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C3A5E9B2D4F6A8C0E1B2F44 /* OlderApp.swift */; };
 		C0EC71002B3C4D5E6F700053 /* NetworkPath.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0EC71002B3C4D5E6F700054 /* NetworkPath.swift */; };
 		C0EC71002B3C4D5E6F700091 /* SecretClipboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0EC71002B3C4D5E6F700092 /* SecretClipboard.swift */; };
 		C0EC71002B3C4D5E6F700093 /* DmKeys.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0EC71002B3C4D5E6F700094 /* DmKeys.swift */; };
-		C0EC71002B3C4D5E6F700061 /* SetupLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0EC71002B3C4D5E6F700062 /* SetupLink.swift */; };
 		C0EC71002B3C4D5E6F700071 /* Notifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0EC71002B3C4D5E6F700072 /* Notifications.swift */; };
 		B4A0B4A02B3C4D5E6F700001 /* BrowserBroker.swift in Sources */ = {isa = PBXBuildFile; fileRef = B4A0B4A02B3C4D5E6F700002 /* BrowserBroker.swift */; };
 		B4A0B4A02B3C4D5E6F700003 /* BrowserBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = B4A0B4A02B3C4D5E6F700004 /* BrowserBridge.swift */; };
@@ -102,10 +103,11 @@
 		C0EC71002B3C4D5E6F700042 /* Recorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Recorder.swift; sourceTree = "<group>"; };
 		C0EC71002B3C4D5E6F700044 /* AudioPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioPlayer.swift; sourceTree = "<group>"; };
 		992F06E6E652D2ECCDDB6341 /* ReplayWriter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReplayWriter.swift; sourceTree = "<group>"; };
+		6B2F4D8A1C3E5F7A9B0D1E22 /* BackendPeer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackendPeer.swift; sourceTree = "<group>"; };
+		7C3A5E9B2D4F6A8C0E1B2F44 /* OlderApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OlderApp.swift; sourceTree = "<group>"; };
 		C0EC71002B3C4D5E6F700054 /* NetworkPath.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkPath.swift; sourceTree = "<group>"; };
 		C0EC71002B3C4D5E6F700092 /* SecretClipboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecretClipboard.swift; sourceTree = "<group>"; };
 		C0EC71002B3C4D5E6F700094 /* DmKeys.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DmKeys.swift; sourceTree = "<group>"; };
-		C0EC71002B3C4D5E6F700062 /* SetupLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SetupLink.swift; sourceTree = "<group>"; };
 		C0EC71002B3C4D5E6F700072 /* Notifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Notifications.swift; sourceTree = "<group>"; };
 		B4A0B4A02B3C4D5E6F700002 /* BrowserBroker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserBroker.swift; sourceTree = "<group>"; };
 		B4A0B4A02B3C4D5E6F700004 /* BrowserBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserBridge.swift; sourceTree = "<group>"; };
@@ -219,10 +221,11 @@
 				C0EC71002B3C4D5E6F700042 /* Recorder.swift */,
 				C0EC71002B3C4D5E6F700044 /* AudioPlayer.swift */,
 				992F06E6E652D2ECCDDB6341 /* ReplayWriter.swift */,
+				6B2F4D8A1C3E5F7A9B0D1E22 /* BackendPeer.swift */,
+				7C3A5E9B2D4F6A8C0E1B2F44 /* OlderApp.swift */,
 				C0EC71002B3C4D5E6F700054 /* NetworkPath.swift */,
 				C0EC71002B3C4D5E6F700092 /* SecretClipboard.swift */,
 				C0EC71002B3C4D5E6F700094 /* DmKeys.swift */,
-				C0EC71002B3C4D5E6F700062 /* SetupLink.swift */,
 				C0EC71002B3C4D5E6F700072 /* Notifications.swift */,
 				B4A0B4A02B3C4D5E6F700002 /* BrowserBroker.swift */,
 				B4A0B4A02B3C4D5E6F700004 /* BrowserBridge.swift */,
@@ -426,10 +429,11 @@
 				C0EC71002B3C4D5E6F700041 /* Recorder.swift in Sources */,
 				C0EC71002B3C4D5E6F700043 /* AudioPlayer.swift in Sources */,
 				4539F6FBE8B82CEEA47E226C /* ReplayWriter.swift in Sources */,
+				5A1E3C7F0B2D4E6F8A9C0D11 /* BackendPeer.swift in Sources */,
+				7C3A5E9B2D4F6A8C0E1B2F33 /* OlderApp.swift in Sources */,
 				C0EC71002B3C4D5E6F700053 /* NetworkPath.swift in Sources */,
 				C0EC71002B3C4D5E6F700091 /* SecretClipboard.swift in Sources */,
 				C0EC71002B3C4D5E6F700093 /* DmKeys.swift in Sources */,
-				C0EC71002B3C4D5E6F700061 /* SetupLink.swift in Sources */,
 				C0EC71002B3C4D5E6F700071 /* Notifications.swift in Sources */,
 				B4A0B4A02B3C4D5E6F700001 /* BrowserBroker.swift in Sources */,
 				B4A0B4A02B3C4D5E6F700003 /* BrowserBridge.swift in Sources */,

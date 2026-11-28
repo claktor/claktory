@@ -11,7 +11,7 @@ import 'mobile/presentation.dart' show SheetAction, SheetOverlay, showActions;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 
-// Pinned agents (Lucy's ux/pinned-agents.md): agents from any project the
+// Pinned agents: agents from any project the
 // person keeps under Rivet in the sidebar, in their order. The pins are the
 // backend's (Settings.pinned_agents); the app only shows them and asks to
 // change them.
@@ -69,8 +69,7 @@ Future<void> togglePin(BuildContext context, Agent agent) =>
 
 /// [togglePin] for a menu that may outlive [context]: what it needs is
 /// taken now, so the agent deleted while its menu is open still sends the
-/// pin and says why it was refused, over the window if [context] has gone
-/// (Abbacchio's row 1734).
+/// pin and says why it was refused, over the window if [context] has gone.
 Future<void> Function() togglePinLater(BuildContext context, Agent agent) {
   final backend = AppScope.of(context);
   final origin = _Origin(context);
@@ -141,7 +140,7 @@ VoidCallback? movePin(BuildContext context, Agent agent, int by) {
 /// does (an iPad's ⌘-digit, the Mac's ⌘1 to ⌘9): at what waits for the
 /// person, if it's news.
 /// Why a pin was refused: the backend's own words, but an agent gone
-/// (its generic "no agent with id …") in the app's (Trish 49630).
+/// (its generic "no agent with id …") in the app's.
 String _why(RequestFailure failure, Agent agent) =>
     failure.message.startsWith('no agent with id')
     ? "${agent.name} isn't in this Claktory any more."
@@ -170,7 +169,7 @@ class _Origin {
 
   /// The window's own content, which lasts as long as the window: where
   /// it's said once the row and its list have gone (the agent deleted
-  /// while its menu was open, Abbacchio's row 1734).
+  /// while its menu was open).
   final BuildContext? window;
 
   /// The element just under the window's [SheetOverlay] on [row]'s way up.
@@ -379,8 +378,7 @@ class _PointerMenuRowState<T> extends State<_PointerMenuRow<T>> {
       button: true,
       selected: item.checked,
       label: item.label,
-      // Its own tap, as excluding drops the row's: VoiceOver's VO-Space
-      // (Abbacchio's row 1716).
+      // Its own tap, as excluding drops the row's: VoiceOver's VO-Space.
       onTap: _choose,
       excludeSemantics: true,
       child: FocusableActionDetector(
@@ -464,10 +462,16 @@ class _MenuLayout extends SingleChildLayoutDelegate {
 /// the same rows as [PointerMenuItem]s without the hairlines.
 List<SheetAction<T>> sheetActionsOf<T>(List<PointerMenuItem<T>?> items) => [
   for (final item in items)
-    if (item != null) SheetAction(item.label, item.value, glyph: item.glyph),
+    if (item != null)
+      SheetAction(
+        item.label,
+        item.value,
+        glyph: item.glyph,
+        checked: item.checked,
+      ),
 ];
 
-/// What archiving the project [projectId] does to the pins (Trish 46504):
+/// What archiving the project [projectId] does to the pins:
 /// "Bruno is unpinned.", "Bruno and June are unpinned.", up to three names
 /// and then "and 2 more"; empty when none of its agents is pinned.
 String unpinnedOnArchive(Workspace workspace, String projectId) {

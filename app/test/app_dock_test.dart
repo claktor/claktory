@@ -1,8 +1,14 @@
+import 'package:factory_app/agent_view.dart' show AgentView;
 import 'package:factory_app/app_dock.dart';
+import 'package:factory_app/app_views/app_view.dart'
+    show AppView, ChromeNamesApp;
 import 'package:factory_app/layout.dart' show chatKind, leaves;
+import 'package:factory_app/mobile/back.dart';
+import 'package:factory_app/open_place.dart';
 import 'package:factory_app/panes.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart';
+import 'package:factory_app/shell.dart' show Shell;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -87,6 +93,12 @@ Future<Harness> _show(
   return harness;
 }
 
+/// The app's view under a header of Claktory's that names the app.
+Finder _named() => find.ancestor(
+  of: find.byType(AppView),
+  matching: find.byType(ChromeNamesApp),
+);
+
 Finder _labeled(String label) => find.byWidgetPredicate(
   (w) => w is Semantics && w.properties.label == label,
 );
@@ -154,14 +166,14 @@ void main() {
         ViewLeaf(kind: appKind, appId: 'charts', title: 'Charts'),
         workspace,
       ),
-      'Charts',
+      'Charts app',
     );
     expect(
       appViewTitle(
         ViewLeaf(kind: appKind, appId: 'charts', title: 'Days'),
         workspace,
       ),
-      'Charts · Days',
+      'Charts app · Days',
     );
   });
 
@@ -183,8 +195,12 @@ void main() {
     // view's header with Collapse.
     expect(find.byType(ExpandedPane), findsOneWidget);
     expect(_labeled('Back to June'), findsOneWidget);
-    expect(_labeled('Collapse Charts'), findsOneWidget);
+    expect(_labeled('Collapse Charts app'), findsOneWidget);
     expect(find.byType(AppPane), findsOneWidget);
+    // The band and header name the app: the view goes without its own
+    // "From" line.
+    expect(_named(), findsOneWidget);
+    expect(find.text('Charts app'), findsWidgets);
     // June's layout isn't touched.
     expect(harness.backend.sent.where((m) => m.hasSetLayout()), isEmpty);
     // Esc goes back.
@@ -194,7 +210,7 @@ void main() {
     // So do Collapse and Back to June.
     await tester.tap(_labeled('Charts, Running'));
     await settle(tester);
-    await tester.tap(_labeled('Collapse Charts'));
+    await tester.tap(_labeled('Collapse Charts app'));
     await settle(tester);
     expect(find.byType(ExpandedPane), findsNothing);
     await tester.tap(_labeled('Charts, Running'));
@@ -209,6 +225,132 @@ void main() {
     );
   });
 
+  testWidgets('an app\'s view opens its entries\' places: the view filling '
+      'the window closes, and the place opens', (tester) async {
+    final harness = await _show(tester, _workspace());
+    await tester.tap(_labeled('Charts, Running'));
+    await settle(tester);
+    final place = tester.widget<OpenPlace>(find.byType(OpenPlace));
+    expect(
+      await place.gone(const OpenAgent('gone')),
+      'This agent was deleted.',
+    );
+    expect(await place.gone(const OpenAgent('june')), isNull);
+
+    place.open(
+      tester.element(find.byType(AppPane)),
+      const OpenMonitor('june', 2),
+    );
+    await settle(tester);
+    expect(find.byType(ExpandedPane), findsNothing);
+    expect(
+      harness.backend.sent.lastWhere((m) => m.hasSetLayout()).toString(),
+      contains('monitors'),
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets("on a phone, the page's header naming the app stays as its "
+      'view scrolls down', (tester) async {
+    final harness = Harness(_workspace());
+    await harness.show(tester, size: const Size(393, 852));
+    await pumpFrames(tester);
+    await tester.tap(find.bySemanticsLabel(RegExp(r'^(Menu|Back)$')).first);
+    await pumpFrames(tester, const Duration(seconds: 1));
+    await tester.ensureVisible(find.text('Charts').last);
+    await tester.tap(find.text('Charts').last);
+    await pumpFrames(tester, const Duration(seconds: 1));
+    final header = find.text('Charts app').hitTestable();
+    expect(header, findsOneWidget);
+    // As a dashboard read down a screen and more would say it.
+    final view = tester.element(find.byType(AppView));
+    for (var at = 100.0; at <= 1000; at += 100) {
+      ScrollUpdateNotification(
+        metrics: FixedScrollMetrics(
+          minScrollExtent: 0,
+          maxScrollExtent: 2000,
+          pixels: at,
+          viewportDimension: 700,
+          axisDirection: AxisDirection.down,
+          devicePixelRatio: 3,
+        ),
+        context: view,
+        scrollDelta: 100,
+        dragDetails: DragUpdateDetails(globalPosition: Offset.zero),
+      ).dispatch(view);
+      await tester.pump();
+    }
+    await pumpFrames(tester, const Duration(seconds: 1));
+    expect(header, findsOneWidget);
+  });
+
+  testWidgets("filling the window, an app's view hides the conversation "
+      'under it from VoiceOver; Esc brings it back', (tester) async {
+    final semantics = tester.ensureSemantics();
+    final harness = Harness(_workspace())..backend.appliesLayouts = true;
+    await harness.show(tester, size: const Size(1200, 800));
+    await settle(tester);
+    final covered = find.semantics.byLabel('More options for June');
+    expect(covered, findsOne);
+
+    openApp(tester.element(find.byType(AgentView)), _charts);
+    await settle(tester);
+    // Past its fade in, when it's read.
+    await tester.pump(const Duration(seconds: 1));
+    expect(find.byType(ExpandedPane), findsOneWidget);
+    expect(covered, findsNothing);
+    // The view's own controls are read.
+    expect(find.semantics.byLabel('Back to June'), findsOne);
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await settle(tester);
+    expect(find.byType(ExpandedPane), findsNothing);
+    expect(covered, findsOne);
+    semantics.dispose();
+  });
+
+  testWidgets("filling the window, an app's view takes the window's Back, "
+      'below a dialog over it; closed, it lets go', (tester) async {
+    final back = PhoneBack.root();
+    addTearDown(back.dispose);
+    final harness = Harness(_workspace())..backend.appliesLayouts = true;
+    await harness.show(
+      tester,
+      size: const Size(1200, 800),
+      home: PhoneBackScope(back: back, child: const Shell()),
+    );
+    await settle(tester);
+    expect(back.target, isNull);
+    final element = tester.element(find.byType(AgentView));
+
+    openApp(element, _charts);
+    await settle(tester);
+    // Another app in its place holds it once.
+    openApp(element, _notes);
+    await settle(tester);
+    expect(find.byType(ExpandedPane), findsOneWidget);
+    var dialog = 0;
+    final modal = back.register(CallbackBackToken(onBack: () => dialog++));
+    expect(back.commit(back.target!), isTrue);
+    expect(dialog, 1);
+    expect(find.byType(ExpandedPane), findsOneWidget);
+    modal.release();
+
+    expect(back.commit(back.target!), isTrue);
+    await settle(tester);
+    expect(find.byType(ExpandedPane), findsNothing);
+    expect(back.target, isNull);
+
+    // Closed by its own Back chip, it leaves the window's Back to the app.
+    openApp(element, _charts);
+    await settle(tester);
+    expect(back.target, isNotNull);
+    await tester.tap(_labeled('Back to June'));
+    await settle(tester);
+    expect(find.byType(ExpandedPane), findsNothing);
+    expect(back.target, isNull);
+  });
+
   testWidgets('another app opened meanwhile takes its place', (tester) async {
     await _show(tester, _workspace());
     final element = tester.element(_labeled('Charts, Running'));
@@ -220,7 +362,7 @@ void main() {
     openApp(element, _notes);
     await settle(tester);
     expect(find.byType(ExpandedPane), findsOneWidget);
-    expect(_labeled('Collapse Notes'), findsOneWidget);
+    expect(_labeled('Collapse Notes app'), findsOneWidget);
     await tester.tap(_labeled('Back to June'));
     await settle(tester);
     expect(find.byType(ExpandedPane), findsNothing);
@@ -329,6 +471,9 @@ void main() {
       await tester.tap(find.text('Charts').last);
       await pumpFrames(tester, const Duration(seconds: 1));
       expect(find.byType(AppPane), findsOneWidget);
+      // Its page's header names the app, so the view goes without.
+      expect(_named(), findsOneWidget);
+      expect(find.text('Charts app'), findsOneWidget);
       expect(harness.backend.sent.where((m) => m.hasSetLayout()), isEmpty);
       expect(
         harness.backend.workspace.workspace.agents.single.layout,

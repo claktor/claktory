@@ -557,9 +557,11 @@ class _Sections extends StatefulWidget {
 }
 
 /// When [top] and the headings alone are taller than the room (an iPad's
-/// largest text in a short window), the sections can't keep their
-/// headings in view: then they scroll as one list, all of it a scroll
-/// away, rather than spilling.
+/// largest text in a short window), or leave an open section less than
+/// three rows (an Android tablet on its side, a Mac window pulled short),
+/// the sections can't keep their headings in view and their rows too:
+/// then they scroll as one list, all of it a scroll away, rather than
+/// spilling or showing an open section with no room for its rows.
 class _SectionsState extends State<_Sections> {
   static const _inset = EdgeInsets.symmetric(horizontal: Space.s);
 
@@ -577,14 +579,13 @@ class _SectionsState extends State<_Sections> {
   /// What the sections measured while an agent was dragged, applied once
   /// it's let go: laid out again mid-drag (the dragged row's gap changing
   /// the top's height), the rows would be built anew and the drag lost
-  /// with its end, and the menu a hold opens (Gelato, an iPad at AX5).
+  /// with its end, and the menu a hold opens (an iPad at AX5).
   double? _heldTop;
   double? _heldNeeded;
 
   /// Rivet and the pins keep their rows (and a drag one of them holds)
   /// when the sections change how they're laid out: staying put, scrolling
-  /// with the projects, or one list (Gelato: a hold's drag lost, an iPad
-  /// at AX5).
+  /// with the projects, or one list (a hold's drag lost, an iPad at AX5).
   final _topKey = GlobalKey(debugLabel: 'sidebar top');
 
   @override
@@ -675,6 +676,10 @@ class _SectionsState extends State<_Sections> {
         ],
       );
     }
+    // An open list keeps room for three rows, or the sections become one
+    // list.
+    final least =
+        3 * MediaQuery.textScalerOf(context).scale(Metrics.of(context).target);
     Widget list(List<Widget> children, {double bottom = 0}) => ListView(
       shrinkWrap: true,
       padding: _inset.copyWith(bottom: bottom),
@@ -684,6 +689,8 @@ class _SectionsState extends State<_Sections> {
     // the projects, above their heading.
     if (_topScrolls && top != null) {
       return _FitColumn(
+        // Rivet and the pins above the projects leave the room for them.
+        least: _topHeight + Metrics.of(context).target + least,
         onOverflow: (needed) {
           if (!mounted || needed == _needed) return;
           if (sidebarDragging.value) {
@@ -719,6 +726,7 @@ class _SectionsState extends State<_Sections> {
       );
     }
     return _FitColumn(
+      least: least,
       onOverflow: (needed) {
         if (!mounted || needed == _needed) return;
         if (sidebarDragging.value) {
@@ -752,7 +760,7 @@ class _SectionsState extends State<_Sections> {
 
 /// Whether the top group (Rivet and the pins) stays put above the
 /// projects ([_Sections]): then folded rows don't count the pins again,
-/// since they're in sight (Lucy's pinned-agents.md, rule 3). Where it
+/// since they're in sight. Where it
 /// scrolls with the rest (always on a phone) they count them.
 class _PinsInSight extends InheritedWidget {
   const _PinsInSight({required this.stay, required super.child});
@@ -806,16 +814,24 @@ class _RenderSizeReport extends RenderProxyBox {
 /// took more than its height ([onOverflow], with what they took, once the
 /// frame is done), and clips them meanwhile rather than spilling.
 class _FitColumn extends Flex {
-  const _FitColumn({required this.onOverflow, super.children})
-    : super(
-        direction: Axis.vertical,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-      );
+  const _FitColumn({
+    required this.least,
+    required this.onOverflow,
+    super.children,
+  }) : super(
+         direction: Axis.vertical,
+         crossAxisAlignment: CrossAxisAlignment.stretch,
+       );
+
+  /// What a flexible child needs to be of use (a few rows of a list):
+  /// left less while it takes all it's given, it counts as not fitting.
+  final double least;
 
   final ValueChanged<double> onOverflow;
 
   @override
   RenderFlex createRenderObject(BuildContext context) => _RenderFitColumn(
+    least,
     onOverflow: onOverflow,
     textDirection: getEffectiveTextDirection(context),
   );
@@ -823,16 +839,25 @@ class _FitColumn extends Flex {
   @override
   void updateRenderObject(BuildContext context, RenderFlex renderObject) {
     super.updateRenderObject(context, renderObject);
-    (renderObject as _RenderFitColumn).onOverflow = onOverflow;
+    (renderObject as _RenderFitColumn)
+      ..least = least
+      ..onOverflow = onOverflow;
   }
 }
 
 class _RenderFitColumn extends RenderFlex {
-  _RenderFitColumn({required this.onOverflow, super.textDirection})
+  _RenderFitColumn(this._least, {required this.onOverflow, super.textDirection})
     : super(
         direction: Axis.vertical,
         crossAxisAlignment: CrossAxisAlignment.stretch,
       );
+
+  double _least;
+  set least(double value) {
+    if (value == _least) return;
+    _least = value;
+    markNeedsLayout();
+  }
 
   ValueChanged<double> onOverflow;
   var _overflows = false;
@@ -841,10 +866,27 @@ class _RenderFitColumn extends RenderFlex {
   void performLayout() {
     super.performLayout();
     var taken = 0.0;
-    var child = firstChild;
-    while (child != null) {
+    var fixed = 0.0;
+    var flex = 0;
+    for (var child = firstChild; child != null; child = childAfter(child)) {
       taken += child.size.height;
-      child = childAfter(child);
+      final own = (child.parentData! as FlexParentData).flex ?? 0;
+      if (own > 0) {
+        flex += own;
+      } else {
+        fixed += child.size.height;
+      }
+    }
+    // A flexible child given less than it needs, all of which it took,
+    // was starved by the rest: an open list with no room for its rows.
+    final free = math.max(0.0, size.height - fixed);
+    for (var child = firstChild; child != null; child = childAfter(child)) {
+      final own = (child.parentData! as FlexParentData).flex ?? 0;
+      if (own == 0) continue;
+      final given = free * own / flex;
+      if (given < _least && child.size.height >= given - 0.5) {
+        taken += _least - child.size.height;
+      }
     }
     _overflows = taken > size.height + 0.5;
     if (_overflows) {
@@ -1374,7 +1416,7 @@ class _Place extends StatelessWidget {
 
     // In the top group, a project's agent dropped in a gap is pinned first
     // under it rather than moved out of its project: only Rivet's row
-    // itself takes it out (Lucy's pinned-agents.md §5).
+    // itself takes it out.
     bool pins(Agent agent) =>
         projectId.isEmpty && pinLabel(workspace, agent) != null;
     return DragTarget<String>(
@@ -1569,7 +1611,7 @@ class _Row extends StatefulWidget {
   final VoidCallback? onSecondaryTap;
 
   /// The menu from the keyboard, the row focused: Shift-F10 or the menu
-  /// key, where VoiceOver on a Mac reaches it (Abbacchio's row 1661); else
+  /// key, where VoiceOver on a Mac reaches it; else
   /// [onSecondaryTap].
   final VoidCallback? onMenuKey;
   final bool selected;
@@ -1603,7 +1645,7 @@ class _RowState extends State<_Row> {
       focusNode: _focus,
       mouseCursor: SystemMouseCursors.click,
       // Not while an agent is dragged over it: only where it can land
-      // says so (Abbacchio's pinned-agents NIT).
+      // says so.
       onShowHoverHighlight: (value) =>
           setState(() => _hovered = value && !sidebarDragging.value),
       onShowFocusHighlight: (value) => setState(() => _focused = value),
@@ -1632,8 +1674,7 @@ class _RowState extends State<_Row> {
       // VoiceOver on a Mac moving the keyboard's focus to its cursor
       // (VO-Command-F4, or keyboard focus following it) tells the app only
       // that the row gained VoiceOver's focus: the row takes the
-      // keyboard's then, so Shift-F10 opens its menu (Abbacchio's row
-      // 1716).
+      // keyboard's then, so Shift-F10 opens its menu.
       child: Semantics(
         onDidGainAccessibilityFocus:
             defaultTargetPlatform == TargetPlatform.macOS
@@ -1921,7 +1962,7 @@ class _FilesButton extends StatelessWidget {
 /// A small button in a row (20 points square) that a finger can hit: with
 /// touch, a tap within a finger's target of it ([Touch.target] wide, ending
 /// [after] points past it, and as tall as its row lets it be) counts as on
-/// it (#540, Sale). It looks and lays out as before; with a pointer alone,
+/// it. It looks and lays out as before; with a pointer alone,
 /// only the button itself.
 class _FingerTarget extends SingleChildRenderObjectWidget {
   const _FingerTarget({required this.after, required super.child});
@@ -2193,7 +2234,7 @@ class _ProjectDrag {
 }
 
 /// A project in the list, its row and its agents, that moves as folder
-/// headings do (friend bug #12): its row drags (a finger holds it first),
+/// headings do: its row drags (a finger holds it first),
 /// and another project dropped on this one's upper or lower half goes
 /// before or after it, a signal line showing where. VoiceOver has Move up
 /// and Move down. The order is the backend's projects list, archived
@@ -3259,7 +3300,7 @@ class _AgentRowState extends State<_AgentRow> {
             ),
             // Whom it reports to, for VoiceOver: what the nesting shows, and
             // an admin lead (Rivet) the nesting can't. Not on a pin, which
-            // isn't nested and says only what it shows (Sale row 197).
+            // isn't nested and says only what it shows.
             if (!_pin)
               if (backend.workspace.agent(agent.leadId) case final lead?)
                 Semantics(
@@ -4096,7 +4137,7 @@ Future<void> _agentMenu(
   final up = pinRow ? movePin(context, agent, -1) : null;
   final down = pinRow ? movePin(context, agent, 1) : null;
   // Taken now, as up and down: the agent deleted while the menu is open
-  // takes its row with it, and Pin still says why it can't (row 1734).
+  // takes its row with it, and Pin still says why it can't.
   final toggle = togglePinLater(context, agent);
   final items = <PointerMenuItem<String>?>[
     if (pin != null)
@@ -4166,7 +4207,7 @@ Future<void> _agentMenu(
 }
 
 /// The touch menu's caption: "Bruno · Project Manager · Claktory" in at
-/// most two lines (Lucy 47558). The name stays whole; past two lines the
+/// most two lines. The name stays whole; past two lines the
 /// role goes first, then the project.
 String _menuTitle(
   BuildContext context,
@@ -4175,8 +4216,8 @@ String _menuTitle(
   String project,
 ) {
   // As the sheet draws it: its own type, never the drawer's denser one
-  // (Zucchero's row 716: measured at 13pt, drawn at 15pt, it took three
-  // lines at the largest text).
+  // (measured at 13pt, drawn at 15pt, it took three lines at the
+  // largest text).
   final style = (touchFirst(context) ? PhoneType.secondary : TextStyles.body)
       .copyWith(fontWeight: FontWeight.w600);
   // The sheet's text runs the window's width less its margins; a popover
@@ -4201,8 +4242,8 @@ String _menuTitle(
   return name;
 }
 
-/// The agents pinned under Rivet, from any project, in the person's order
-/// (Lucy's pinned-agents.md §3): each the agent row people know, its role
+/// The agents pinned under Rivet, from any project, in the person's order:
+/// each the agent row people know, its role
 /// and project on its second line, with no disclosure and no reports
 /// under it. They drag among themselves to reorder.
 class _Pins extends StatelessWidget {
@@ -4591,7 +4632,7 @@ class _PipeDrag {
   final String pipeId;
 }
 
-/// A project's pipe group (#359): a row with the group's glyph, its name,
+/// A project's pipe group: a row with the group's glyph, its name,
 /// how many pipes it holds and a disclosure, its pipes under it. A tap
 /// folds it away or opens it (the same on every device); a right click or
 /// a touch and hold offers Rename… and Delete group…; a pipe dropped on it
@@ -4880,7 +4921,7 @@ class _QuietRow extends StatelessWidget {
 /// How many chats the sidebar lists, the newest; "Show all" opens the rest.
 const chatsListed = 20;
 
-/// The person's chats (#213): conversations of their own beside the agents,
+/// The person's chats: conversations of their own beside the agents,
 /// for a question that isn't any agent's job. Under "Chats" (its "+" starts
 /// a new one), the [chatsListed] newest, each a row with a speech bubble
 /// and its title, no character and no color, since a chat is a session,
@@ -5498,7 +5539,7 @@ class _PhoneFooter extends StatelessWidget {
           // Who's at work (a tap opens the Map), then how much of each
           // provider's limits is used; a touch and hold for more. With
           // touch the badge and + are a finger tall, their room above
-          // in place of this space (Bruno 51717).
+          // in place of this space.
           Padding(
             padding: EdgeInsets.fromLTRB(
               Space.xs,
@@ -5563,7 +5604,7 @@ class _ActivityAndUsage extends StatelessWidget {
 /// Whether the footer offers to add an AI provider (the + after the usage
 /// circles): once this Claktory has shown what it has, as the circles do.
 /// Not while it doesn't allow this device, or before it ever answered,
-/// where Providers would read as if it had none (Zucchero's row 216); a
+/// where Providers would read as if it had none; a
 /// moment's reconnecting keeps it, as it keeps the circles.
 bool _canAddProvider(Backend backend, Workspace workspace) =>
     backend.refused.value == null &&
@@ -5854,30 +5895,156 @@ class _FooterButtons extends StatelessWidget {
   final List<Widget> pages;
   final Widget profile;
 
+  // In a sidebar too narrow for all of them in a line, the last pages go
+  // on a second line beside the person, rather than past the edge.
   @override
-  Widget build(BuildContext context) {
-    if (touchFirst(context)) {
-      return Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Expanded(child: Wrap(children: pages)),
-          profile,
-        ],
-      );
-    }
-    // In a sidebar too narrow for all of them in a line, the last pages
-    // go on a second line beside the person, rather than past the edge.
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Expanded(
-          child: Wrap(spacing: Space.xs, runSpacing: Space.xs, children: pages),
-        ),
-        const SizedBox(width: Space.xs),
-        profile,
-      ],
-    );
+  Widget build(BuildContext context) => _BesideProfile(
+    spacing: touchFirst(context) ? 0 : Space.xs,
+    children: [...pages, profile],
+  );
+}
+
+/// Its children but the last in lines, as a Wrap lays them out, beside the
+/// last at the end of the first line; where one is wider than the room
+/// beside it (Settings at the largest text), the lines take the whole width
+/// and the last follows them, at the end of the last line where it fits.
+class _BesideProfile extends MultiChildRenderObjectWidget {
+  const _BesideProfile({required this.spacing, required super.children});
+
+  final double spacing;
+
+  @override
+  RenderObject createRenderObject(BuildContext context) =>
+      _RenderBesideProfile(spacing);
+
+  @override
+  void updateRenderObject(
+    BuildContext context,
+    _RenderBesideProfile renderObject,
+  ) => renderObject.spacing = spacing;
+}
+
+class _BesideProfileData extends ContainerBoxParentData<RenderBox> {}
+
+class _RenderBesideProfile extends RenderBox
+    with
+        ContainerRenderObjectMixin<RenderBox, _BesideProfileData>,
+        RenderBoxContainerDefaultsMixin<RenderBox, _BesideProfileData> {
+  _RenderBesideProfile(this._spacing);
+
+  double _spacing;
+  set spacing(double value) {
+    if (value == _spacing) return;
+    _spacing = value;
+    markNeedsLayout();
   }
+
+  @override
+  void setupParentData(RenderBox child) {
+    if (child.parentData is! _BesideProfileData) {
+      child.parentData = _BesideProfileData();
+    }
+  }
+
+  /// Where each child goes and how tall it all is, given each child's size
+  /// in [width].
+  (List<Offset>, double) _arrange(
+    double width,
+    Size Function(RenderBox child, BoxConstraints constraints) sizeOf,
+  ) {
+    final children = getChildrenAsList();
+    if (children.isEmpty) return (const [], 0);
+    final loose = BoxConstraints(maxWidth: width);
+    final sizes = [for (final child in children) sizeOf(child, loose)];
+    final profile = sizes.last;
+    final pages = sizes.sublist(0, sizes.length - 1);
+    final beside = width - profile.width - _spacing;
+    final besideIt = pages.every((page) => page.width <= beside);
+    final room = besideIt ? beside : width;
+    final offsets = <Offset>[];
+    var x = 0.0;
+    var y = 0.0;
+    var line = 0.0;
+    for (final page in pages) {
+      if (x > 0 && x + page.width > room) {
+        y += line + _spacing;
+        x = 0;
+        line = 0;
+      }
+      offsets.add(Offset(x, y));
+      x += page.width + _spacing;
+      line = math.max(line, page.height);
+    }
+    final end = width - profile.width;
+    if (besideIt) {
+      offsets.add(Offset(end, 0));
+      return (offsets, math.max(y + line, profile.height));
+    }
+    if (x <= end) {
+      offsets.add(Offset(end, y));
+      return (offsets, y + math.max(line, profile.height));
+    }
+    final below = y + line + _spacing;
+    offsets.add(Offset(end, below));
+    return (offsets, below + profile.height);
+  }
+
+  @override
+  void performLayout() {
+    final width = constraints.maxWidth;
+    final (offsets, height) = _arrange(width, (child, constraints) {
+      child.layout(constraints, parentUsesSize: true);
+      return child.size;
+    });
+    var index = 0;
+    for (var child = firstChild; child != null; child = childAfter(child)) {
+      (child.parentData! as _BesideProfileData).offset = offsets[index++];
+    }
+    size = constraints.constrain(Size(width, height));
+  }
+
+  @override
+  Size computeDryLayout(BoxConstraints constraints) {
+    final (_, height) = _arrange(
+      constraints.maxWidth,
+      (child, constraints) => child.getDryLayout(constraints),
+    );
+    return constraints.constrain(Size(constraints.maxWidth, height));
+  }
+
+  @override
+  double computeMinIntrinsicWidth(double height) {
+    var widest = 0.0;
+    for (var child = firstChild; child != null; child = childAfter(child)) {
+      widest = math.max(widest, child.getMinIntrinsicWidth(height));
+    }
+    return widest;
+  }
+
+  @override
+  double computeMaxIntrinsicWidth(double height) {
+    var total = 0.0;
+    for (var child = firstChild; child != null; child = childAfter(child)) {
+      total += child.getMaxIntrinsicWidth(height) + _spacing;
+    }
+    return math.max(0, total - _spacing);
+  }
+
+  @override
+  double computeMinIntrinsicHeight(double width) =>
+      computeDryLayout(BoxConstraints(maxWidth: width)).height;
+
+  @override
+  double computeMaxIntrinsicHeight(double width) =>
+      computeMinIntrinsicHeight(width);
+
+  @override
+  bool hitTestChildren(BoxHitTestResult result, {required Offset position}) =>
+      defaultHitTestChildren(result, position: position);
+
+  @override
+  void paint(PaintingContext context, Offset offset) =>
+      defaultPaint(context, offset);
 }
 
 class _ConfigError extends StatefulWidget {
@@ -5973,7 +6140,7 @@ class _ConfigErrorState extends State<_ConfigError> {
 /// Which Factory this is: the backend's version, and the app's too when it
 /// differs.
 String _versions(String backend, String app) {
-  // Versions carry their "v" (settings.md, Words).
+  // Versions carry their "v".
   final (b, a) = (versionLabel(backend), versionLabel(app));
   if (backend.isEmpty) return 'Claktory · app $a';
   return backend == app ? 'Claktory $b' : 'Claktory $b · app $a';

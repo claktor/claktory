@@ -5,10 +5,14 @@ use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use crate::common::{end_tasks_under, temp_dir};
+use crate::common::{end_tasks_under, ps_runs, temp_dir};
 
 #[test]
 fn a_tests_background_tasks_end_with_its_folder() {
+    if !ps_runs() {
+        eprintln!("skipped: ps can't start here, and tasks are found with it");
+        return;
+    }
     let dir = temp_dir();
     let tasks = dir.join("home/agents/builder/tasks");
     std::fs::create_dir_all(&tasks).expect("tasks");

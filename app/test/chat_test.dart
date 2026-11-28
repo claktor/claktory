@@ -1189,8 +1189,8 @@ void main() {
       await _settleHome();
       expect(
         line(),
-        "Not delivered yet: Ana's Claktory isn't taking messages from yours "
-        'right now.',
+        'Not delivered yet. It goes by itself, usually once Ana next opens '
+        'Claktory.',
       );
       home
         ..peers.first.refused = ''

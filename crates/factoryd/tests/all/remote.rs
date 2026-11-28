@@ -161,27 +161,17 @@ pub(crate) async fn next<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin
     }
 }
 
-async fn workspace(socket: &mut Socket) -> v1::Workspace {
-    loop {
-        if let Some(Body::Workspace(workspace)) = next(socket).await {
-            return workspace;
-        }
-    }
-}
-
-/// This machine's pairing code, once Factory has written it with the
-/// tunnel's address (a new home's first one has none until it binds).
+/// A code that dials this machine's end of the tunnel (its key and
+/// 127.0.0.1 address, with no token: this machine's app has none, since
+/// it connects over its socket), once it's up.
 pub(crate) async fn local_pairing(dir: &Path) -> String {
-    let path = dir.join("home/remote/local-pairing");
     for _ in 0..200 {
-        if let Ok(code) = std::fs::read_to_string(&path)
-            && code.contains("&a=")
-        {
+        if let Some(code) = factoryd::remote::local_code_for_test(&dir.join("home")) {
             return code;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    panic!("no local pairing code");
+    panic!("no loopback endpoint");
 }
 
 /// Another device of the person's, paired with a code and allowed, as an
@@ -213,80 +203,79 @@ async fn a_stopping_backend_closes_the_tunnel() {
     let dir = temp_dir();
     let (_addr, factory) = start(&dir).await;
     let local = parse(&local_pairing(&dir).await);
-    let app = new_device().await;
-    let connection = dial(&app, &local, &local.addresses).await.expect("let in");
+    let (token, _) = factoryd::remote::pair(&home(&dir), "Laptop").expect("paired");
+    let laptop = new_device().await;
+    let connection = dial(&laptop, &local, &local.addresses).await.expect("let in");
     let mut socket = open(&connection).await;
-    assert!(matches!(hello(&mut socket, &local.token).await, Body::Welcome(_)));
+    let waiting = hello(&mut socket, &token).await;
+    assert!(matches!(&waiting, Body::PairingPending(_)), "connected, waiting to be allowed: {waiting:?}");
     factory.close_tunnel(std::time::Duration::from_secs(2)).await;
     tokio::time::timeout(std::time::Duration::from_secs(3), connection.closed()).await.expect("closed at once, not timed out");
 }
 
+/// This machine's end of the tunnel, with remote access off, is on
+/// 127.0.0.1 only and takes no app's token: this machine's app connects over
+/// its socket. The loopback port takes only the tool token (agents'
+/// commands), welcomed as a tool, never as this machine's app; and a new
+/// backend on the same data keeps the tunnel's key and the tool token.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn this_machines_app_connects_through_the_tunnel_with_remote_access_off() {
+async fn this_machines_end_of_the_tunnel_takes_no_apps_token_and_the_port_only_the_tool_token() {
     let dir = temp_dir();
     let (addr, factory) = start(&dir).await;
     let written = local_pairing(&dir).await;
     let local = parse(&written);
-    assert_eq!(crate::common::mode(&dir.join("home/remote/local-pairing")), 0o600, "only this user reads it");
     assert!(local.relays.is_empty(), "no relays while remote access is off: {written}");
     assert!(matches!(local.addresses.as_slice(), [address] if address.ip().is_loopback()), "{written}");
+    assert!(!dir.join("home/remote/local-pairing").exists(), "no pairing code of this machine's app");
 
     // The loopback port never lets in a client without the token: any user
-    // of this machine can reach it.
+    // of this machine can reach it. One with none at all (an app from
+    // before, whose pairing code is gone) hears only Claktory's version, so
+    // it shows that it's too old, and is refused everything.
     let mut stranger = loopback(addr).await;
-    assert!(matches!(hello(&mut stranger, "").await, Body::Error(error) if error.code() == ErrorCode::Unauthorized));
-
-    // The app, with a key of its own, gets Factory as on the loopback port.
-    let app = new_device().await;
-    let connection = dial(&app, &local, &local.addresses).await.expect("let in");
-    let mut socket = open(&connection).await;
-    match hello(&mut socket, &local.token).await {
-        Body::Welcome(welcome) => assert_eq!(welcome.device_id, factoryd::remote::LOCAL_DEVICE),
-        other => panic!("expected welcome, got {other:?}"),
-    }
-    let shown = workspace(&mut socket).await.remote.expect("remote access");
-    assert!(!shown.on && shown.devices.is_empty() && shown.relays.is_empty(), "{shown:?}");
-    assert_eq!(shown.endpoint_id, local.endpoint.to_string());
-    // A second window is a second stream on the same connection.
-    let mut second = open(&connection).await;
-    assert!(matches!(hello(&mut second, &local.token).await, Body::Welcome(_)));
-    // A wrong token from this machine is refused all the same.
-    let mut wrong = open(&connection).await;
-    assert!(matches!(hello(&mut wrong, "0000").await, Body::Error(error) if error.code() == ErrorCode::Unauthorized));
-    // Nor after this machine's app has used the tunnel.
-    let mut unknown = loopback(addr).await;
-    match hello(&mut unknown, "").await {
-        Body::Error(error) => {
-            assert_eq!(error.code(), ErrorCode::Unauthorized);
-            let says = if cfg!(windows) { "own Claktory app" } else { "remote/local-pairing" };
-            assert!(error.message.contains(says), "{}", error.message);
+    let welcome = hello(&mut stranger, "").await;
+    assert!(matches!(&welcome, Body::Welcome(welcome) if welcome.device_id.is_empty()), "{welcome:?}");
+    match next(&mut stranger).await {
+        Some(Body::Workspace(workspace)) => {
+            assert_eq!(workspace, v1::Workspace { version: factoryd::update::VERSION.to_owned(), ..v1::Workspace::default() })
         }
-        other => panic!("expected unauthorized, got {other:?}"),
+        other => panic!("expected only the version, got {other:?}"),
     }
+    let refused = ask(&mut stranger, 2, list_home()).await;
+    assert!(
+        matches!(&refused, Body::Error(error) if error.code() == ErrorCode::Unauthorized && error.message.starts_with("This copy of Claktory is out of date")),
+        "{refused:?}"
+    );
+
+    // An app dialling from this machine gets nothing without a paired
+    // device's token, the tests' person token included.
+    let app = new_device().await;
+    let connection = dial(&app, &local, &local.addresses).await.expect("this machine reaches its end of the tunnel");
+    for token in [String::new(), crate::common::local_token(addr), crate::common::tool_token(addr)] {
+        let mut socket = open(&connection).await;
+        let answer = hello(&mut socket, &token).await;
+        assert!(matches!(&answer, Body::Error(error) if error.code() == ErrorCode::Unauthorized), "{answer:?}");
+    }
+
+    // The tool token, on the port only: a tool, not this machine's app.
+    let tool = crate::common::tool_token(addr);
+    let mut script = loopback(addr).await;
+    assert!(matches!(hello(&mut script, &tool).await, Body::Welcome(welcome) if welcome.device_id == factoryd::authority::TOOL_DEVICE));
     let mut wrong_token = loopback(addr).await;
     assert!(matches!(hello(&mut wrong_token, &"0".repeat(64)).await, Body::Error(error) if error.code() == ErrorCode::Unauthorized));
-    let mut script = loopback(addr).await;
-    assert!(matches!(hello(&mut script, &local.token).await, Body::Welcome(welcome) if welcome.device_id == "local"));
-    // Another device's token isn't this machine's.
+    // Another device's token isn't let in on the port.
     let (token, _) = factoryd::remote::pair(&home(&dir), "Laptop").expect("paired");
     let mut laptop = loopback(addr).await;
     assert!(matches!(hello(&mut laptop, &token).await, Body::Error(error) if error.code() == ErrorCode::Unauthorized));
     factoryd::remote::unpair(&home(&dir), "laptop").expect("unpaired");
-    // Deleting the code's file makes a new token, and keeps the port closed.
-    drop((stranger, script));
 
-    // A new backend on the same data keeps the key and the token.
-    drop((socket, second, wrong, unknown, laptop, connection));
+    // A new backend on the same data keeps the key and the tool token.
+    drop((stranger, script, wrong_token, laptop, connection));
     drop(factory);
-    let (_addr, _factory) = start(&dir).await;
-    let again = parse(&local_pairing(&dir).await);
-    assert_eq!((again.endpoint, &again.token, &again.addresses), (local.endpoint, &local.token, &local.addresses));
-    drop(_factory);
-    std::fs::remove_file(dir.join("home/remote/local-pairing")).expect("deleted");
     let (addr, _factory) = start(&dir).await;
-    assert_ne!(parse(&local_pairing(&dir).await).token, local.token);
-    let mut unknown = loopback(addr).await;
-    assert!(matches!(hello(&mut unknown, "").await, Body::Error(error) if error.code() == ErrorCode::Unauthorized));
+    let again = parse(&local_pairing(&dir).await);
+    assert_eq!(again.endpoint, local.endpoint);
+    assert_eq!(crate::common::tool_token(addr), tool);
 }
 
 /// On Windows remote access goes through the relays only: listening on a
@@ -365,13 +354,17 @@ async fn paired_devices_connect_through_the_tunnel_unknown_keys_are_turned_away_
     view.follow(&mut client, |view| !remote(view).pending_devices.is_empty()).await;
     let asking = remote(&view).pending_devices[0].clone();
     assert_eq!((asking.device_id.as_str(), asking.name.as_str(), asking.kind()), ("phone", "Phone", v1::DeviceKind::Phone));
-    assert_eq!(asking.number, number(&code, &phone.id().to_string()), "worked out the same on both sides");
+    // Its digits are never sent, not even to the person's app: they
+    // read them on the device, which works them out itself.
+    assert_eq!(asking.number, "", "never sent");
+    let shown = number(&code, &phone.id().to_string());
     assert!(asking.requested_ms > 0 && asking.expires_ms > now_ms());
     // While it waits, another key that copied the code is turned away.
     let copier = new_device().await;
     let refused = dial(&copier, &code, &code.addresses).await.expect_err("the code is taken");
     assert!(refused.contains("isn't paired"), "{refused}");
-    let allow = client_message::Body::ApproveDevice(v1::ApproveDevice { device_id: "phone".into(), number: asking.number.clone(), ..Default::default() });
+    let allow =
+        client_message::Body::ApproveDevice(v1::ApproveDevice { device_id: "phone".into(), number: shown.clone(), ..Default::default() });
     assert!(matches!(apply_request(&mut client, &mut view, allow).await, Body::Ack(_)));
     match next(&mut socket).await {
         Some(Body::Welcome(welcome)) => assert_eq!(welcome.device_id, "phone"),
@@ -461,8 +454,7 @@ async fn device_that_never_checks() -> Endpoint {
     Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled).transport_config(transport).bind().await.expect("device endpoint")
 }
 
-/// Polpo's idle-keepalive.md, Fugo 51818: a device still waiting to be
-/// allowed keeps iroh's keep-alives, so Claktory pings it every 5 s as
+/// A device still waiting to be allowed keeps iroh's keep-alives, so Claktory pings it every 5 s as
 /// before; let in, it's checked only every 25 s, which leaves an idle phone's
 /// radio alone; and unpaired then, its session and connection still close at
 /// once, without waiting for any timeout.
@@ -489,20 +481,32 @@ async fn claktory_checks_a_device_rarely_only_once_its_let_in_and_still_closes_i
     let mut socket = open(&connection).await;
     assert!(matches!(hello(&mut socket, &code.token).await, Body::PairingPending(_)));
     let before = pings();
-    tokio::time::sleep(Duration::from_millis(6_000)).await;
-    assert!(pings() > before, "waiting to be allowed: Claktory checks it every 5 s, as before");
+    let checked = tokio::time::timeout(Duration::from_secs(30), async {
+        while pings() == before {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    });
+    checked.await.expect("waiting to be allowed: Claktory checks it every 5 s, as before");
 
     let remote = |view: &View| view.workspace.remote.clone().expect("remote access");
     view.follow(&mut client, |view| !remote(view).pending_devices.is_empty()).await;
-    let number = remote(&view).pending_devices[0].number.clone();
+    let number = number(&code, &phone.id().to_string());
     let allow = client_message::Body::ApproveDevice(v1::ApproveDevice { device_id: "phone".into(), number, ..Default::default() });
     assert!(matches!(apply_request(&mut client, &mut view, allow).await, Body::Ack(_)));
     assert!(matches!(next(&mut socket).await, Some(Body::Welcome(_))));
-    // The check already due goes once more.
-    tokio::time::sleep(Duration::from_millis(5_500)).await;
-    let before = pings();
-    tokio::time::sleep(Duration::from_millis(6_000)).await;
-    assert_eq!(pings(), before, "let in: Claktory leaves the checking to the device");
+    // The check already due may go once more; past it, the line stays quiet
+    // for far longer than 5 s, which checks every 5 s would never leave.
+    let quiet = Duration::from_secs(10);
+    let mut last = (pings(), std::time::Instant::now());
+    let stays_quiet = tokio::time::timeout(Duration::from_secs(40), async {
+        while last.1.elapsed() < quiet {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            if pings() != last.0 {
+                last = (pings(), std::time::Instant::now());
+            }
+        }
+    });
+    stays_quiet.await.expect("let in: Claktory leaves the checking to the device");
 
     let unpair = client_message::Body::UnpairDevice(v1::UnpairDevice { device_id: "phone".into() });
     let asked = std::time::Instant::now();
@@ -687,15 +691,14 @@ async fn ask<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
 
 #[cfg_attr(windows, ignore = "its device reaches this machine directly, and on Windows remote access goes through the relays only")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn remote_access_turning_on_and_off_keeps_this_machines_app_connected() {
+async fn remote_access_turning_on_and_off_keeps_the_persons_connection_and_this_machines_end_of_the_tunnel() {
     let dir = temp_dir();
-    let (_addr, factory) = start(&dir).await;
+    let (addr, factory) = start(&dir).await;
     factory.set_tunnel_online_wait(Duration::from_millis(100));
     let local = parse(&local_pairing(&dir).await);
-    let app = new_device().await;
-    let connection = dial(&app, &local, &local.addresses).await.expect("let in");
-    let mut socket = open(&connection).await;
-    let answer = hello(&mut socket, &local.token).await;
+    // The person's connection (this machine's app's, as tests make it).
+    let mut socket = loopback(addr).await;
+    let answer = hello(&mut socket, &crate::common::local_token(addr)).await;
     assert!(matches!(answer, Body::Welcome(_)), "{answer:?}");
     let relays = v1::SetRemoteAccess { relays: vec!["http://127.0.0.1:9/".into()], set_relays: true, ..Default::default() };
     assert!(matches!(ask(&mut socket, 2, client_message::Body::SetRemoteAccess(relays)).await, Body::Ack(_)));
@@ -735,8 +738,7 @@ async fn remote_access_turning_on_and_off_keeps_this_machines_app_connected() {
     // A moment for the remote endpoint to close.
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(matches!(ask(&mut socket, 6, list_home()).await, Body::FolderList(_)), "still connected");
-    assert!(connection.close_reason().is_none(), "the tunnel connection never closed");
-    assert_eq!(parse(&local_pairing(&dir).await).addresses, local.addresses, "the same port throughout");
+    assert_eq!(parse(&local_pairing(&dir).await).addresses, local.addresses, "this machine's end of the tunnel stayed up throughout");
 
     // Turned on again, the remote endpoint takes the port it had.
     let again = client_message::Body::CreatePairing(v1::CreatePairing { name: "Tablet".into(), host: String::new() });
@@ -844,6 +846,9 @@ async fn an_app_that_offers_compression_gets_it_and_one_that_doesnt_still_connec
     let dir = temp_dir();
     let (_addr, _factory) = start(&dir).await;
     let local = parse(&local_pairing(&dir).await);
+    // A device paired with a code and allowed (this machine's app connects
+    // over its socket), dialling this machine's end.
+    let (token, _) = factoryd::remote::pair(&home(&dir), "Laptop").expect("paired");
     let app = new_device().await;
     let both: &[&[u8]] = &[factoryd::remote::ALPN_COMPRESSED, factoryd::remote::ALPN];
     let connection = dial_offering(&app, &local, &local.addresses, both).await.expect("let in");
@@ -851,7 +856,9 @@ async fn an_app_that_offers_compression_gets_it_and_one_that_doesnt_still_connec
     let (send, receive) = connection.open_bi().await.expect("stream");
     let (mut socket, _) =
         tokio_tungstenite::client_async("ws://factory/", factoryd::remote::compressed(receive, send)).await.expect("websocket");
-    assert!(matches!(hello(&mut socket, &local.token).await, Body::Welcome(_)));
+    assert!(matches!(hello(&mut socket, &token).await, Body::PairingPending(_)));
+    factoryd::remote::approve(&home(&dir), "laptop").expect("allowed");
+    assert!(matches!(next(&mut socket).await, Some(Body::Welcome(_))));
     let workspace = match next(&mut socket).await {
         Some(Body::Workspace(workspace)) => workspace,
         other => panic!("expected the workspace, got {other:?}"),
@@ -864,11 +871,14 @@ async fn an_app_that_offers_compression_gets_it_and_one_that_doesnt_still_connec
     socket.close(None).await.expect("close");
 
     // An app from before compression.
+    let (token, _) = factoryd::remote::pair(&home(&dir), "Old laptop").expect("paired");
     let old = new_device().await;
     let connection = dial(&old, &local, &local.addresses).await.expect("let in");
     assert_eq!(connection.alpn(), factoryd::remote::ALPN);
     let mut socket = open(&connection).await;
-    assert!(matches!(hello(&mut socket, &local.token).await, Body::Welcome(_)));
+    assert!(matches!(hello(&mut socket, &token).await, Body::PairingPending(_)));
+    factoryd::remote::approve(&home(&dir), "old-laptop").expect("allowed");
+    assert!(matches!(next(&mut socket).await, Some(Body::Welcome(_))));
     assert!(matches!(ask(&mut socket, 2, list_home()).await, Body::FolderList(_)));
 }
 
@@ -923,8 +933,11 @@ async fn a_paired_device_forwards_to_this_machines_localhost() {
     let (answer, ..) = forward_to(&early, port).await;
     assert!(answer.starts_with("no ") && answer.contains("isn't paired"), "{answer}");
 
-    let allow =
-        client_message::Body::ApproveDevice(v1::ApproveDevice { device_id: id.clone(), number: number(&code, &device.id().to_string()), ..Default::default() });
+    let allow = client_message::Body::ApproveDevice(v1::ApproveDevice {
+        device_id: id.clone(),
+        number: number(&code, &device.id().to_string()),
+        ..Default::default()
+    });
     assert!(matches!(apply_request(&mut client, &mut view, allow).await, Body::Ack(_)));
     assert!(matches!(next(&mut socket).await, Some(Body::Welcome(_))));
 

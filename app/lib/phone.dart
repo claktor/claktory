@@ -41,6 +41,7 @@ import 'mobile/extension_list.dart';
 import 'mobile/header.dart';
 import 'mobile/local_network.dart' show connectNewClaktory;
 import 'mobile/metrics.dart' show PhoneType, TypeScale, withoutInsets;
+import 'app_dock.dart' show handAppOver, takeHandedOverApp;
 import 'mobile/navigation.dart';
 import 'mobile/page_find.dart';
 import 'mobile/device_permissions.dart' show CameraPermission;
@@ -64,7 +65,9 @@ import 'mobile/presentation.dart'
 import 'pairing.dart';
 import 'pinned_agents.dart' show togglePin;
 import 'pasted_code.dart';
-import 'panes.dart' show AppPane, appKind, pageOfKind, paneGlyph, paneTitle;
+import 'app_views/app_view.dart' show ChromeNamesApp;
+import 'panes.dart'
+    show AppPane, appKind, appViewTitleSpan, pageOfKind, paneGlyph, paneTitle;
 import 'pipes.dart' show PipeView, selectedPipe;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'rail.dart'
@@ -115,6 +118,8 @@ class _Entry {
     this.edgeToEdge = false,
     this.alive,
     this.done,
+    this.app,
+    this.conversation = false,
   }) : serial = ++_pushed;
 
   /// How many pages have been pushed: [serial] tells this push apart from
@@ -133,6 +138,13 @@ class _Entry {
   final bool edgeToEdge;
   final bool Function()? alive;
   final Completer<Object?>? done;
+
+  /// The app's view it shows ([_PhoneScreensState.showApp]), if any.
+  final ViewLeaf? app;
+
+  /// The chosen agent's conversation, over a page it was opened from
+  /// ([_PhoneScreensState.pushConversation]); the root shows none under it.
+  final bool conversation;
 }
 
 /// How many phone layouts are up (an iPad's windows can each be one).
@@ -157,6 +169,9 @@ class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
 
   /// The conversation's find: its ⋯ list offers Search when it can.
   final _rootFind = GlobalKey<PhoneFindHostState>();
+
+  /// The find of the conversation shown as a page ([pushConversation]).
+  final _pageFind = GlobalKey<PhoneFindHostState>();
 
   PhoneDrawerHostState? _host;
   var _attached = false;
@@ -185,6 +200,12 @@ class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
     super.initState();
     _unhostPermissions = registerPermissionHost(context);
     _phoneScreensUp++;
+    // An app's view open as the wide layout went (app_dock.dart): a page
+    // here, over what the window shows.
+    _soon(() {
+      final leaf = takeHandedOverApp(AppScope.of(context));
+      if (leaf != null) showApp(leaf);
+    });
   }
 
   @override
@@ -212,6 +233,11 @@ class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
 
   @override
   void dispose() {
+    // The window widening with an app's view in front of the rest: the
+    // wide layout opens it again.
+    final backend = _needsYouOf;
+    final app = _stack.reversed.map((entry) => entry.app).nonNulls.firstOrNull;
+    if (backend != null && app != null) handAppOver(backend, app);
     _followNeedsYou(null);
     _phoneScreensUp--;
     _unhostPermissions();
@@ -227,6 +253,7 @@ class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
       });
     }
     _waitingPaneTimer?.cancel();
+    _forgetOfflineFile();
     for (final entry in _stack) {
       entry.done?.complete();
     }
@@ -517,6 +544,59 @@ class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
     _pushFile(path, () => _stack.any((entry) => entry.id == files));
   }
 
+  /// A file opened offline from an agent's show, apart from its layout:
+  /// put in the layout once connected, as an agent's show would online.
+  ({Backend backend, String agentId, String path, bool Function() stillOpen})?
+  _offlineFile;
+
+  /// Connected again, so the next Workspace is the Claktory's own.
+  var _offlineFileBack = false;
+
+  void _layoutOnceBack(
+    Backend backend,
+    String agentId,
+    String path,
+    bool Function() stillOpen,
+  ) {
+    _forgetOfflineFile();
+    _offlineFile = (
+      backend: backend,
+      agentId: agentId,
+      path: path,
+      stillOpen: stillOpen,
+    );
+    backend.connected.addListener(_offlineFileConnected);
+    backend.workspace.addListener(_offlineFileLayout);
+  }
+
+  void _forgetOfflineFile() {
+    final pending = _offlineFile;
+    _offlineFile = null;
+    _offlineFileBack = false;
+    pending?.backend.connected.removeListener(_offlineFileConnected);
+    pending?.backend.workspace.removeListener(_offlineFileLayout);
+  }
+
+  void _offlineFileConnected() {
+    _offlineFileBack = _offlineFile?.backend.connected.value ?? false;
+  }
+
+  /// The Claktory's Workspace after connecting: the file's page still
+  /// open, it joins the agent's layout as it is now, unless it's there.
+  void _offlineFileLayout() {
+    final pending = _offlineFile;
+    if (pending == null || !_offlineFileBack) return;
+    final (:backend, :agentId, :path, :stillOpen) = pending;
+    _forgetOfflineFile();
+    if (!mounted || !stillOpen()) return;
+    final agent = backend.workspace.agent(agentId);
+    if (agent == null) return;
+    final root = layoutOf(agent);
+    final opened = open(root, path);
+    if (identical(opened.root, root)) return;
+    fireAndLog(backend.setLayout(agentId, opened.root));
+  }
+
   /// [path]'s viewer over what's in front, apart from any layout, while
   /// [alive].
   void _pushFile(String path, bool Function() alive) {
@@ -551,6 +631,7 @@ class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
       _stack.add(
         _Entry(
           id: 'app:${leaf.appId}/${leaf.view}',
+          app: leaf,
           builder: (context) {
             final agent = AppScope.of(context).workspace.selectedAgent;
             final color = Palette.of(context).textMuted;
@@ -590,13 +671,49 @@ class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
     final opened = open(root, path);
     if (!identical(opened.root, root)) {
       // Offline the layout can't take it: the file opens here alone, from
-      // the copy this device kept, and the layout
-      // is left as it is.
+      // the copy this device kept, and joins the layout once connected,
+      // while its page is still open.
       if (!backend.connected.value) {
         _pushFile(path, () => backend.workspace.agent(agentId) != null);
+        _layoutOnceBack(
+          backend,
+          agentId,
+          path,
+          () => _stack.any((entry) => entry.id == 'file:$path'),
+        );
         return true;
       }
-      fireAndLog(backend.setLayout(agentId, opened.root));
+      unawaited(
+        backend.setLayout(agentId, opened.root).then<void>((_) {}).catchError((
+          Object error,
+        ) {
+          final failure = error as RequestFailure;
+          // Lost with a link that was gone before the app knew: sent
+          // again once it's back, as an offline open is.
+          if (!lostWithConnection(failure.message) || !mounted) {
+            debugPrint("couldn't open $path in the layout: $failure");
+            return;
+          }
+          final id = 'viewer:$agentId/${opened.paneId}';
+          _layoutOnceBack(
+            backend,
+            agentId,
+            path,
+            () => _stack.any((entry) => entry.id == id),
+          );
+        }, test: (error) => error is RequestFailure),
+      );
+      // On a phone its page comes at once, its file read meanwhile, rather
+      // than once the layout comes back with it (a round trip on a far
+      // link, two when the agent is chosen too, with nothing on screen);
+      // it's the pane from then on.
+      if (_viewerScreen) {
+        if (backend.workspace.workspace.selectedAgentId != agentId) {
+          fireAndLog(backend.selectAgent(agentId));
+        }
+        _showViewer(agentId, opened.paneId, coming: path);
+        return true;
+      }
     }
     return showPane(agentId, opened.paneId);
   }
@@ -621,6 +738,52 @@ class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
     return true;
   }
 
+  @override
+  bool pushConversation(String agentId, {String panel = ''}) {
+    final backend = AppScope.of(context);
+    if (backend.workspace.agent(agentId) == null) return false;
+    final workspace = backend.workspace.workspace;
+    if (workspace.selectedAgentId != agentId ||
+        selectedPipe(workspace) != null ||
+        workspace.selectedChatId.isNotEmpty) {
+      fireAndLog(backend.selectAgent(agentId));
+    }
+    if (panel.isNotEmpty) fireAndLog(backend.openPanel(agentId, panel));
+    // Nothing to go back to: it's the conversation itself.
+    if (_stack.isEmpty) return true;
+    // Chosen once: the page goes when another agent is (elsewhere too).
+    var chosen = false;
+    bool alive() {
+      final now = backend.workspace.selectedAgent?.id == agentId;
+      chosen |= now;
+      return now || !chosen;
+    }
+
+    final gone = _stack.where((entry) => entry.conversation).toList();
+    setState(() {
+      _stack.removeWhere(gone.contains);
+      _stack.add(
+        _Entry(
+          id: 'conversation:$agentId',
+          conversation: true,
+          overKeyboard: true,
+          alive: alive,
+          builder: (context) => _Conversation(
+            agentId: agentId,
+            find: _pageFind,
+            onBack: pop,
+            onMenu: () => _host?.openDrawer(),
+            onMore: _listExtensions,
+          ),
+        ),
+      );
+    });
+    for (final entry in gone) {
+      _gone(entry);
+    }
+    return true;
+  }
+
   /// Pushes [_waitingPane] once its agent shows and the pane is there.
   void _showWaitingPane() {
     final waiting = _waitingPane;
@@ -639,7 +802,11 @@ class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
   /// One of [agentId]'s viewers (a pane beside its conversation on a Mac),
   /// over its conversation. Back pops it on this phone only; its × removes
   /// the pane from the agent's layout, everywhere.
-  void _showViewer(String agentId, String paneId) {
+  ///
+  /// [coming]: the file of a pane on its way to the layout, shown till
+  /// it's there; a pane that never comes (the layout refused) leaves it
+  /// as the file's page alone.
+  void _showViewer(String agentId, String paneId, {String? coming}) {
     _workbenchFocus?.focus(agentId, paneId);
     final backend = AppScope.of(context);
     Agent? agent() {
@@ -668,6 +835,8 @@ class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
       return;
     }
 
+    // The pane was in the layout once: gone again, it was closed.
+    var arrived = coming == null;
     setState(() {
       _stack.removeWhere((entry) => entry.id.startsWith('viewer:'));
       _stack.add(
@@ -676,7 +845,10 @@ class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
           edgeToEdge: _viewerScreen,
           alive: () {
             final shown = agent();
-            return shown != null && find(layoutOf(shown), paneId) != null;
+            final there =
+                shown != null && find(layoutOf(shown), paneId) != null;
+            if (there) arrived = true;
+            return there || !arrived;
           },
           builder: (context) => ListenableBuilder(
             listenable: backend.workspace,
@@ -686,7 +858,14 @@ class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
                   ? null
                   : find(layoutOf(shown), paneId);
               if (shown == null || viewer == null) {
-                return const SizedBox.shrink();
+                if (coming == null || arrived) return const SizedBox.shrink();
+                final leaf = viewerLeaf(coming).leaf;
+                return _ViewerScreen(
+                  leaf: leaf,
+                  agentId: agentId,
+                  glyph: viewerIcon(leaf, Palette.of(context).textMuted),
+                  onBack: pop,
+                );
               }
               return _ViewerScreen(
                 leaf: viewer.leaf,
@@ -788,7 +967,11 @@ class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
             if (currentOwner()) showAgentSettings(owner, now);
           },
           // The conversation can be searched: Search first.
-          onSearch: switch (_rootFind.currentState?.session) {
+          onSearch: switch ((_stack.lastOrNull?.conversation ?? false
+                  ? _pageFind
+                  : _rootFind)
+              .currentState
+              ?.session) {
             final session? => () {
               close();
               session.open();
@@ -930,7 +1113,10 @@ class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
           });
         }
         if (agent != null) _takeUpFocus(agent);
-        final panel = _stack.isEmpty ? openPanelOf(workspace, agent) : null;
+        // The panel's sheet is the conversation's: over it alone.
+        final panel = _stack.isEmpty || _stack.last.conversation
+            ? openPanelOf(workspace, agent)
+            : null;
         if (agent != null && panel != null) _panelAgent = agent.id;
         final policy = PhonePlatformPolicy.of(context);
         final screens = Stack(
@@ -944,6 +1130,7 @@ class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
                   policy.page<void>(
                     key: const ValueKey('conversation'),
                     child: _Root(
+                      covered: _stack.any((entry) => entry.conversation),
                       onMenu: () => _host?.openDrawer(),
                       onBack: _back,
                       onMore: _listExtensions,
@@ -1010,6 +1197,7 @@ class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
 /// reached by a message has Back to the one it came from instead.
 class _Root extends StatelessWidget {
   const _Root({
+    required this.covered,
     required this.onMenu,
     required this.onBack,
     required this.onMore,
@@ -1018,6 +1206,10 @@ class _Root extends StatelessWidget {
 
   /// The conversation's find, for Search in its ⋯ list.
   final GlobalKey<PhoneFindHostState> find;
+
+  /// The conversation shows as a page further up: only one of it is
+  /// built, its draft and find with it.
+  final bool covered;
 
   final VoidCallback onMenu;
   final void Function(Agent agent) onBack;
@@ -1085,6 +1277,7 @@ class _Root extends StatelessWidget {
         }
         final agent = backend.workspace.selectedAgent;
         if (agent == null) return noAgent();
+        if (covered) return ColoredBox(color: conversationTint(agent));
         final back = scope.history.back;
         return _Screen(
           overKeyboard: true,
@@ -1099,6 +1292,51 @@ class _Root extends StatelessWidget {
               onBack: back != null && back != agent.id
                   ? () => onBack(agent)
                   : null,
+              onMenu: onMenu,
+              onMore: () => onMore(agent),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// [agentId]'s conversation as a page over another ([_Entry.conversation]):
+/// Back returns to the page under it.
+class _Conversation extends StatelessWidget {
+  const _Conversation({
+    required this.agentId,
+    required this.find,
+    required this.onBack,
+    required this.onMenu,
+    required this.onMore,
+  });
+
+  final String agentId;
+  final GlobalKey<PhoneFindHostState> find;
+  final VoidCallback onBack;
+  final VoidCallback onMenu;
+  final void Function(Agent agent) onMore;
+
+  @override
+  Widget build(BuildContext context) {
+    final workspace = AppScope.of(context).workspace;
+    return ListenableBuilder(
+      listenable: workspace,
+      builder: (context, _) {
+        final agent = workspace.agent(agentId);
+        if (agent == null) return const SizedBox.shrink();
+        return _Screen(
+          overKeyboard: true,
+          find: find,
+          child: AnimatedContainer(
+            duration: Motion.base,
+            color: conversationTint(agent),
+            child: AgentView(
+              key: ValueKey(agent.id),
+              agent: agent,
+              onBack: onBack,
               onMenu: onMenu,
               onMore: () => onMore(agent),
             ),
@@ -1341,9 +1579,17 @@ class _ViewerScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final workspace = AppScope.of(context).workspace.workspace;
     return PaneChrome(
       phone: PhonePane(
-        title: paneTitle(leaf, AppScope.of(context).workspace.workspace),
+        title: paneTitle(leaf, workspace),
+        titleSpan: leaf.kind == appKind
+            ? appViewTitleSpan(
+                leaf,
+                workspace,
+                muted: Palette.of(context).textMuted,
+              )
+            : null,
         onBack: onBack,
         onRemove: onClose, // null for a project's file: nothing to remove
       ),
@@ -1352,8 +1598,10 @@ class _ViewerScreen extends StatelessWidget {
           final node = this.node, agentId = this.agentId;
           Widget viewer(BuildContext context) {
             // An app's view (C1F) is its own pane; any other leaf a viewer.
+            // The page's header names the app: the view goes without its
+            // own "From" line.
             final body = leaf.kind == appKind
-                ? AppPane(leaf: leaf)
+                ? ChromeNamesApp(child: AppPane(leaf: leaf))
                 : viewerBody(context, leaf);
             if (agentId == null || leaf.path.isEmpty) return body;
             return PhoneReviewBar(

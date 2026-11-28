@@ -32,6 +32,13 @@ target_compile_definitions(claktory_launcher PRIVATE
   "CLAKTORY_FLAVOR_DEV=$<BOOL:${CLAKTORY_WANTS_DEV}>"
   "NOMINMAX" "UNICODE" "_UNICODE"
   "_WIN32_WINNT=0x0A00" "WINVER=0x0A00" "NTDDI_VERSION=0x0A00000B")
+# The app's version (--build-name and --build-number), as the runner's.
+target_compile_definitions(claktory_launcher PRIVATE
+  "FLUTTER_VERSION=\"${FLUTTER_VERSION}\""
+  "FLUTTER_VERSION_MAJOR=${FLUTTER_VERSION_MAJOR}"
+  "FLUTTER_VERSION_MINOR=${FLUTTER_VERSION_MINOR}"
+  "FLUTTER_VERSION_PATCH=${FLUTTER_VERSION_PATCH}"
+  "FLUTTER_VERSION_BUILD=${FLUTTER_VERSION_BUILD}")
 target_include_directories(claktory_launcher PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/../runner")
 target_link_libraries(claktory_launcher PRIVATE "user32.lib")

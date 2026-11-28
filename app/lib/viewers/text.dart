@@ -24,9 +24,12 @@ import 'registry.dart';
 /// passage to comment on it (annotations.dart). It follows the file: when
 /// an agent (or anyone) changes it, it reads it again in place.
 class TextViewer extends StatefulWidget {
-  const TextViewer({super.key, required this.path});
+  const TextViewer({super.key, required this.path, this.sealed});
 
   final String path;
+
+  /// The seal whose kept version shows, rather than the file.
+  final FileSeal? sealed;
 
   @override
   State<TextViewer> createState() => _TextViewerState();
@@ -35,6 +38,13 @@ class TextViewer extends StatefulWidget {
 class _TextViewerState extends State<TextViewer> with FileLoading<TextViewer> {
   @override
   String get path => widget.path;
+
+  @override
+  FileSeal? get sealed => widget.sealed;
+
+  @override
+  Widget sealedViewer(FileSeal sealed) =>
+      TextViewer(path: path, sealed: sealed);
 
   var _raw = false;
   String _text = '';
@@ -239,7 +249,9 @@ class _TextViewerState extends State<TextViewer> with FileLoading<TextViewer> {
         if (_markdown && !_binary && problem == null)
           PaneAction('Plain text', () => _showRaw(!_raw), active: _raw),
         PaneAction('Reload', reload),
+        ...sealActions(),
       ],
+      notice: sealNotice(),
       body: FindScope(
         target: _find,
         child: ColoredBox(color: palette.canvas, child: body),

@@ -459,8 +459,24 @@ class Connections extends ChangeNotifier {
   /// there takes its place, with its key, as pairing it again; picking it
   /// from the account's list shows the one there.
   void use(RemoteFactory? target) {
+    final shown = target == null ? null : _keep(target);
+    _current = shown == null
+        ? null
+        : _saved.firstWhere((other) => other == shown);
+    _changed();
+  }
+
+  /// Remembers [target] as [use] does, at the end of [saved] (its tile
+  /// connects), without showing it: the window stays where it is.
+  void add(RemoteFactory target) {
+    _keep(target);
+    _changed();
+  }
+
+  /// Keeps [target] in [saved] and answers the one kept for it.
+  RemoteFactory _keep(RemoteFactory target) {
     var shown = target;
-    if (target != null && !_saved.contains(target)) {
+    if (!_saved.contains(target)) {
       final endpoint = target.endpointId;
       final same = target.tunnelled
           ? _saved.indexWhere((other) => other.endpointId == endpoint)
@@ -476,10 +492,7 @@ class Connections extends ChangeNotifier {
         _saved[same] = target;
       }
     }
-    _current = shown == null
-        ? null
-        : _saved.firstWhere((other) => other == shown);
-    _changed();
+    return shown;
   }
 
   /// Forgets [target]; if it's the one showing, this Mac's shows instead.

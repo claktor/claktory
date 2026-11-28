@@ -59,6 +59,11 @@ void main() {
       // from PathReach (never the address), and a count of bytes.
       'reach',
       'bytes',
+      // Where a connect through the tunnel went, in ms: waiting for its
+      // endpoint, its dial, its relay coming up.
+      'rebuild_ms',
+      'dial_ms',
+      'relay_ms',
     ]);
     expect(ConnectionKind.values.map((kind) => kind.name), [
       'lifecycle',
@@ -82,9 +87,23 @@ void main() {
       'registered',
       'failed',
     ]);
+    // The viewer area's (how opening a file went): kinds of file, where
+    // it came from and counts, never its path or name.
+    expect(ViewerKey.values.map((key) => key.wire), [
+      'file',
+      'from',
+      'preview',
+      'wait_ms',
+      'bytes',
+      'size',
+      'bulk',
+      'kept',
+    ]);
+    expect(ViewerKind.values.map((kind) => kind.name), ['shown', 'checked']);
     expect(DiagnosticArea.values.map((area) => area.name), [
       'connection',
       'notifications',
+      'viewer',
     ]);
     expect(
       recordDetail({
@@ -102,6 +121,9 @@ void main() {
       ConnectionFailure.values,
       ConnectionReason.values,
       PushStep.values,
+      ViewedFile.values,
+      ViewedFrom.values,
+      KeptCheck.values,
     ]) {
       for (final value in words) {
         expect(value.name, matches(word));

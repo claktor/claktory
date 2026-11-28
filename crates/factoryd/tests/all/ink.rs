@@ -1,4 +1,4 @@
-//! Ink (#209 phase 3): blobs upload privately, by their SHA-256, for no
+//! Ink: blobs upload privately, by their SHA-256, for no
 //! agent; no agent's file tools reach where they're kept, admins' included;
 //! and nothing refers to a blob yet, so none can be read back.
 

@@ -36,6 +36,7 @@ pub(crate) mod setup;
 pub(crate) mod signout;
 pub(crate) mod sites;
 pub(crate) mod standin;
+pub(crate) mod tab_view;
 pub(crate) mod uploads;
 pub(crate) mod view;
 
@@ -278,6 +279,8 @@ struct Inner {
     /// The paths the runner staged uploads at since Chrome last started:
     /// the only files the errand's `DOM.setFileInputFiles` may name.
     staged: Vec<String>,
+    /// The person's live views of it, and its open checks (`tab_view`).
+    views: tab_view::Views,
 }
 
 impl Default for Inner {
@@ -321,6 +324,7 @@ impl Default for Inner {
             uploads: HashMap::new(),
             next_upload: 0,
             staged: Vec::new(),
+            views: tab_view::Views::default(),
         }
     }
 }
@@ -729,6 +733,10 @@ fn output(factory: &Arc<Factory>, one: &Arc<One>, channel: Channel, payload: Vec
         Channel::Cdp => {
             // The host's own answers (sites.rs) never reach the errand.
             if sites::answer(factory, one, &payload) {
+                return;
+            }
+            // What comes on the live views' own sessions never does either.
+            if tab_view::event(factory, one, &payload) {
                 return;
             }
             let inner = one.inner();
@@ -1352,6 +1360,24 @@ impl Port {
         Ok(())
     }
 
+    /// WatchAgentTab: a live view of an agent's browser, or of a check's tab.
+    pub(crate) fn watch_tab(&self, request: &v1::WatchAgentTab) -> Result<(), RequestError> {
+        tab_view::watch(&self.factory()?, self.id, request)
+    }
+
+    /// AgentTabFrameAck: from the connection watching.
+    pub(crate) fn tab_ack(&self, request: &v1::AgentTabFrameAck) -> Result<(), RequestError> {
+        let factory = self.factory()?;
+        tab_view::ack(&factory, self.id, request);
+        Ok(())
+    }
+
+    /// AgentTabInput: into a check's tab, from the connection watching it.
+    pub(crate) fn tab_input(&self, request: &v1::AgentTabInput) -> Result<(), RequestError> {
+        let factory = self.factory()?;
+        tab_view::input(&factory, self.id, request)
+    }
+
     /// DeleteAgentBrowserData: everything `agent`'s browser keeps, gone
     /// (every browser's when empty: the person's own and each agent's,
     /// running or not).
@@ -1486,6 +1512,7 @@ impl Drop for Port {
     fn drop(&mut self) {
         let Some(factory) = self.factory.upgrade() else { return };
         factory.agent_browser.ports().remove(&self.id);
+        tab_view::stop_port(&factory, self.id);
         let viewed = self.viewed(&factory);
         if let Some(one) = &viewed {
             unwatch(&mut one.inner());
@@ -1928,6 +1955,25 @@ impl Drop for Lease {
             end_lease(&mut inner);
         }
     }
+}
+
+/// Tests: `agent`'s browser hands the person a check at `seq` on tab
+/// `target` of `domain` (as errands do); what's returned holds where the
+/// tab went if it leaves.
+#[doc(hidden)]
+pub fn check_opened_for_test(factory: &Arc<Factory>, agent: &str, seq: u64, target: &str, domain: &str) -> Arc<Mutex<Option<String>>> {
+    let left = Arc::new(Mutex::new(None));
+    let told = left.clone();
+    view::check_opened(factory, agent, seq, target, domain, Box::new(move |site| *told.lock().expect("left") = Some(site)));
+    left
+}
+
+/// Tests: the check at `seq` ends; `agent`'s open check's tab before.
+#[doc(hidden)]
+pub fn end_check_for_test(factory: &Arc<Factory>, agent: &str, seq: u64) -> Option<String> {
+    let tab = view::check_tab(factory, agent);
+    view::end_check(factory, agent, seq);
+    tab
 }
 
 /// Each agent's browser, for its browsing (`errands`).

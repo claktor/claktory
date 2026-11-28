@@ -1,13 +1,16 @@
 import 'dart:async' show Completer, unawaited;
 
-import 'package:cupertino_ui/cupertino_ui.dart'
-    show DefaultCupertinoLocalizations;
+import 'package:factory_app/mobile/platform_policy.dart'
+    show PhonePlatformPolicy;
 import 'package:factory_app/app_update.dart';
+import 'package:factory_app/app_views/transport.dart' show AppSurfaceData;
 import 'package:factory_app/backend.dart';
 import 'package:factory_app/paced.dart'
     show PreviewBox, ReadFirst, ReadOnward, ReadProgress;
 import 'package:factory_app/connections.dart';
 import 'package:factory_app/device_account.dart' show DeviceAccount;
+import 'package:factory_app/diagnostics_record.dart'
+    show ViewerKey, ViewerKind, recordDetail;
 import 'package:factory_app/drafts.dart';
 import 'package:factory_app/history.dart';
 import 'package:factory_app/layout.dart' show leaves;
@@ -54,6 +57,16 @@ class RecordingBackend extends Backend {
   @override
   void reconnectNow() => reconnectsAsked++;
 
+  /// What viewers told diagnostics: each event's kind and detail.
+  final viewerNotes = <String>[];
+
+  @override
+  void noteViewer(
+    ViewerKind kind,
+    Map<ViewerKey, Object> detail, [
+    Duration took = Duration.zero,
+  ]) => viewerNotes.add('${kind.name} ${recordDetail(detail)}');
+
   /// Runs when a request is sent, before it's answered: what the backend
   /// would broadcast because of it.
   void Function(ClientMessage message)? onSend;
@@ -66,6 +79,13 @@ class RecordingBackend extends Backend {
         ? Future.value()
         : Future.error(RequestFailure(reason));
   }
+
+  @override
+  Future<void> deleteSealedCopy(String path, String sha256) => _record(
+    ClientMessage(
+      deleteSealedCopy: DeleteSealedCopy(path: path, sha256: sha256),
+    ),
+  );
 
   @override
   Future<void> createProject(String name) =>
@@ -429,6 +449,10 @@ class RecordingBackend extends Backend {
   /// [files]' when there's none.
   final previews = <String, FileContent>{};
 
+  /// The versions kept when files were sealed, by "path@sha256": what
+  /// [readFile] answers for ReadFile.sealed_sha256.
+  final sealedVersions = <String, FileContent>{};
+
   /// Whether [readFile] reads from an offset, as backends since videos do.
   var rangedReads = true;
 
@@ -472,6 +496,8 @@ class RecordingBackend extends Backend {
     ReadFirst? onFirst,
     PreviewBox? preview,
     int previewPage = 0,
+    String sealedSha256 = '',
+    String unlessSha256 = '',
   }) async {
     final read = await _readFile(
       path,
@@ -480,7 +506,10 @@ class RecordingBackend extends Backend {
       expectedSha256: expectedSha256,
       preview: preview,
       previewPage: previewPage,
+      sealedSha256: sealedSha256,
+      unlessSha256: unlessSha256,
     );
+    if (read.unchanged) return read;
     // Told to stop after its first piece (a link too slow, #379): only
     // that piece, as the backend's paced read would answer.
     const piece = 64 * 1024;
@@ -518,6 +547,8 @@ class RecordingBackend extends Backend {
     required String expectedSha256,
     PreviewBox? preview,
     int previewPage = 0,
+    String sealedSha256 = '',
+    String unlessSha256 = '',
   }) async {
     final request = ReadFile(
       path: path,
@@ -527,18 +558,46 @@ class RecordingBackend extends Backend {
       previewWidth: preview?.width,
       previewHeight: preview?.height,
       previewPage: previewPage == 0 ? null : previewPage,
+      sealedSha256: sealedSha256.isEmpty ? null : sealedSha256,
+      unlessSha256: unlessSha256.isEmpty ? null : unlessSha256,
     );
     await _record(ClientMessage(readFile: request));
     await holdRead?.call(request);
+    // A sealed version: the copy kept of it, never a preview.
+    final sealed = sealedSha256.isEmpty
+        ? null
+        : sealedVersions['$path@$sealedSha256'] ??
+              FileContent(
+                path: path,
+                error: "This sealed version wasn't kept.",
+              );
     // Asked for a preview, and the backend has one (#379): it, as the
     // file.
-    final file = (preview == null ? null : previews[path]) ?? files[path];
+    final file =
+        sealed ?? (preview == null ? null : previews[path]) ?? files[path];
     if (file == null) {
       return FileContent(path: path, error: 'No such file: $path');
     }
     // Another version now than the one being read (ReadFile.expected_sha256).
     if (expectedSha256.isNotEmpty && expectedSha256 != file.sha256) {
       return FileContent(path: path, error: 'changed');
+    }
+    // Still the version this device keeps (ReadFile.unless_sha256): no
+    // bytes, unless this is a Claktory from before it.
+    if (sealed == null &&
+        knowsUnless &&
+        unlessSha256.isNotEmpty &&
+        unlessSha256 == file.sha256) {
+      final original = files[path] ?? file;
+      return FileContent(
+        path: path,
+        mime: original.mime,
+        size: original.size,
+        modifiedMs: original.modifiedMs,
+        sha256: original.sha256,
+        seals: original.hasSeals() ? original.seals : null,
+        unchanged: true,
+      );
     }
     if (offset == 0 && maxBytes == 0) return file;
     // A backend from before ranged reads answers from the start.
@@ -563,6 +622,10 @@ class RecordingBackend extends Backend {
     }
     return read;
   }
+
+  /// Whether it answers ReadFile.unless_sha256; false, a Claktory from
+  /// before it, which reads the file as asked.
+  var knowsUnless = true;
 
   /// Answers a part of an image read from its start without its hash, as
   /// the backend does (only ranges of videos and PDFs, and every range
@@ -1415,6 +1478,20 @@ class RecordingBackend extends Backend {
     return recoveryKey;
   }
 
+  /// What [proveAllowedDevice] answers: this Claktory's word, a
+  /// payload of its own and a stand-in signature.
+  var allowedWord = '';
+
+  @override
+  Future<String> proveAllowedDevice(String requestId) async {
+    await _record(
+      ClientMessage(
+        proveAllowedDevice: ProveAllowedDevice(requestId: requestId),
+      ),
+    );
+    return allowedWord;
+  }
+
   /// What [checkRecoveryKey] answers.
   var recoveryKeyCheck = RecoveryKeyCheck(
     checkId: 'check-1',
@@ -1438,6 +1515,32 @@ class RecordingBackend extends Backend {
   @override
   Future<void> useRecoveryKey() =>
       _record(ClientMessage(useRecoveryKey: UseRecoveryKey()));
+
+  /// What [newAccountRecoveryKey] answers for what it was asked.
+  String Function(NewRecoveryKey asked) recoveryStatement = (_) => '';
+
+  @override
+  Future<String> newAccountRecoveryKey({
+    required String publicKey,
+    required String deviceKey,
+  }) async {
+    final asked = NewRecoveryKey(publicKey: publicKey, deviceKey: deviceKey);
+    await _record(ClientMessage(newRecoveryKey: asked));
+    return recoveryStatement(asked);
+  }
+
+  @override
+  Future<void> publishRecoveryKey({
+    required String deviceKey,
+    required String deviceSig,
+  }) => _record(
+    ClientMessage(
+      publishRecoveryKey: PublishRecoveryKey(
+        deviceKey: deviceKey,
+        deviceSig: deviceSig,
+      ),
+    ),
+  );
 
   /// What [startConnect] answers (Priya's connectors_test).
   var connectStarted = ConnectStarted(
@@ -1655,6 +1758,80 @@ class RecordingBackend extends Backend {
       ],
       truncated: appFilesTruncated,
     );
+  }
+
+  /// Each app's view as OpenAppView answers it, by app id; an app missing
+  /// is asked of the backend, which never answers here.
+  final appSurfaces = <String, AppSurfaceData>{};
+
+  @override
+  Future<AppSurfaceData> openView({
+    required String appId,
+    required String view,
+    required String params,
+    required List<String> catalogs,
+  }) async {
+    final surface = appSurfaces[appId];
+    if (surface == null) {
+      return super.openView(
+        appId: appId,
+        view: view,
+        params: params,
+        catalogs: catalogs,
+      );
+    }
+    await _record(
+      ClientMessage(
+        openAppView: OpenAppView(
+          appId: appId,
+          view: view,
+          params: params,
+          catalogs: catalogs,
+        ),
+      ),
+    );
+    return surface;
+  }
+
+  bool _answered(String surfaceId) =>
+      appSurfaces.values.any((surface) => surface.surfaceId == surfaceId);
+
+  @override
+  Future<void> actInView(String surfaceId, String message) =>
+      _answered(surfaceId)
+      ? _record(
+          ClientMessage(
+            appViewAction: AppViewAction(
+              surfaceId: surfaceId,
+              message: message,
+            ),
+          ),
+        )
+      : super.actInView(surfaceId, message);
+
+  @override
+  Future<void> closeView(String surfaceId) => _answered(surfaceId)
+      ? _record(ClientMessage(closeAppView: CloseAppView(surfaceId: surfaceId)))
+      : super.closeView(surfaceId);
+
+  /// Each agent's checklist, as GetChecklist answers; an agent missing has
+  /// Checklist off.
+  final checklists = <String, Checklist>{};
+
+  @override
+  Future<Checklist?> getChecklist(String agentId) async {
+    await _record(ClientMessage(getChecklist: GetChecklist(agentId: agentId)));
+    return checklists[agentId];
+  }
+
+  /// The tasks each agent sees, as ListTasks answers; an agent missing has
+  /// Tasks off.
+  final taskLists = <String, Tasks>{};
+
+  @override
+  Future<Tasks?> listTasks(String agentId) async {
+    await _record(ClientMessage(listTasks: ListTasks(agentId: agentId)));
+    return taskLists[agentId];
   }
 
   /// Every agent's monitors, as ListMonitors answers: filtered here by
@@ -2568,8 +2745,8 @@ class Harness {
     await tester.pumpWidget(
       WidgetsApp(
         color: const Color(0xFF000000),
-        // As the app has them (main.dart): the iPhone's text menu's words.
-        localizationsDelegates: const [DefaultCupertinoLocalizations.delegate],
+        // As the app has them (main.dart): the platform's own widgets' words.
+        localizationsDelegates: PhonePlatformPolicy.current.localizations,
         builder: (context, _) => AppScope(
           backend: backend,
           login: login,

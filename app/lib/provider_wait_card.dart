@@ -1,4 +1,4 @@
-// #343 U6: Needs you's item for the agents and chats waiting on one
+// Needs you's item for the agents and chats waiting on one
 // provider's usage limit or credit (Workspace.provider_waits), opened: the
 // ways forward, all from the waiters themselves. Continue on another
 // provider (for all of them, the count asked first), a usage reset the
@@ -52,7 +52,7 @@ class _ProviderWaitCardState extends State<ProviderWaitCard>
   var _busy = false;
   String? _error;
 
-  /// [rethrowing] for focus mode's keys (#514): refused, it throws, and
+  /// [rethrowing] for focus mode's keys: refused, it throws, and
   /// cancelled it throws [AnswerNotSent].
   Future<void> _continue(
     String waiting,

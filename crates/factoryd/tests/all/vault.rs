@@ -1,4 +1,4 @@
-//! The vault (#107): secrets the person adds in the app, sealed in
+//! The vault: secrets the person adds in the app, sealed in
 //! <home>/vault/vault.db, which Claktory makes by itself and opens with the
 //! key on disk. The person's app grants, reveals and deletes with no
 //! passphrase; agents use what they're given. Values never reach the
@@ -79,12 +79,12 @@ async fn the_vault_is_there_from_the_start_and_the_person_adds_secrets() {
     let preview = client.request(Request::PreviewEnv(v1::PreviewEnv { text: text.into() })).await;
     let Body::EnvPreview(preview) = &preview.body else { panic!("expected a preview, got {:?}", preview.body) };
     assert_eq!(preview.variables.iter().map(|variable| variable.name.as_str()).collect::<Vec<_>>(), ["RESEND_API_KEY", "PIN"]);
-    assert_eq!(preview.warnings, ["PIN is too short to hide in agents' output."]);
+    assert_eq!(preview.warnings, ["PIN is too short to hide, so agents may see it if a command prints it."]);
     let import = v1::ImportEnv { text: text.into(), name: "Resend".into(), description: "Mail.".into(), one_per_variable: false };
     let events = client.ok(Request::ImportEnv(import)).await;
     let state = vault(last_workspace(&events).expect("workspace"));
     assert_eq!(state.secrets.iter().map(|secret| secret.name.as_str()).collect::<Vec<_>>(), ["Cloudflare", "Resend"]);
-    assert_eq!(state.secrets[1].warnings, ["PIN is too short to hide in agents' output."]);
+    assert_eq!(state.secrets[1].warnings, ["PIN is too short to hide, so agents may see it if a command prints it."]);
 
     // Renamed, then given a new value: a new version.
     let id = cloudflare.id.clone();
@@ -400,7 +400,7 @@ async fn rivet_gives_and_takes_back_secrets_when_the_person_asks() {
     assert_eq!(kinds.last(), Some(&("grant", "builder", "rivet")));
 }
 
-/// #449: an agent gives up a secret on its own, with no card: only its
+/// An agent gives up a secret on its own, with no card: only its
 /// own grant goes, as a revoke takes it, and History says so with its reason.
 #[tokio::test]
 async fn an_agent_gives_up_its_own_secret_and_history_says_why() {
@@ -563,7 +563,7 @@ async fn agents_describe_the_secret_they_need_and_the_person_gives_one_adds_one_
     for request in waiting(&view).into_iter().filter(|request| request.id != first.id) {
         apply_request(&mut client, &mut view, Request::DecideSecretRequest(decide("builder", &request.id, false, Vec::new(), ""))).await;
     }
-    // Dismissed with nothing more, they're told quietly (friend bug #19):
+    // Dismissed with nothing more, they're told quietly:
     // they wait for Builder's next wake rather than waking it.
     view.follow(&mut client, |view| view.agent("builder").quiet_waiting == 2).await;
     assert!(idle(&view, "builder") && !events(&view).iter().any(|line| line.contains("dismissed")), "{:?}", events(&view));
@@ -625,7 +625,7 @@ async fn agents_describe_the_secret_they_need_and_the_person_gives_one_adds_one_
         "{:?}",
         events(&view)
     );
-    // The person's words reach it as theirs, on a line of their own (#253),
+    // The person's words reach it as theirs, on a line of their own,
     // to read rather than take as a no (needs-you-cards §7).
     assert!(view.entries.iter().any(|entry| matches!(&entry.kind,
         Some(Kind::Event(event)) if event.text.starts_with("The person dismissed your request for Stripe and says:\n\nNot yet.\n\nRead what they say. \
@@ -656,7 +656,7 @@ async fn a_request_left_unanswered_expires_and_the_agent_is_told() {
     call(&mut client, &mut view, "builder", "secrets_request", need).await;
     let asked = waiting(&view).pop().expect("the request");
 
-    // However busy the agent is, it waits for the person (#172: a busy
+    // However busy the agent is, it waits for the person (a busy
     // agent's requests expired before Matt opened its conversation).
     for _ in 0..12 {
         let before = view.entries.len();
@@ -680,7 +680,7 @@ async fn a_request_left_unanswered_expires_and_the_agent_is_told() {
     assert_eq!(failure(&late.body).1, "This request expired.");
 }
 
-/// K1 (#358): a secret given in Settings → Secrets answers the request it
+/// K1: a secret given in Settings → Secrets answers the request it
 /// was asked for, as giving it on the card would: the card closes and the
 /// agent is told, idle or not. A secret for none of its requests wakes it
 /// all the same, and closes nothing.
@@ -719,7 +719,7 @@ async fn a_secret_given_in_settings_answers_the_request_waiting_for_it() {
     assert!(notes.is_empty(), "{notes:?}");
 }
 
-/// Matt's bug: an agent's Secrets panel shows its grants from the vault's
+/// An agent's Secrets panel shows its grants from the vault's
 /// state, so every way of giving a secret has to land there, under the
 /// agent's id, and stay after a restart.
 #[tokio::test]
@@ -913,7 +913,7 @@ fn seq_of(view: &View, id: &str) -> u64 {
         .expect("its entry")
 }
 
-/// #173: every device can mark an agent with something waiting for the
+/// Every device can mark an agent with something waiting for the
 /// person, and go to it, without opening its conversation.
 #[tokio::test]
 async fn what_waits_for_the_person_shows_with_the_agent() {
@@ -989,7 +989,7 @@ fn shown_request(view: &View, id: &str) -> v1::SecretRequest {
         .expect("the request's entry")
 }
 
-/// #223: the person approves the need, and the admin agent (Rivet) does
+/// The person approves the need, and the admin agent (Rivet) does
 /// the vault work: it answers the request with a matching secret, renamed
 /// to the variables asked for, or collects a new one with an add-secret
 /// card in its own conversation.
@@ -1051,7 +1051,7 @@ async fn the_person_approves_the_need_and_the_admin_grants_or_collects() {
     })
     .await;
     // Each note reaches it as its writer's: the person's approval comment,
-    // and Rivet's, never as the person's (#253).
+    // and Rivet's, never as the person's.
     assert!(
         view.entries.iter().any(|entry| matches!(&entry.kind,
         Some(Kind::Event(event)) if event.text.contains("\n\nThe person's note: Go ahead.\n\nRivet's note: It's the DNS-only token.\n\n")))
@@ -1059,7 +1059,7 @@ async fn the_person_approves_the_need_and_the_admin_grants_or_collects() {
     let decided = shown_request(&view, &asked.id);
     assert_eq!((decided.state(), decided.given_secret_name.as_str()), (v1::SecretRequestState::Granted, "Cloudflare"));
     assert!(waiting_seqs(&view, "builder").is_empty(), "nothing waits any more");
-    // History says it was left to Rivet (Abbacchio's 1580).
+    // History says it was left to Rivet.
     let history = crate::needs_you::list(&mut client, "Cloudflare token", 0, 0).await;
     let record = history.records.first().expect("in History");
     assert_eq!(
@@ -1116,7 +1116,7 @@ async fn the_person_approves_the_need_and_the_admin_grants_or_collects() {
     assert_eq!(shown_request(&view, &asked.id).state(), v1::SecretRequestState::Granted);
 }
 
-/// #223's fallbacks: approval needs an admin agent with Secrets, and falls
+/// Approval needs an admin agent with Secrets, and falls
 /// back to the direct card without one; an approved request can be
 /// withdrawn but not changed, and never expires.
 #[tokio::test]
@@ -1207,7 +1207,7 @@ async fn collecting(client: &mut Client, view: &mut View, dir: &Path) -> v1::Sec
     asked
 }
 
-/// #327: the asker withdraws its request while Rivet's add-secret card is
+/// The asker withdraws its request while Rivet's add-secret card is
 /// open. The card shows it withdrawn and leaves Needs you at once; a save
 /// sent from a card that missed it is refused and shows it again as it
 /// ended; secrets_collect cancel on it still works; and after a restart

@@ -976,7 +976,7 @@ void main() {
     expect(harness.last.hasAccountResend(), isTrue);
   });
 
-  // Zucchero's row 126: at AX XXXL on an iPhone SE the sheet overflowed by
+  // At AX XXXL on an iPhone SE the sheet overflowed by
   // 2487 px and couldn't scroll, so the key couldn't be seen.
   testWidgets('on an iPhone SE at the largest text, the recovery key sheet '
       'scrolls to the key and Done', (tester) async {
@@ -1015,7 +1015,7 @@ void main() {
       expect(rect.top, greaterThanOrEqualTo(0));
       expect(rect.bottom, lessThanOrEqualTo(568));
     }
-    // The key wraps at its blocks, all of it in sight (Zucchero's row 131),
+    // The key wraps at its blocks, all of it in sight,
     // rather than scrolling sideways.
     final key = find.text('ABCD-EFGH-IJKL-MNOP');
     await tester.scrollUntilVisible(key, 200, scrollable: sheet);

@@ -47,6 +47,9 @@ abstract class PhonePages {
   /// [PhoneRoutes.showPane].
   bool showPane(String agentId, String paneId);
 
+  /// [PhoneRoutes.pushConversation].
+  bool pushConversation(String agentId, {String panel = ''});
+
   /// [PhoneRoutes.pushApp].
   /// Focus mode on a screen of its own (an iPhone's); false where the
   /// window has its own (an iPad's).
@@ -387,6 +390,14 @@ class PhoneDrawerHostState extends State<PhoneDrawerHost>
     if (pages == null) return false;
     closeDrawer();
     return pages.showPane(agentId, paneId);
+  }
+
+  @override
+  bool pushConversation(String agentId, {String panel = ''}) {
+    final pages = _pages;
+    if (pages == null) return false;
+    closeDrawer();
+    return pages.pushConversation(agentId, panel: panel);
   }
 
   @override
@@ -1054,11 +1065,36 @@ class _SearchField extends StatefulWidget {
   State<_SearchField> createState() => _SearchFieldState();
 }
 
-class _SearchFieldState extends State<_SearchField> {
+class _SearchFieldState extends State<_SearchField>
+    with WidgetsBindingObserver {
   final _focus = FocusNode(debugLabel: 'Search');
+
+  /// The keyboard's height when the window's metrics last changed.
+  double _keyboard = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  /// The keyboard put away while Search has focus (Android's Back, iOS's
+  /// hide key) means typing there is done: Search lets go of focus, so a
+  /// sheet closing later doesn't hand it back and raise the keyboard again.
+  @override
+  void didChangeMetrics() {
+    final view = View.maybeOf(context);
+    if (view == null) return;
+    final keyboard = view.viewInsets.bottom;
+    if (_keyboard > 0 && keyboard == 0 && _focus.hasPrimaryFocus) {
+      _focus.unfocus();
+    }
+    _keyboard = keyboard;
+  }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _focus.dispose();
     super.dispose();
   }

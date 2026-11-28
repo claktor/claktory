@@ -23,6 +23,7 @@ import 'layout.dart';
 import 'loopback_forward.dart' show openLink;
 import 'markdown.dart';
 import 'protocol/factory/v1/factory.pb.dart';
+import 'needs_you_focus.dart' show leaveFocusModeToOpen;
 import 'scope.dart';
 import 'selection.dart' show Unselectable;
 import 'share_files.dart' show ShareHold;
@@ -1013,7 +1014,11 @@ class _ProposeLine extends StatelessWidget {
         : rivetIn(scope.backend.workspace.workspace);
     return Row(
       children: [
-        const ToolLine('Proposed a message to'),
+        ToolLine(
+          call.failed
+              ? "Couldn't propose a message to"
+              : 'Proposed a message to',
+        ),
         const SizedBox(width: Space.s),
         Flexible(
           child: rivet == null
@@ -1058,7 +1063,9 @@ class _SuggestTalkLine extends StatelessWidget {
     final talk = _suggestTalk(call);
     return Row(
       children: [
-        const ToolLine('Suggests you talk to'),
+        ToolLine(
+          call.failed ? "Couldn't suggest you talk to" : 'Suggests you talk to',
+        ),
         const SizedBox(width: Space.s),
         Flexible(
           child: talk.id.isEmpty
@@ -1335,6 +1342,7 @@ class _ItemRow extends StatelessWidget {
 Widget _checklistAddLine(BuildContext context, ToolCallInfo call) {
   final added = _list(call.details['items']);
   final count = added.isNotEmpty ? added.length : call.list('items').length;
+  if (call.failed) return const ToolLine("Couldn't add to the checklist");
   if (call.running || count == 0) {
     return const ToolLine('Adding to the checklist…');
   }
@@ -1362,7 +1370,7 @@ Widget? _checklistAddBody(BuildContext context, ToolCallInfo call) {
   return _rows([
     for (final item in items)
       _ItemRow(
-        status: ChecklistStatus.CHECKLIST_STATUS_OPEN,
+        status: call.failed ? null : ChecklistStatus.CHECKLIST_STATUS_OPEN,
         id: null,
         text: _string(item),
         owner: known ? owner : '',
@@ -1372,6 +1380,7 @@ Widget? _checklistAddBody(BuildContext context, ToolCallInfo call) {
 
 Widget _checklistUpdateLine(BuildContext context, ToolCallInfo call) {
   final count = call.list('updates').length;
+  if (call.failed) return const ToolLine("Couldn't update the checklist");
   if (call.running || count == 0) {
     return const ToolLine('Updating the checklist…');
   }
@@ -1398,14 +1407,17 @@ Widget? _checklistUpdateBody(BuildContext context, ToolCallInfo call) {
     ]);
   }
   if (updates.isEmpty) return null;
+  // Failed, the changes asked for weren't made: no item is marked as if
+  // they were.
+  final made = !call.failed;
   return _rows([
     for (final update in updates)
       _ItemRow(
-        status: _status(update['status']),
+        status: made ? _status(update['status']) : null,
         id: _int(update['id']),
         text: _string(update['text']),
         note: _string(update['note']),
-        label: _status(update['status']) == null
+        label: !made || _status(update['status']) == null
             ? ''
             : statusLabel(_status(update['status'])!),
       ),
@@ -1429,6 +1441,22 @@ Widget _memoryReadLine(BuildContext context, ToolCallInfo call) {
   final manual = _manual(call);
   final slug = _string(details['slug']).ifEmpty(call.argument('note') ?? '');
   final query = _string(details['query']).ifEmpty(call.argument('q') ?? '');
+  if (call.failed) {
+    return ToolLine(
+      slug.isNotEmpty
+          ? (manual ? "Couldn't read the manual on" : "Couldn't read note")
+          : query.isNotEmpty
+          ? (manual
+                ? "Couldn't search the manual for"
+                : "Couldn't search memory for")
+          : (manual ? "Couldn't read the manual" : "Couldn't read memory"),
+      subject: slug.isNotEmpty
+          ? slug
+          : query.isNotEmpty
+          ? '“$query”'
+          : '',
+    );
+  }
   if (slug.isNotEmpty) {
     return ToolLine(
       manual ? 'Read the manual on' : 'Read note',
@@ -1491,6 +1519,7 @@ String _memoryChange(Map<String, Object?> op, Map<String, Object?> change) {
 Widget _memoryUpdateLine(BuildContext context, ToolCallInfo call) {
   final ops = call.list('ops').map(_map).toList();
   final changes = _list(call.details['changes']).map(_map).toList();
+  if (call.failed) return const ToolLine("Couldn't update memory");
   if (ops.isEmpty) {
     return const ToolLine('Updating memory…');
   }
@@ -1522,7 +1551,8 @@ Widget? _memoryUpdateBody(BuildContext context, ToolCallInfo call) {
       _ => null,
     };
   }
-  if (ops.isEmpty) return null;
+  // Each change in the past tense, said only of changes made.
+  if (ops.isEmpty || call.failed) return null;
   return _rows([
     for (var i = 0; i < ops.length; i++)
       _Row(
@@ -1611,11 +1641,18 @@ String _or(List<String> items) => items.length < 2
 
 Widget _monitorsAddLine(BuildContext context, ToolCallInfo call) {
   final count = call.list('monitors').length;
+  if (call.failed && count != 1) {
+    return ToolLine(
+      count == 0
+          ? "Couldn't add a monitor"
+          : "Couldn't add ${_count(count, 'monitor')}",
+    );
+  }
   if (count == 0) return const ToolLine('Adding a monitor…');
   if (count > 1) return ToolLine('Added ${_count(count, 'monitor')}');
   final monitor = _monitor(call, 0);
   return ToolLine(
-    'Set a monitor',
+    call.failed ? "Couldn't set a monitor" : 'Set a monitor',
     subject: monitor.name,
     after: monitor.schedule,
   );
@@ -1643,13 +1680,16 @@ Widget? _monitorsAddBody(BuildContext context, ToolCallInfo call) {
 Widget _monitorsChangeLine(BuildContext context, ToolCallInfo call) {
   final changed = _list(call.details['monitors']).map(_map).toList();
   final asked = call.list('changes').map(_map).toList();
-  String past(String action) => switch (action) {
-    'pause' => 'paused',
-    'resume' => 'resumed',
-    'cancel' => 'cancelled',
-    'fire' => 'fired',
-    _ => action,
-  };
+  final failed = call.failed;
+  String past(String action) => failed
+      ? action
+      : switch (action) {
+          'pause' => 'paused',
+          'resume' => 'resumed',
+          'cancel' => 'cancelled',
+          'fire' => 'fired',
+          _ => action,
+        };
   final words = changed.isNotEmpty
       ? [
           for (final monitor in changed)
@@ -1659,6 +1699,13 @@ Widget _monitorsChangeLine(BuildContext context, ToolCallInfo call) {
           for (final change in asked)
             '${past(_string(change['action']))} ${_string(change['id'])}',
         ];
+  if (failed) {
+    return ToolLine(
+      words.isEmpty
+          ? "Couldn't change monitors"
+          : "Couldn't ${words.join(', ')}",
+    );
+  }
   if (words.isEmpty) return const ToolLine('Changing monitors…');
   final line = words.join(', ');
   return ToolLine('${line[0].toUpperCase()}${line.substring(1)}');
@@ -1670,6 +1717,7 @@ Widget _monitorsChangeLine(BuildContext context, ToolCallInfo call) {
 Widget _tasksListLine(BuildContext context, ToolCallInfo call) {
   final tasks = _list(call.details['tasks']);
   final running = tasks.where((task) => _map(task)['running'] == true).length;
+  if (call.failed) return const ToolLine("Couldn't list background tasks");
   return ToolLine(
     'Listed background tasks',
     after: call.details.containsKey('tasks')
@@ -1714,7 +1762,11 @@ Widget _tasksStopLine(BuildContext context, ToolCallInfo call) {
   final self = ToolViewScope.of(context)?.agentId ?? '';
   final name = AgentTints.of(context)?.agents[owner]?.name ?? owner;
   return ToolLine(
-    call.done ? 'Stopped' : 'Stopping',
+    call.failed
+        ? "Couldn't stop"
+        : call.done
+        ? 'Stopped'
+        : 'Stopping',
     subject: task,
     after: owner.isEmpty || owner == self ? '' : name,
   );
@@ -1811,7 +1863,11 @@ class _ShowLine extends StatelessWidget {
     return Row(
       children: [
         Text(
-          call.done ? 'Showing' : 'Opening',
+          call.failed
+              ? "Couldn't show"
+              : call.done
+              ? 'Showing'
+              : 'Opening',
           style: TypeScale.of(context).body.copyWith(color: palette.textMuted),
         ),
         const SizedBox(width: Space.xs),
@@ -1857,6 +1913,7 @@ class _ShowLine extends StatelessWidget {
         .ifEmpty(ToolViewScope.of(context)?.agentId);
     final agent = backend.workspace.agent(agentId);
     if (agent == null) return;
+    leaveFocusModeToOpen(context, agentId: agent.id);
     final root = layoutOf(agent);
     // The pane it opened in, while that still shows this file: a later
     // show in place of the oldest pane keeps the pane's id for another file
@@ -2028,6 +2085,7 @@ class _MadeImageState extends State<MadeImage> {
       openFile(context, widget.path);
       return;
     }
+    leaveFocusModeToOpen(context, agentId: agent.id);
     final backend = scope.backend;
     final phone = context
         .getInheritedWidgetOfExactType<PhoneRoutesScope>()
@@ -2120,7 +2178,11 @@ Widget _webSearchLine(BuildContext context, ToolCallInfo call) {
     (sum, answer) => sum + _list(answer['results']).length,
   );
   return ToolLine(
-    call.done ? 'Searched' : 'Searching',
+    call.failed
+        ? "Couldn't search for"
+        : call.done
+        ? 'Searched'
+        : 'Searching',
     subject: queries.map((query) => '“$query”').join(', '),
     after: call.details.containsKey('queries')
         ? (results == 0 ? 'No results' : _count(results, 'result'))
@@ -2179,7 +2241,11 @@ class _FetchLine extends StatelessWidget {
     return Row(
       children: [
         Text(
-          call.done ? 'Read' : 'Reading',
+          call.failed
+              ? "Couldn't read"
+              : call.done
+              ? 'Read'
+              : 'Reading',
           style: TypeScale.of(context).body.copyWith(color: palette.textMuted),
         ),
         const SizedBox(width: Space.xs),
@@ -2210,11 +2276,13 @@ Widget _dbLine(BuildContext context, ToolCallInfo call) {
       .ifEmpty(call.argument('instance'))
       .isNotEmpty;
   final what = records ? "Claktory's records" : 'the database';
+  final failed = call.failed;
   switch (call.name) {
     case 'db_query':
       final rows = _int(details['rows']);
       final more = _int(details['more']) ?? 0;
       final total = rows == null ? null : rows + more;
+      if (failed) return ToolLine("Couldn't query $what");
       return ToolLine(
         'Queried $what',
         after: total == null
@@ -2223,6 +2291,7 @@ Widget _dbLine(BuildContext context, ToolCallInfo call) {
       );
     case 'db_exec':
       final changed = _int(details['changed']);
+      if (failed) return ToolLine("Couldn't change $what");
       return ToolLine(
         'Changed $what',
         after: changed == null ? '' : '${_count(changed, 'row')} changed',
@@ -2231,8 +2300,13 @@ Widget _dbLine(BuildContext context, ToolCallInfo call) {
       final table = _string(details['table']).ifEmpty(call.argument('table'));
       final tables = _int(details['tables']);
       if (table.isNotEmpty) {
-        return ToolLine('Read the table', subject: table, code: true);
+        return ToolLine(
+          failed ? "Couldn't read the table" : 'Read the table',
+          subject: table,
+          code: true,
+        );
       }
+      if (failed) return ToolLine("Couldn't read $what's tables");
       return ToolLine(
         "Read $what's tables",
         after: tables == null ? '' : _count(tables, 'table'),
@@ -2301,7 +2375,11 @@ class _SecretLine extends StatelessWidget {
         .ifEmpty(call.argument('secret'));
     final agents = _secretAgents(context, call);
     final done = call.done;
-    final lead = give ? (done ? 'Gave' : 'Giving') : (done ? 'Took' : 'Taking');
+    final lead = call.failed
+        ? (give ? "Couldn't give" : "Couldn't take")
+        : give
+        ? (done ? 'Gave' : 'Giving')
+        : (done ? 'Took' : 'Taking');
     final words = TypeScale.of(context).body.copyWith(color: palette.textMuted);
     return Row(
       children: [
@@ -2340,6 +2418,12 @@ Widget _secretsListLine(BuildContext context, ToolCallInfo call) {
   final secrets = call.details.containsKey('secrets')
       ? _list(call.details['secrets']).length
       : null;
+  if (call.failed) {
+    return ToolLine(
+      "Couldn't list secrets",
+      after: query.isEmpty ? '' : '“$query”',
+    );
+  }
   return ToolLine(
     secrets == null
         ? 'Listed secrets'

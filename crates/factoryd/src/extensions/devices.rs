@@ -13,6 +13,12 @@
 //! Pairings live in factory.db. Their state follows devices.json: the card
 //! changes as the device uses the code and is allowed, or the code ends, and
 //! the agent is told how it ended.
+//!
+//! `factoryd pair` on this computer's command line asks the same way
+//! (RequestAddDevice, `request`), with no code for whoever ran it: its
+//! pairing is recorded with no agent (`COMMAND_LINE`) and its card shows in
+//! the admin agent's conversation, for display only, never in what its
+//! model reads, and nobody is told how it ended.
 
 use std::fmt::Write as _;
 use std::sync::{Arc, Weak};
@@ -148,6 +154,90 @@ struct RemoveArgs {
 /// The longest name a device may be given.
 const MAX_NAME: usize = 60;
 
+/// A pairing's agent when `factoryd pair` started it (RequestAddDevice).
+const COMMAND_LINE: &str = "";
+
+/// The most devices `factoryd pair` may have waiting at once.
+const MAX_FROM_COMMAND_LINE: usize = 3;
+
+/// Why `factoryd pair` can't ask: no admin agent shows its card.
+const NO_ADMIN: &str = "There's no admin agent here to show you the request. Add the device yourself: on a device connected to this Claktory, open Settings → Devices → Add a device.";
+
+/// The agent whose conversation shows `factoryd pair`'s cards: the first
+/// admin agent, if there is one.
+fn admin(config: &crate::config::Config) -> Option<String> {
+    config.agents.iter().find(|agent| crate::proposals::is_admin(agent)).map(|agent| agent.id.clone())
+}
+
+/// RequestAddDevice (`factoryd pair`): a device waits for its code as Add a
+/// device makes it, and its card shows in the admin agent's conversation,
+/// where the person's app gets the code (ShowPairingCode). Never the code:
+/// only the device's id and when its code ends. A name already waiting
+/// from the command line gets that one again.
+pub(crate) async fn request(factory: &Arc<Factory>, name: &str) -> Result<v1::AddDeviceRequested, RequestError> {
+    let name = name.trim().to_owned();
+    if name.chars().count() > MAX_NAME {
+        return Err(RequestError::Remote(format!("That name is too long: keep it to {MAX_NAME} characters.")));
+    }
+    let Some(admin) = admin(&factory.lock().config) else { return Err(RequestError::Remote(NO_ADMIN.to_owned())) };
+    let waiting = live_rows(&factory.store, Some(COMMAND_LINE))?;
+    let asked = if name.is_empty() { remote::UNNAMED } else { name.as_str() };
+    if let Some(row) = waiting.iter().find(|row| row.name.eq_ignore_ascii_case(asked)) {
+        return Ok(v1::AddDeviceRequested { device_id: row.device.clone(), expires_ms: row.expires });
+    }
+    if waiting.len() >= MAX_FROM_COMMAND_LINE {
+        return Err(RequestError::Remote(format!(
+            "{MAX_FROM_COMMAND_LINE} devices already wait to be added from the command line. Add or cancel them in Needs you first."
+        )));
+    }
+    let home = factory.home.clone();
+    let paired = tokio::task::spawn_blocking(move || remote::pair(&home, &name)).await.map_err(std::io::Error::other)?;
+    let (token, device) = paired.map_err(|error| RequestError::Remote(error.to_string()))?;
+    let expires = device.code_expires.unwrap_or_default();
+    let row = {
+        let db = factory.store.db();
+        let added = db.execute(
+            "INSERT INTO device_pairings (agent, device, created, name, expires, state) VALUES (?1, ?2, ?3, ?4, ?5, 'waiting')",
+            params![COMMAND_LINE, device.id, device.created, device.name, expires],
+        );
+        match added {
+            Ok(_) => Row {
+                id: db.last_insert_rowid(),
+                agent: COMMAND_LINE.to_owned(),
+                device: device.id.clone(),
+                created: device.created,
+                name: device.name.clone(),
+                expires,
+                state: State::Waiting,
+                ended: None,
+            },
+            Err(error) => {
+                drop(db);
+                let _ = remote::cancel(&factory.home, &device.id);
+                return Err(error.into());
+            }
+        }
+    };
+    factory.keep_code(&row.id.to_string(), token);
+    factory.refresh_remote();
+    // Its card, now if the admin agent's conversation is read, else when it is.
+    let _ = factory.ensure_loaded(&admin).await;
+    show(factory, &admin, &row);
+    Ok(v1::AddDeviceRequested { device_id: device.id, expires_ms: expires })
+}
+
+/// Shows a command line's pairing in `admin`'s conversation as it is now.
+fn show(factory: &Arc<Factory>, admin: &str, row: &Row) {
+    let mut inner = factory.lock();
+    let Some(entry) =
+        inner.agents.get_mut(admin).and_then(|runtime| runtime.transcript.as_mut()).map(|transcript| transcript.show_device_pairing(row.card(admin)))
+    else {
+        return;
+    };
+    factory.send_change(&inner, admin, crate::transcript::Change::Entry(entry));
+    factory.broadcast_workspace(&inner);
+}
+
 /// Starts adding a device: its code waits for it, shown in the agent's
 /// conversation by the card after the call. The result names the pairing,
 /// never the code.
@@ -220,6 +310,7 @@ pub(crate) fn started(tool: &str, is_error: bool, details: &Value) -> Option<v1:
         expires_ms: details.get("expires_ms").and_then(Value::as_i64).unwrap_or_default(),
         ended_ms: 0,
         kind: device_kind(&text("kind")).into(),
+        from_command_line: false,
     })
 }
 
@@ -329,7 +420,14 @@ impl Row {
             // Not recorded here: the shown card keeps what the call said
             // (`Transcript::set_device_pairing` inherits it).
             kind: v1::DeviceKind::Unspecified.into(),
+            from_command_line: self.agent == COMMAND_LINE,
         }
+    }
+
+    /// Its card in `shown_in`'s conversation: a command line's shows in the
+    /// admin agent's.
+    fn card(&self, shown_in: &str) -> v1::DevicePairing {
+        v1::DevicePairing { agent_id: shown_in.to_owned(), ..self.to_proto() }
     }
 
     fn live(&self) -> bool {
@@ -369,19 +467,29 @@ fn live_rows(store: &Store, agent: Option<&str>) -> rusqlite::Result<Vec<Row>> {
     )
 }
 
-/// Shows the agent's pairings as they are in its just-loaded conversation.
-pub(crate) fn restore(store: &Store, agent: &str, transcript: &mut Transcript) -> rusqlite::Result<()> {
+/// Shows the agent's pairings as they are in its just-loaded conversation;
+/// an admin agent's (`admin`) also the command line's still waiting.
+pub(crate) fn restore(store: &Store, agent: &str, admin: bool, transcript: &mut Transcript) -> rusqlite::Result<()> {
     let db = store.db();
     let mut statement = db.prepare(&format!("SELECT {COLUMNS} FROM device_pairings WHERE agent = ?1 ORDER BY id"))?;
     for row in statement.query_map([agent], Row::read)? {
         transcript.set_device_pairing(row?.to_proto());
     }
+    drop(statement);
+    drop(db);
+    if admin {
+        for row in live_rows(store, Some(COMMAND_LINE))? {
+            transcript.show_device_pairing(row.card(agent));
+        }
+    }
     Ok(())
 }
 
-/// Whether a device the agent adds waits for the person.
-pub(crate) fn waiting_of(store: &Store, agent: &str) -> bool {
+/// Whether a device the agent adds waits for the person; for an admin
+/// agent (`admin`), also one `factoryd pair` asked for.
+pub(crate) fn waiting_of(store: &Store, agent: &str, admin: bool) -> bool {
     live_rows(store, Some(agent)).is_ok_and(|rows| !rows.is_empty())
+        || (admin && live_rows(store, Some(COMMAND_LINE)).is_ok_and(|rows| !rows.is_empty()))
 }
 
 /// An agent is deleted: its pairings go, and codes still waiting stop working.
@@ -450,18 +558,20 @@ pub(crate) fn sync(factory: &Arc<Factory>) -> bool {
         }
         {
             let mut inner = factory.lock();
+            let shown_in = if row.agent == COMMAND_LINE { admin(&inner.config) } else { Some(row.agent.clone()) };
+            let Some(shown_in) = shown_in else { continue };
             let entry = inner
                 .agents
-                .get_mut(&row.agent)
+                .get_mut(&shown_in)
                 .and_then(|runtime| runtime.transcript.as_mut())
-                .and_then(|transcript| transcript.set_device_pairing(row.to_proto()));
+                .and_then(|transcript| transcript.set_device_pairing(row.card(&shown_in)));
             if let Some(entry) = entry {
-                factory.send_change(&inner, &row.agent, crate::transcript::Change::Entry(entry));
+                factory.send_change(&inner, &shown_in, crate::transcript::Change::Entry(entry));
                 // Whether it waits for the person shows with the agent.
                 factory.broadcast_workspace(&inner);
             }
         }
-        if !row.live() {
+        if !row.live() && row.agent != COMMAND_LINE {
             tell(factory, &row);
         }
     }

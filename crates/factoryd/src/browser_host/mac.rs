@@ -18,6 +18,11 @@
 //! running. A VM left over by a factoryd that didn't get to stop it
 //! (killed, say) is stopped before the next starts: each carries this
 //! Claktory's label.
+//!
+//! The dev Claktory alone can run the same image through podman instead
+//! (`Engine::Podman`, FACTORY_BROWSER_PODMAN, `scripts/dev-browser-image.sh`),
+//! for a dev Claktory started from an agent's shell, which can't reach
+//! Apple's tool.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -73,14 +78,95 @@ fn name(home: &Path, agent: &str) -> String {
 
 /// The image to run, by the reference it's loaded under (`image`), once
 /// it's loaded as this build says it must be; a test's, loaded on this
-/// Mac, by its name. Runs `container`: never under the Factory's lock.
-fn image(home: &Path, container: &Path) -> Result<String, String> {
+/// Mac, by its name; podman's, by the id of the one it holds under the
+/// name given. Runs the engine: never under the Factory's lock.
+fn image(home: &Path, engine: &Engine) -> Result<String, String> {
     if let Some(image) = TEST_IMAGE.get() {
         return Ok(image.clone());
     }
-    let built = super::image::Built::this(dev(home))?;
-    super::image::ensure(home, container, &built)?;
-    Ok(built.reference)
+    match engine {
+        Engine::Container(container) => {
+            let built = super::image::Built::this(dev(home))?;
+            super::image::ensure(home, container, &built)?;
+            Ok(built.reference)
+        }
+        Engine::Podman(podman) => podman_image_id(podman, &podman_image(home).unwrap_or_default()),
+    }
+}
+
+/// What runs the browser's VMs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Engine {
+    /// Apple's container tool.
+    Container(PathBuf),
+    /// Podman, only for the dev Claktory, when FACTORY_BROWSER_PODMAN names
+    /// an image podman holds: a dev Claktory started from an agent's shell
+    /// runs inside the confine, which keeps it from Apple's tool.
+    Podman(PathBuf),
+}
+
+impl Engine {
+    fn program(&self) -> &Path {
+        match self {
+            Engine::Container(program) | Engine::Podman(program) => program,
+        }
+    }
+}
+
+/// Where podman is installed: Homebrew's, or podman's own installer's.
+const PODMAN: [&str; 3] = ["/opt/homebrew/bin/podman", "/opt/podman/bin/podman", "/usr/local/bin/podman"];
+
+/// The image podman runs, when this is the dev Claktory and
+/// FACTORY_BROWSER_PODMAN names one; None for every other Claktory.
+fn podman_image(home: &Path) -> Option<String> {
+    podman_image_asked(home, std::env::var("FACTORY_BROWSER_PODMAN").ok())
+}
+
+fn podman_image_asked(home: &Path, asked: Option<String>) -> Option<String> {
+    if TEST_IMAGE.get().is_some() || !dev(home) {
+        return None;
+    }
+    asked.filter(|image| !image.is_empty())
+}
+
+/// The engine this Claktory runs its browser's VMs with, where it's
+/// installed.
+fn engine(home: &Path) -> Result<Engine, String> {
+    if podman_image(home).is_some() {
+        return PODMAN
+            .iter()
+            .map(PathBuf::from)
+            .find(|path| path.is_file())
+            .map(Engine::Podman)
+            .ok_or_else(|| "FACTORY_BROWSER_PODMAN is set, but podman isn't on this Mac.".to_owned());
+    }
+    container().map(Engine::Container).ok_or_else(|| "Apple's container tool isn't on this Mac.".to_owned())
+}
+
+/// The image podman runs: the one `asked` names by its id (the SHA-256
+/// of its configuration, which podman checks its layers against), once
+/// podman says it holds that one.
+fn podman_image_id(podman: &Path, asked: &str) -> Result<String, String> {
+    let id = image_id(asked).ok_or_else(|| {
+        format!("FACTORY_BROWSER_PODMAN must be an image's id, 64 hex characters (scripts/dev-browser-image.sh prints it), not {asked}")
+    })?;
+    let said = std::process::Command::new(podman)
+        .args(["image", "inspect", "--format", "{{.Id}}", &id])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| format!("podman didn't run: {error}"))?;
+    if said.status.success() && String::from_utf8_lossy(&said.stdout).trim() == id {
+        return Ok(id);
+    }
+    let why = String::from_utf8_lossy(&said.stderr);
+    Err(format!("podman has no image {id} (build one with scripts/dev-browser-image.sh): {}", super::view::cleaned(why.trim(), 200)))
+}
+
+/// An image's id as podman takes it: 64 lowercase hex characters, with or
+/// without `sha256:`; None for anything else, a name included.
+fn image_id(asked: &str) -> Option<String> {
+    let id = asked.strip_prefix("sha256:").unwrap_or(asked);
+    (id.len() == 64 && id.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))).then(|| id.to_owned())
 }
 
 /// A test's options before the image and arguments after it (a stand-in
@@ -126,6 +212,14 @@ pub(crate) fn problem(home: &Path) -> Option<v1::AgentBrowserSetup> {
     if macos_major().is_some_and(|major| major < 26) {
         return Some(unsupported("Claktory's browser needs macOS 26 or later. Update macOS in System Settings, then try again."));
     }
+    if let Some(reference) = podman_image(home) {
+        let problem = |problem: String| v1::AgentBrowserSetup { problem, ..Default::default() };
+        let podman = match engine(home) {
+            Ok(engine) => engine,
+            Err(why) => return Some(problem(why)),
+        };
+        return podman_image_id(podman.program(), &reference).err().map(problem);
+    }
     if TEST_IMAGE.get().is_none()
         && let Err(why) = super::image::Built::this(dev(home))
     {
@@ -170,7 +264,7 @@ pub(crate) fn problem(home: &Path) -> Option<v1::AgentBrowserSetup> {
     }
     // Its image, got and loaded the first time (W11): what the card says
     // meanwhile.
-    image(home, &container).err().map(|problem| v1::AgentBrowserSetup { problem, ..Default::default() })
+    image(home, &Engine::Container(container)).err().map(|problem| v1::AgentBrowserSetup { problem, ..Default::default() })
 }
 
 /// `container --version`'s version ("container CLI version 1.7.1 (build: …)").
@@ -213,23 +307,27 @@ fn os_version() -> Option<String> {
 /// profile.
 pub(crate) fn spawn(factory: &Arc<Factory>, agent: &str) -> Result<Io, String> {
     let home = factory.home().root();
-    let container = container().ok_or("Apple's container tool isn't on this Mac.")?;
-    let image = image(home, &container)?;
+    let engine = engine(home)?;
+    let image = image(home, &engine)?;
     let base = name(home, agent);
     let kind = base.strip_prefix("claktory-browser-").unwrap_or_default().to_owned();
     // Its own name each time, so a VM still stopping never blocks the next.
     let own = format!("{base}-{:x}", crate::transcript::now_ms());
-    let mut command = Command::new(&container);
+    let mut command = Command::new(engine.program());
     command
         .args(["run", "-i", "--rm", "--name", &own, "--label", &format!("{LABEL}={kind}")])
-        .args(["-m", MEMORY, "--dns", DNS, "--cap-add", "CAP_NET_ADMIN"])
-        // The runner mounts a /proc of its own (hidepid) in its own
-        // namespaces; the paths `container` masks or makes read-only under
-        // /proc lock that mount (EPERM). Only the VM's root sees them
-        // unmasked, until the entrypoint drops to the browser's user with
-        // no capabilities; the VM is the boundary.
-        .args(["--masked-path", "NONE", "--read-only-path", "NONE"])
-        .args(["-v", &format!("{base}:{MOUNT}")]);
+        .args(["-m", MEMORY, "--dns", DNS, "--cap-add", "CAP_NET_ADMIN"]);
+    // The runner mounts a /proc of its own (hidepid) in its own
+    // namespaces; the paths the engine masks or makes read-only under
+    // /proc lock that mount (EPERM). Only the VM's root sees them
+    // unmasked, until the entrypoint drops to the browser's user with no
+    // capabilities; the VM is the boundary. Podman's VM labels the
+    // container for SELinux too, which refuses that mount (EACCES).
+    match engine {
+        Engine::Container(_) => command.args(["--masked-path", "NONE", "--read-only-path", "NONE"]),
+        Engine::Podman(_) => command.args(["--security-opt", "unmask=ALL", "--security-opt", "label=disable"]),
+    };
+    command.args(["-v", &format!("{base}:{MOUNT}")]);
     let (options, arguments) = TEST_RUN.get().cloned().unwrap_or_default();
     command.args(options).arg(&image).args(arguments);
     command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
@@ -244,7 +342,7 @@ pub(crate) fn spawn(factory: &Arc<Factory>, agent: &str) -> Result<Io, String> {
         // then killed.
         let turn = turn(&base);
         let _turn = turn.lock().await;
-        clear(&container, &base, &kind).await;
+        clear(&engine, &base, &kind).await;
         // Let go of while it waited: none starts.
         if quitting.is_cancelled() {
             return;
@@ -291,7 +389,7 @@ pub(crate) fn spawn(factory: &Arc<Factory>, agent: &str) -> Result<Io, String> {
         }
         drop(runner);
         // Ended: its VM too, whatever ended it; only then is the host told.
-        stop(&container, &own).await;
+        stop(&engine, &own).await;
         drop(from_vm);
     });
     Ok(Io { to, from, quit })
@@ -310,19 +408,23 @@ fn turn(name: &str) -> Arc<tokio::sync::Mutex<()>> {
 /// once no VM uses it: what's left of a profile deleted while its VM ran,
 /// or the whole profile when none did. Ok when it's gone (or never was).
 pub(crate) async fn forget(home: &Path, agent: &str) -> Result<(), String> {
-    let Some(container) = container() else { return Ok(()) };
+    let Ok(engine) = engine(home) else { return Ok(()) };
     let volume = name(home, agent);
     let turn = turn(&volume);
     let _turn = turn.lock().await;
     let kind = volume.strip_prefix("claktory-browser-").unwrap_or_default().to_owned();
-    clear(&container, &volume, &kind).await;
-    let said = Command::new(&container).args(["volume", "delete", &volume]).stdin(Stdio::null()).output().await;
-    let listed = Command::new(&container)
-        .args(["volume", "list", "--quiet"])
+    clear(&engine, &volume, &kind).await;
+    let (delete, list) = match engine {
+        Engine::Container(_) => (["volume", "delete"], ["volume", "list", "--quiet"]),
+        Engine::Podman(_) => (["volume", "rm"], ["volume", "ls", "--quiet"]),
+    };
+    let said = Command::new(engine.program()).args(delete).arg(&volume).stdin(Stdio::null()).output().await;
+    let listed = Command::new(engine.program())
+        .args(list)
         .stdin(Stdio::null())
         .output()
         .await
-        .map_err(|error| format!("Apple's container tool didn't run: {error}"))?;
+        .map_err(|error| format!("{} didn't run: {error}", engine.program().display()))?;
     if String::from_utf8_lossy(&listed.stdout).lines().any(|line| line.trim() == volume) {
         let why = said.map(|said| String::from_utf8_lossy(&said.stderr).trim().to_owned()).unwrap_or_else(|error| error.to_string());
         return Err(format!("its volume {volume} stayed: {}", super::view::cleaned(&why, 200)));
@@ -335,11 +437,15 @@ const GONE: Duration = Duration::from_secs(15);
 
 /// Ends the VM `id` at once (its runner is gone, or never answered) and
 /// waits until it's gone.
-async fn stop(container: &Path, id: &str) {
-    let _ = Command::new(container).args(["kill", id]).stdin(Stdio::null()).output().await;
-    let _ = Command::new(container).args(["delete", "--force", id]).stdin(Stdio::null()).output().await;
+async fn stop(engine: &Engine, id: &str) {
+    let delete = match engine {
+        Engine::Container(_) => "delete",
+        Engine::Podman(_) => "rm",
+    };
+    let _ = Command::new(engine.program()).args(["kill", id]).stdin(Stdio::null()).output().await;
+    let _ = Command::new(engine.program()).args([delete, "--force", id]).stdin(Stdio::null()).output().await;
     let until = tokio::time::Instant::now() + GONE;
-    while listed(container).await.iter().any(|entry| entry.get("id").and_then(|value| value.as_str()) == Some(id)) {
+    while listed(engine).await.iter().any(|vm| vm.id == id) {
         if tokio::time::Instant::now() >= until {
             tracing::warn!(%id, "a VM of Claktory's browser didn't go when told");
             return;
@@ -350,34 +456,53 @@ async fn stop(container: &Path, id: &str) {
 
 /// Ends every VM of this Claktory's browser left from before (a factoryd
 /// that ended without ending them), before a new one starts.
-async fn clear(container: &Path, base: &str, kind: &str) {
-    for id in leftovers(&listed(container).await, base, kind) {
+async fn clear(engine: &Engine, base: &str, kind: &str) {
+    for id in leftovers(&listed(engine).await, base, kind) {
         tracing::info!(%id, "stopping a VM Claktory's browser left running");
-        stop(container, &id).await;
+        stop(engine, &id).await;
     }
 }
 
-/// `container list --all`, as it says it.
-async fn listed(container: &Path) -> Vec<serde_json::Value> {
-    let Ok(said) = Command::new(container).args(["list", "--all", "--format", "json"]).stdin(Stdio::null()).output().await else {
-        return Vec::new();
-    };
-    serde_json::from_slice(&said.stdout).unwrap_or_default()
+/// A VM the engine lists: its name, and its label's value.
+#[derive(Debug)]
+struct Vm {
+    id: String,
+    label: Option<String>,
 }
 
-/// The ids of the VMs in `container list --format json` that are this
-/// Claktory home's own: its label's value exactly `kind`, and named
-/// `<base>-<hex>` as `spawn` names them, never another home's.
-fn leftovers(listed: &[serde_json::Value], base: &str, kind: &str) -> Vec<String> {
+/// Every VM the engine has, running or not.
+async fn listed(engine: &Engine) -> Vec<Vm> {
+    let list = match engine {
+        Engine::Container(_) => "list",
+        Engine::Podman(_) => "ps",
+    };
+    let Ok(said) = Command::new(engine.program()).args([list, "--all", "--format", "json"]).stdin(Stdio::null()).output().await else {
+        return Vec::new();
+    };
+    vms(engine, &serde_json::from_slice::<Vec<serde_json::Value>>(&said.stdout).unwrap_or_default())
+}
+
+/// The VMs in what the engine's list says: `container list` names each by
+/// its id; podman by the first of its names.
+fn vms(engine: &Engine, listed: &[serde_json::Value]) -> Vec<Vm> {
+    let (id, labels) = match engine {
+        Engine::Container(_) => ("/id", "/configuration/labels"),
+        Engine::Podman(_) => ("/Names/0", "/Labels"),
+    };
     listed
         .iter()
-        .filter(|entry| {
-            entry.pointer(&format!("/configuration/labels/{}", LABEL.replace('/', "~1"))).and_then(|value| value.as_str()) == Some(kind)
+        .filter_map(|entry| {
+            let label = entry.pointer(labels).and_then(|labels| labels.get(LABEL)).and_then(|value| value.as_str()).map(str::to_owned);
+            Some(Vm { id: entry.pointer(id)?.as_str()?.to_owned(), label })
         })
-        .filter_map(|entry| entry.get("id").and_then(|id| id.as_str()))
-        .filter(|id| own_id(id, base))
-        .map(str::to_owned)
         .collect()
+}
+
+/// The VMs that are this Claktory home's own: its label's value exactly
+/// `kind`, and named `<base>-<hex>` as `spawn` names them, never another
+/// home's.
+fn leftovers(listed: &[Vm], base: &str, kind: &str) -> Vec<String> {
+    listed.iter().filter(|vm| vm.label.as_deref() == Some(kind) && own_id(&vm.id, base)).map(|vm| vm.id.clone()).collect()
 }
 
 /// Whether `id` is a name `spawn` gives this home's VMs: `<base>-<hex>`.
@@ -437,6 +562,7 @@ mod tests {
         ]"#
         ))
         .unwrap();
+        let listed = vms(&Engine::Container(PathBuf::new()), &listed);
         assert_eq!(leftovers(&listed, &person, kind), [format!("{person}-18f2a")]);
         assert_eq!(leftovers(&listed, &yukako, agent_kind), [format!("{yukako}-18f2b")]);
     }
@@ -459,10 +585,60 @@ mod tests {
         ]"#
         ))
         .unwrap();
+        let listed = vms(&Engine::Container(PathBuf::new()), &listed);
         assert_eq!(leftovers(&listed, &a, kind_a), [format!("{a}-18f2a")]);
         assert_eq!(leftovers(&listed, &b, kind_b), [format!("{b}-18f2b")]);
         assert_eq!(leftovers(&listed, "claktory-browser-dev", "dev"), ["claktory-browser-dev-18f2c"]);
         assert!(leftovers(&[], &a, kind_a).is_empty());
+    }
+
+    /// Podman lists its VMs by name, labels at the top: the same home's
+    /// own are found, another home's left alone.
+    #[test]
+    fn podman_lists_this_homes_own_vms() {
+        let a = name(Path::new("/Users/someone/.factory"), "yukako");
+        let kind_a = a.strip_prefix("claktory-browser-").unwrap();
+        let listed: Vec<serde_json::Value> = serde_json::from_str(&format!(
+            r#"[
+            {{"Id": "15f9be8f", "Names": ["{a}-18f2a"], "Labels": {{"claktory.browser": "{kind_a}", "io.buildah.version": "1.42.2"}}}},
+            {{"Id": "25f9be8f", "Names": ["claktory-browser-dev-18f2c"], "Labels": {{"claktory.browser": "dev"}}}},
+            {{"Id": "35f9be8f", "Names": ["{a}-18f2d"], "Labels": null}},
+            {{"Id": "45f9be8f", "Names": [], "Labels": {{"claktory.browser": "{kind_a}"}}}}
+        ]"#
+        ))
+        .unwrap();
+        let listed = vms(&Engine::Podman(PathBuf::new()), &listed);
+        assert_eq!(leftovers(&listed, &a, kind_a), [format!("{a}-18f2a")]);
+        assert_eq!(leftovers(&listed, "claktory-browser-dev", "dev"), ["claktory-browser-dev-18f2c"]);
+    }
+
+    /// Podman runs an image only by its id, never by a name that could
+    /// move to another image.
+    #[test]
+    fn podman_runs_an_image_only_by_its_id() {
+        let id = "34a90f858160".repeat(6)[..64].to_owned();
+        assert_eq!(image_id(&id), Some(id.clone()));
+        assert_eq!(image_id(&format!("sha256:{id}")), Some(id.clone()));
+        assert_eq!(image_id("localhost/claktory-browser-dev:v0.1.28"), None);
+        assert_eq!(image_id(&id.to_uppercase()), None);
+        assert_eq!(image_id(&id[..63]), None);
+        assert_eq!(image_id(&format!("--privileged {}", &id[..51])), None);
+    }
+
+    /// Only the dev Claktory runs its browser through podman, however it's
+    /// asked.
+    #[test]
+    fn only_the_dev_claktory_takes_podman() {
+        let asked = || Some("localhost/claktory-browser-dev:v1".to_owned());
+        assert_eq!(podman_image_asked(Path::new("/Users/someone/.factory"), asked()), None);
+        assert_eq!(podman_image_asked(Path::new("/Users/someone/qa/.factory-dev"), asked()), None);
+        if let Some(account) = super::super::account_home() {
+            let dev = account.join(".factory-dev");
+            assert_eq!(podman_image_asked(&dev, asked()), asked());
+            assert_eq!(podman_image_asked(&dev, Some(String::new())), None);
+            assert_eq!(podman_image_asked(&dev, None), None);
+            assert_eq!(podman_image_asked(&account.join(".factory"), asked()), None);
+        }
     }
 
     #[test]

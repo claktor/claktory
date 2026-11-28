@@ -158,7 +158,7 @@ async fn admin_agents_are_told_once_when_memory_or_disk_runs_low() {
     assert!(matches!(&refused, Body::Error(error) if error.message.contains("ram_percent must be from 1 to 100")), "{refused:?}");
 }
 
-/// Friend bug #13: the machine's health is Rivet's. An agent with Resources
+/// The machine's health is Rivet's. An agent with Resources
 /// on that isn't an admin agent can look, but isn't told; with no admin
 /// agent to take it, Claktory notifies the person itself, once per crossing.
 #[tokio::test]
@@ -211,7 +211,7 @@ async fn the_machine_is_rivets_and_without_rivet_claktory_tells_the_person() {
     assert_eq!(told(&view, low_memory), 1, "Rivet heard only the first");
 }
 
-/// #455: a disk that's still short after a restart isn't told again: what
+/// A disk that's still short after a restart isn't told again: what
 /// was told is kept in factory.db until the disk recovers, and a later drop
 /// is told again.
 #[tokio::test]
@@ -287,7 +287,7 @@ impl Drop for Killed {
     }
 }
 
-/// Part 2 #4 (#454): a process that uses a full core for an hour, owned by
+/// Part 2 #4: a process that uses a full core for an hour, owned by
 /// no agent's task (a leftover `cat /dev/zero` did for 37 hours), is told
 /// to the admin agents once, a restart included; an agent's task isn't.
 // Its leftover is a Unix process group's; on Windows commands are in jobs.
@@ -357,7 +357,7 @@ async fn a_stray_process_on_a_full_core_is_told_once_and_an_agents_task_never() 
     assert_eq!(of(&view, &pid).len(), 1, "told again after a restart");
 }
 
-/// Friend bug #54: the person chooses who hears the alerts: the admin
+/// The person chooses who hears the alerts: the admin
 /// agents unless they turn that off, and agents they choose, which get
 /// Resources turned on in the same change. Settings says who's told.
 #[tokio::test]

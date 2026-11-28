@@ -20,6 +20,7 @@ use openmls::messages::group_info::VerifiableGroupInfo;
 use openmls::prelude::{GroupId, MlsMessageBodyIn, OpenMlsProvider, ProcessedMessageContent, Proposal, ProposalStore, PublicGroup, Sender};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::Deserialize;
+use tls_codec::Serialize as _;
 use serde_json::{Value, json};
 
 use super::identity::{Refusal, body, invalid, take};
@@ -96,6 +97,16 @@ CREATE INDEX IF NOT EXISTS dm_welcomes_accepted ON dm_welcomes (accepted);
 CREATE TABLE IF NOT EXISTS dm_group_people (
     group_id BLOB PRIMARY KEY,
     both_since INTEGER
+) WITHOUT ROWID;
+-- A member's device said its state can't catch up with the group's at
+-- `epoch` (E11-8: its own epoch is past it, Fugo's floor): every member's
+-- device sees it in GET groups until the epoch moves, and one of them
+-- makes an empty commit so the stuck one can rejoin above its floor.
+CREATE TABLE IF NOT EXISTS dm_out_of_step (
+    group_id BLOB PRIMARY KEY,
+    epoch INTEGER NOT NULL,
+    leaf_id TEXT NOT NULL,
+    at INTEGER NOT NULL
 ) WITHOUT ROWID;
 ";
 
@@ -1165,7 +1176,8 @@ fn messages(db: &Connection, caller: &Caller, id: &str, query: &str, now_ms: i64
 }
 
 /// `GET groups`: the groups the caller fetches.
-fn list(db: &Connection, caller: &Caller, now_ms: i64) -> Result<Value, Refusal> {
+fn list(transaction: &Transaction<'_>, keys: &Keys, caller: &Caller, now_ms: i64) -> Result<Value, Refusal> {
+    let db: &Connection = transaction;
     let account = caller.account_id();
     let candidates: Vec<Group> = {
         let mut statement = db.prepare(&format!(
@@ -1178,10 +1190,69 @@ fn list(db: &Connection, caller: &Caller, now_ms: i64) -> Result<Value, Refusal>
     let mut groups = Vec::new();
     for group in candidates {
         if reach(db, caller, &group, now_ms)?.is_some() {
-            groups.push(shown(db, caller, &group, now_ms)?);
+            let mut item = shown(db, caller, &group, now_ms)?;
+            if matches!(caller, Caller::Device { .. }) {
+                checked_by(transaction, keys, &group, now_ms, &mut item)?;
+            }
+            groups.push(item);
         }
     }
     Ok(json!({"groups": groups}))
+}
+
+/// What a device checks its own state of `group` against (E11-8), into
+/// `shown`: the leaves of the tree now (`leaf_ids`), the confirmation tag of
+/// the current epoch (`confirmation_tag`, base64url of its TLS encoding),
+/// the latest signed list version kept for each account in it
+/// (`list_versions`), and whether a member's device said it's out of step
+/// at this epoch (`out_of_step`).
+fn checked_by(transaction: &Transaction<'_>, keys: &Keys, group: &Group, now_ms: i64, shown: &mut Value) -> Result<(), Refusal> {
+    let key = seal_key(keys, transaction, &group.id, now_ms)?;
+    let provider = Provider::public(crypto(), transaction, &key).map_err(|error| broken(&error.to_string()))?;
+    if let Some(public) = PublicGroup::load(provider.storage(), &GroupId::from_slice(&group.id)).map_err(|error| broken(&error.to_string()))? {
+        let leaf_ids: Vec<String> = public
+            .members()
+            .filter_map(|member| certified(&member.credential, &member.signature_key))
+            .map(|certificate| certificate.leaf.leaf_id)
+            .collect();
+        shown["leaf_ids"] = json!(leaf_ids);
+        let tag = public.confirmation_tag().tls_serialize_detached().map_err(|error| broken(&error.to_string()))?;
+        shown["confirmation_tag"] = json!(b64(&tag));
+    }
+    let mut versions = serde_json::Map::new();
+    for account in people(transaction, group)? {
+        if let Some(kept) = keys_of(transaction, &account)? {
+            versions.insert(account, json!(kept.list.list.version));
+        }
+    }
+    shown["list_versions"] = Value::Object(versions);
+    let out_of_step: bool = transaction.query_row(
+        "SELECT COUNT(*) > 0 FROM dm_out_of_step WHERE group_id = ?1 AND epoch >= ?2",
+        params![group.id, group.epoch as i64],
+        |row| row.get(0),
+    )?;
+    shown["out_of_step"] = json!(out_of_step);
+    Ok(())
+}
+
+/// Out-of-step words a device may say an hour.
+const OUT_OF_STEP_AN_HOUR: i64 = 6;
+
+/// `POST groups/<id>/out-of-step`: a member's device whose own state is past
+/// the group's (it merged a commit nobody sequenced) and can't rejoin below
+/// the highest epoch it merged (Fugo's floor) says so: the group's devices
+/// see it until the epoch moves, and one makes an empty commit (E11-8).
+fn out_of_step(transaction: &Transaction<'_>, caller: &Caller, id: &str, now_ms: i64) -> Result<(u16, Value), Refusal> {
+    let Caller::Device { .. } = caller else { return Err(not_found()) };
+    let (group, _) = reached(transaction, caller, id, now_ms)?;
+    let leaf = leaf_of(caller)?;
+    take(transaction, &format!("dm-out-of-step:{}:{}", leaf.account, leaf.leaf_id), 3_600_000, OUT_OF_STEP_AN_HOUR, now_ms)?;
+    transaction.execute(
+        "INSERT OR REPLACE INTO dm_out_of_step (group_id, epoch, leaf_id, at) VALUES (?1, ?2, ?3, ?4)",
+        params![group.id, group.epoch as i64, leaf.leaf_id, now_ms],
+    )?;
+    tell(transaction, &group, || Kind::Groups, "", group.last_seq, now_ms)?;
+    Ok((204, Value::Null))
 }
 
 /// `GET groups/<id>/group-info`: the current epoch's, for a rejoin, or for
@@ -1469,6 +1540,7 @@ fn forget(transaction: &Transaction<'_>, id: &[u8]) -> Result<(), Refused> {
     super::space::free_welcomes(transaction, "group_id = ?1", &[&id])?;
     transaction.execute("DELETE FROM dm_welcomes WHERE group_id = ?1", [id])?;
     transaction.execute("DELETE FROM dm_group_people WHERE group_id = ?1", [id])?;
+    transaction.execute("DELETE FROM dm_out_of_step WHERE group_id = ?1", [id])?;
     transaction.execute("DELETE FROM dm_groups WHERE group_id = ?1", [id])?;
     Ok(())
 }
@@ -1494,7 +1566,7 @@ pub fn knows(method: &str, route: &str) -> bool {
         (method, parts.as_slice()),
         ("POST" | "GET", ["groups"])
             | ("GET" | "POST", ["groups", _, "messages"])
-            | ("POST", ["groups", _, "commits" | "proposals"])
+            | ("POST", ["groups", _, "commits" | "proposals" | "out-of-step"])
             | ("GET", ["groups", _, "group-info" | "commits"])
             | ("GET", ["welcomes"])
             | ("DELETE", ["welcomes", _])
@@ -1515,7 +1587,8 @@ pub fn answer(
     let parts: Vec<&str> = route.split('/').collect();
     let (status, answer) = match (method, parts.as_slice()) {
         ("POST", ["groups"]) => (200, create(&transaction, keys, caller, body(bytes)?, now_ms)?),
-        ("GET", ["groups"]) => (200, list(&transaction, caller, now_ms)?),
+        ("GET", ["groups"]) => (200, list(&transaction, keys, caller, now_ms)?),
+        ("POST", ["groups", id, "out-of-step"]) => out_of_step(&transaction, caller, id, now_ms)?,
         ("GET", ["groups", id, "messages"]) => messages(&transaction, caller, id, query, now_ms)?,
         // A self group's and a channel's go through the home now (#451).
         ("POST", ["groups", _, "messages"]) => return Err(super::messages::moved_to_home()),
@@ -1768,7 +1841,11 @@ mod tests {
         assert_eq!((status, &refused["error"]), (409, &json!("exists")));
         assert_eq!(events(&world, "ana", "groups").len(), 1);
 
-        let (_, listed) = call(&mut world, &phone, "GET", "groups", Value::Null);
+        let (_, mut listed) = call(&mut world, &phone, "GET", "groups", Value::Null);
+        // What a device checks its state against (E11-8): read in its own test.
+        for checked in ["leaf_ids", "confirmation_tag", "list_versions", "out_of_step"] {
+            assert!(listed["groups"][0].as_object_mut().expect("a group").remove(checked).is_some(), "{checked}");
+        }
         assert_eq!(listed, json!({"groups": [{"group_id": b64(&id), "kind": "self", "epoch": 0, "last_seq": 0}]}));
         assert_eq!(call(&mut world, &device("bo", "bo-phone"), "GET", "groups", Value::Null).1, json!({"groups": []}));
         let (_, info) = call(&mut world, &phone, "GET", &format!("groups/{}/group-info", b64(&id)), Value::Null);
@@ -2354,6 +2431,53 @@ mod tests {
         let (status, behind) = mailbox(&mut world, &ana.caller(0), &id, 1);
         assert_eq!((status, &behind["error"]), (410, &json!("too_far_behind")));
         assert_eq!(mailbox(&mut world, &ana.caller(0), &id, 2), (200, json!({"messages": [], "has_more": false})));
+    }
+
+    /// E11-8: a device lists its groups with what it checks its own state
+    /// against (the tree's leaves, the epoch's confirmation tag, each
+    /// account's list version), and one past the group's floor says it's
+    /// out of step: every device sees it until the epoch moves.
+    #[test]
+    fn a_device_reads_what_to_check_its_state_against_and_says_it_is_out_of_step() {
+        let mut world = World::new();
+        let mut ana = set_up(&mut world, "ana");
+        let says = Says::SelfGroup { account: "ana".into() };
+        let id = [11; 16];
+        let mut group = start(&mut world, &ana, 0, says.clone(), id, json!({"kind": "self"}));
+        let mac = ana.add(device("ana", "ana-mac"));
+        assert_eq!(call(&mut world, &ana.caller(0), "PUT", "me/keys", ana.put(false)).0, 200);
+        let listed = |world: &mut World| {
+            let (status, listed) = call(world, &ana.caller(0), "GET", "groups", Value::Null);
+            assert_eq!(status, 200, "{listed}");
+            listed["groups"].as_array().expect("groups").iter().find(|item| item["group_id"] == json!(b64(&id))).expect("listed").clone()
+        };
+        let item = listed(&mut world);
+        assert_eq!(item["leaf_ids"], json!([ana.leaves[0].1.certificate.leaf.leaf_id]), "{item}");
+        assert_eq!(item["confirmation_tag"], json!(b64(&group.confirmation_tag().expect("a tag"))));
+        assert_eq!(item["list_versions"], json!({"ana": ana.version}));
+        assert_eq!(item["out_of_step"], json!(false));
+
+        // Ana's Mac, stuck past the group's epoch, says so; a Claktory or
+        // someone else can't.
+        let path = format!("groups/{}/out-of-step", b64(&id));
+        assert_eq!(call(&mut world, &ana.caller(mac), "POST", &path, Value::Null).0, 204);
+        let bo = set_up(&mut world, "bo");
+        assert_eq!(call(&mut world, &bo.caller(0), "POST", &path, Value::Null).0, 404);
+        assert_eq!(listed(&mut world)["out_of_step"], json!(true));
+
+        // The phone's empty commit moves the epoch: no longer said.
+        let out = ana.with(0, |provider, me| group.update(provider, me).expect("an update"));
+        assert_eq!(post_commit(&mut world, &ana.caller(0), &id, &out).0, 200);
+        ana.with(0, |provider, _| group.merge_pending(provider).expect("merged"));
+        let item = listed(&mut world);
+        assert_eq!(item["out_of_step"], json!(false));
+        assert_eq!(item["confirmation_tag"], json!(b64(&group.confirmation_tag().expect("a tag"))), "the new epoch's");
+
+        // A few times an hour at most.
+        for _ in 1..OUT_OF_STEP_AN_HOUR {
+            assert_eq!(call(&mut world, &ana.caller(mac), "POST", &path, Value::Null).0, 204);
+        }
+        assert_eq!(call(&mut world, &ana.caller(mac), "POST", &path, Value::Null).0, 429);
     }
 
     /// Fugo, after Mista's rejoin race: a device already in a group that

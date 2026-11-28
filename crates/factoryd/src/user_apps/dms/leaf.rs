@@ -364,6 +364,12 @@ impl Step<'_> {
         self.keep_pins(&pins)
     }
 
+    /// `account`'s signed device list as this leaf took it (its pinned
+    /// identity's, never older than one seen before), if any yet.
+    pub(crate) fn list_of(&self, account: &str) -> Result<Option<SignedDeviceList>, StepError> {
+        Ok(self.kept_pins()?.and_then(|pins| pins.current(account).and_then(|(_, list)| list.cloned())))
+    }
+
     /// The person's own signed device list as this leaf took it (signed by
     /// their pinned identity, never older than one seen before), if any yet.
     pub(crate) fn own_list(&self) -> Result<Option<SignedDeviceList>, StepError> {

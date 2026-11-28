@@ -23,4 +23,9 @@ std::optional<std::wstring> AppDataFolder();
 // [name] inside AppDataFolder().
 std::optional<std::wstring> AppDataFile(const wchar_t* name);
 
+// The launcher, the Start menu's Claktory, when this app runs from
+// app\<version>\ beside it (../launcher/main.cpp); "" when it runs from
+// anywhere else (a build, an unzipped bundle) or the launcher isn't there.
+std::wstring InstalledLauncher();
+
 #endif  // RUNNER_APP_PATHS_H_

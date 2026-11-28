@@ -1,6 +1,6 @@
 //! Files watched for changes (`factory::watch`): the settings, the sign-ins
 //! and the latest release, read again when the system says one changed
-//! instead of every half second (#454). Each file is watched, and its folder
+//! instead of every half second. Each file is watched, and its folder
 //! (or its nearest folder that exists, while it doesn't), so a file replaced
 //! by a rename, or made later, is seen too.
 

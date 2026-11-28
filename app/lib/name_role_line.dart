@@ -1,8 +1,8 @@
-// An agent's name with its role beside it, quietly, on one line that says
-// who asks in Needs you (needs-you-cards.md §3.10, Matt via Bruno 46581):
-// "Urgent · June · Project Manager · 14:32". The role is cut first, with an
-// ellipsis, and goes entirely before the name is cut; what comes before the
-// name (Urgent) and after it (the time, "3 alerts") stays whole.
+// An agent's name with its role beside it, quietly, on one line that says who
+// asks in Needs you: "Urgent · June · Project Manager · 14:32". The role is
+// cut first, with an ellipsis, and goes entirely before the name is cut; what
+// comes before the name (Urgent) and after it (the time, "3 alerts") stays
+// whole.
 import 'package:flutter/widgets.dart';
 
 /// Below this much room the role isn't shown at all: " · Pr…" says nothing.

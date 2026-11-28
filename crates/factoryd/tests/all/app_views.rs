@@ -45,7 +45,8 @@ title = "Refused"
 
 /// A stand-in host running a views app: view "main" pushes a surface with
 /// a title from the data model and two buttons, "go" (sets the title) and
-/// "brk" (makes the app push something invalid); "blank" shows nothing;
+/// "brk" (makes the app push something invalid), and "plan" (adds a
+/// calendar with an entry opening an agent that isn't here); "blank" shows nothing;
 /// "refused" refuses.
 #[derive(Clone, Default)]
 struct Stand {
@@ -55,11 +56,12 @@ struct Stand {
 fn create(surface: &str, params: &str) -> String {
     json!({"version": "1.0", "createSurface": {"surfaceId": surface, "catalogId": CATALOG,
         "components": [
-            {"id": "root", "component": "Column", "children": ["title", "go", "brk"]},
+            {"id": "root", "component": "Column", "children": ["title", "go", "brk", "plan"]},
             {"id": "title", "component": "Text", "text": {"@path": "/title"}},
             {"id": "go_label", "component": "Text", "text": "Go"},
             {"id": "go", "component": "Button", "child": "go_label", "action": {"event": {"name": "go", "context": {"q": {"@path": "/q"}}}}},
             {"id": "brk", "component": "Button", "child": "go_label", "action": {"event": {"name": "break"}}},
+            {"id": "plan", "component": "Button", "child": "go_label", "action": {"event": {"name": "plan"}}},
         ],
         "dataModel": {"title": params}}})
     .to_string()
@@ -166,6 +168,13 @@ impl Stand {
                     if name == "go" {
                         let update =
                             json!({"version": "1.0", "updateDataModel": {"surfaceId": action.surface, "path": "/title", "value": "went"}});
+                        push(&action.app_id, &action.surface, update.to_string());
+                    } else if name == "plan" {
+                        let rows = json!({"columns": ["id", "title", "open"], "rows": [["a", "Gone", "agent:gone"]]});
+                        let update = json!({"version": "1.0", "updateComponents": {"surfaceId": action.surface, "components": [
+                            {"id": "root", "component": "Column", "children": ["title", "cal"]},
+                            {"id": "cal", "component": "Calendar", "data": rows},
+                        ]}});
                         push(&action.app_id, &action.surface, update.to_string());
                     } else if name == "break" {
                         push(&action.app_id, &action.surface, r#"{"version":"1.0","updateComponents":{"surfaceId":"x"}}"#.into());
@@ -301,6 +310,21 @@ async fn a_view_is_one_surface_for_every_device_kept_in_step() {
     assert!(failure(&mac.request(action(&id, "delete", "go")).await.body).1.contains("isn't \"delete\""));
     let (code, _) = failure(&mac.request(action("charts-0000", "go", "go")).await.body);
     assert_eq!(code, v1::ErrorCode::NotFound);
+
+    // An entry opening an agent that isn't here reaches every device as the app
+    // sent it, so each can say the agent was deleted.
+    mac.ok(action(&id, "plan", "plan")).await;
+    for device in [&mut mac, &mut phone] {
+        let update = device
+            .wait_for(|body| match body {
+                Body::AppViewUpdate(update) if update.surface_id == id && update.seq == 3 => Some(update.clone()),
+                _ => None,
+            })
+            .await;
+        let message: Value = serde_json::from_str(&update.message).expect("JSON");
+        let calendar = message["updateComponents"]["components"].as_array().expect("components").iter().find(|c| c["id"] == "cal").cloned();
+        assert_eq!(calendar.and_then(|c| c.pointer("/data/rows/0/2").cloned()), Some(json!("agent:gone")), "{message}");
+    }
 
     // Something invalid from the app fails the surface for both, keeping what it showed.
     mac.ok(action(&id, "break", "brk")).await;

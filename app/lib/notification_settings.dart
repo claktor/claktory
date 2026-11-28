@@ -1,4 +1,4 @@
-// Settings → Notifications (#273 B4, notifications.md §4 in Research): what
+// Settings → Notifications: what
 // notifies the person and how much it shows, quiet hours, whether this
 // device gets them, and a test. All of it is the backend's
 // (Settings.notifications), but this device's own permission, which is the
@@ -384,7 +384,7 @@ class _QuietTimes extends StatelessWidget {
 /// that zone's.
 String quietHoursNote(NotificationSettings settings, DateTime now) {
   // What comes meanwhile waits: once they end, one notification says how
-  // much needs the person (#364 O3).
+  // much needs the person.
   const plain = 'Notifications wait until these hours end';
   if (settings.timeZone.isEmpty) {
     return '$plain, in the time zone of the computer Claktory runs on.';
@@ -466,7 +466,7 @@ class NotificationSwitch extends StatelessWidget {
 }
 
 /// What Send a test notification says once it's sent: the devices it
-/// reached (#352 P2), [here] first ("this Mac", when this device shows
+/// reached, [here] first ("this Mac", when this device shows
 /// notifications; null when it doesn't), then the paired devices that show
 /// it: an iPhone or iPad registered for pushes, a Mac connected now. An
 /// Android device shows none yet, and one whose system isn't known (an
@@ -760,7 +760,7 @@ class _ThisDeviceNotificationsState extends State<ThisDeviceNotifications>
         Button(label: 'Turn on', onPressed: _ask),
       ),
       // An Android phone pushes can't reach (no Google Play services; a
-      // build without Firebase reads the same). Trish 50964.
+      // build without Firebase reads the same).
       'unavailable' => (
         "This $thisDeviceKind can't get notifications without Google Play "
             "services. Open Claktory to see what's new.",
@@ -790,7 +790,7 @@ class _ThisDeviceNotificationsState extends State<ThisDeviceNotifications>
       ),
     );
     // Android shows no notifications yet (no pushes, nothing while it's
-    // open either), so it says so rather than look set up (#352 P2).
+    // open either), so it says so rather than look set up.
     final none =
         device == null && defaultTargetPlatform == TargetPlatform.android;
     final test = Button(label: 'Send a test notification', onPressed: _test);

@@ -39,7 +39,7 @@ async fn projects_are_dragged_into_the_order_the_person_wants() {
     let rename = v1::UpdateProject { project_id: "lab".into(), name: Some("Research".into()), ..Default::default() };
     apply_request(&mut client, &mut view, client_message::Body::UpdateProject(rename)).await;
     assert_eq!(order(&view), ["ops", "lab", "site"]);
-    let both = v1::UpdateProject { project_id: "site".into(), name: Some("Web".into()), archived: None, before_id: Some("ops".into()) };
+    let both = v1::UpdateProject { project_id: "site".into(), name: Some("Web".into()), archived: None, before_id: Some("ops".into()), brief: None };
     apply_request(&mut client, &mut view, client_message::Body::UpdateProject(both)).await;
     assert_eq!(order(&view), ["site", "ops", "lab"]);
     assert_eq!((view.workspace.projects[0].name.as_str(), view.workspace.projects[2].name.as_str()), ("Web", "Research"));

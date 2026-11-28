@@ -35,8 +35,10 @@ pub(crate) mod moving;
 pub(crate) mod nudge;
 pub(crate) mod pipes;
 pub(crate) mod resources;
+pub(crate) mod seal;
 pub(crate) mod secrets;
 pub(crate) mod settings;
+pub(crate) mod start_over;
 pub(crate) mod swarm;
 pub(crate) mod tasks;
 pub(crate) mod tree;
@@ -219,6 +221,16 @@ pub(crate) fn active(agent: &AgentConfig, extension: &dyn Extension) -> bool {
     enabled(agent, extension.manifest().id) || extension.instances().iter().any(|instance| enabled(agent, instance.key))
 }
 
+/// What the panel `key` shows for `agent` without opening it
+/// (GetChecklist, ListTasks): its body unset while the agent doesn't have
+/// it on, as the panel then shows nothing.
+pub(crate) fn panel_of(factory: &Factory, agent: &str, key: &str) -> Result<v1::ExtensionView, RequestError> {
+    let inner = factory.lock();
+    let config = inner.config.agent(agent).ok_or_else(|| RequestError::UnknownAgent(agent.to_owned()))?;
+    let shown = enabled(config, key).then(|| view(factory, &inner, agent, key)).flatten();
+    Ok(shown.unwrap_or_else(|| v1::ExtensionView { extension_id: key.to_owned(), agent_id: agent.to_owned(), ..v1::ExtensionView::default() }))
+}
+
 /// The panel `key` (an extension or an instance) shows for the agent.
 pub(crate) fn view(factory: &Factory, inner: &Inner, agent: &str, key: &str) -> Option<v1::ExtensionView> {
     let unit = unit(key)?;
@@ -230,7 +242,7 @@ pub(crate) fn view(factory: &Factory, inner: &Inner, agent: &str, key: &str) -> 
 
 /// Every extension, sorted by id, which is also the order of their prompt
 /// sections and tools.
-pub(crate) const ALL: [&dyn Extension; 27] = [
+pub(crate) const ALL: [&dyn Extension; 29] = [
     &agents::Agents,
     &app_grants::AppGrants,
     &ask::Ask,
@@ -251,8 +263,10 @@ pub(crate) const ALL: [&dyn Extension; 27] = [
     &moving::Move,
     &pipes::Pipes,
     &resources::Resources,
+    &seal::Seals,
     &secrets::Secrets,
     &settings::Settings,
+    &start_over::StartOver,
     &swarm::Swarm,
     &tasks::Tasks,
     &tree::Tree,
@@ -576,6 +590,9 @@ pub(crate) fn of_agent(config: &Config, agent: &AgentConfig) -> Vec<v1::AgentExt
 /// Applies a client's change to an agent's settings. A value equal to the
 /// default is left out of config.json, so the file only holds choices.
 pub(crate) fn apply_change(config: &mut Config, agent_id: &str, change: &v1::ExtensionChange) -> Result<(), RequestError> {
+    if cfg!(windows) && change.id == moving::ID {
+        return Err(RequestError::Account(v1::ErrorCode::InvalidRequest, crate::move_run::NOT_ON_WINDOWS.to_owned()));
+    }
     let Some(unit) = unit(&change.id) else { return Err(RequestError::UnknownExtension(change.id.clone())) };
     let manifest = unit.extension.manifest();
     let spec = if change.option_id.is_empty() {

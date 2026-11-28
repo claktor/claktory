@@ -242,7 +242,7 @@ async fn a_background_command_returns_at_once_and_reports_when_it_finishes() {
 }
 
 /// A chatty task's log keeps its start and its most recent output, at most
-/// 50 MB (#525), with a line saying how much went; the event's end of its
+/// 50 MB, with a line saying how much went; the event's end of its
 /// output is still its end.
 #[tokio::test]
 async fn a_chatty_tasks_log_keeps_its_start_and_its_end() {
@@ -283,8 +283,7 @@ async fn a_chatty_tasks_log_keeps_its_start_and_its_end() {
     assert_eq!(went + text.len() as u64 - line.len() as u64 - 1, "first\n".len() as u64 + 62914500 + "last\n".len() as u64, "every byte counted");
 }
 
-/// One that writes it all and ends before it's measured is cut as it ends
-/// (Abbacchio's F2).
+/// One that writes it all and ends before it's measured is cut as it ends.
 #[tokio::test]
 async fn a_task_that_dumps_past_the_cap_and_ends_is_cut_as_it_ends() {
     use factory_agent::tools::task_logs::CAP;

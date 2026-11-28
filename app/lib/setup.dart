@@ -22,12 +22,21 @@ import 'selection.dart' show SelectableArea;
 /// Where to download Claktory for Mac again.
 final downloadMacUrl = Uri.parse('https://claktory.com/download/mac');
 
-/// Whether this app sets this Mac up itself: the Mac's release build of
-/// the real Claktory.
+/// Where to download Claktory for Windows again.
+final downloadWindowsUrl = Uri.parse('https://claktory.com/download/windows');
+
+/// Whether this app sets this computer up itself: a release build of the
+/// real Claktory on a Mac, or on a Windows PC, where the installer laid the
+/// backend down beside the app.
 bool get setsUpThisMac =>
-    defaultTargetPlatform == TargetPlatform.macOS &&
+    (defaultTargetPlatform == TargetPlatform.macOS ||
+        defaultTargetPlatform == TargetPlatform.windows) &&
     kReleaseMode &&
     !isDevBuild;
+
+/// This computer, in a sentence: "this PC" on Windows, "this Mac" elsewhere.
+String get thisComputer =>
+    defaultTargetPlatform == TargetPlatform.windows ? 'this PC' : 'this Mac';
 
 /// Whether this device runs a Claktory of its own: a Mac does, unless
 /// it's marked app only (`install.sh --app-only`, or the person chose a
@@ -37,7 +46,10 @@ Future<bool> runsClaktoryHere({
   SetupChannel channel = const SetupChannel(),
 }) async {
   if (!hasLocalBackend) return false;
-  if (defaultTargetPlatform != TargetPlatform.macOS) return true;
+  if (defaultTargetPlatform != TargetPlatform.macOS &&
+      defaultTargetPlatform != TargetPlatform.windows) {
+    return true;
+  }
   if (!await channel.appOnly()) return true;
   return !isDevBuild && channel.installedHere();
 }
@@ -73,6 +85,7 @@ class InstallResult {
     this.version = '',
     this.running = false,
     this.held = false,
+    this.startsAtSignIn,
     this.dataBytes = 0,
     this.dataComplete = true,
     this.answered = true,
@@ -91,6 +104,7 @@ class InstallResult {
           version: json['version'] as String? ?? '',
           running: json['running'] as bool? ?? false,
           held: json['held'] as bool? ?? false,
+          startsAtSignIn: json['starts_at_sign_in'] as bool?,
           // What a dry run of uninstall would delete, the backend itself
           // aside (it goes either way).
           dataBytes: [
@@ -138,6 +152,11 @@ class InstallResult {
   /// off until they start it; else the app quitting stopped it, and
   /// opening the app starts it.
   final bool held;
+
+  /// On Windows: whether it starts by itself when the person signs in to
+  /// Windows, as they last chose (`install --consent`), whatever [held]
+  /// says now. Null where the backend doesn't say (a Mac's always does).
+  final bool? startsAtSignIn;
 
   /// For a dry run of uninstall: how much data it would delete (0 when
   /// not said), and whether that's all of it (else at least that much).
@@ -258,6 +277,11 @@ class SetupChannel {
   /// Whether this Mac has a Claktory installed already, for an app without
   /// helpers: its backend in ~/.factory/bin.
   bool installedHere() {
+    if (Platform.isWindows) {
+      final local = Platform.environment['LOCALAPPDATA'] ?? '';
+      return local.isNotEmpty &&
+          File('$local\\Claktory\\factory\\bin\\factoryd.exe').existsSync();
+    }
     final home = Platform.environment['HOME'] ?? '';
     return home.isNotEmpty && File('$home/.factory/bin/factoryd').existsSync();
   }
@@ -580,7 +604,43 @@ class MacSetup extends ChangeNotifier {
   /// Not now, while it doesn't answer: the app keeps trying.
   void putOff() => _set(SetupStage.done);
 
+  /// Whether this computer's Claktory starts by itself when the person
+  /// signs in, as its backend last said; null where it doesn't say.
+  bool? startsAtSignIn;
+
+  /// Whether a change to [startsAtSignIn] is on its way.
+  var changingSignIn = false;
+
+  /// Starts it when the person signs in to Windows, or not
+  /// (`install --consent`); why it couldn't, or null.
+  Future<String?> setStartsAtSignIn(bool on) async {
+    changingSignIn = true;
+    notifyListeners();
+    try {
+      final result = await channel.install([
+        'install',
+        '--consent=${on ? 'yes' : 'no'}',
+      ]);
+      _heard(result);
+      if (result.result == 'failed') {
+        return result.reason.isEmpty
+            ? "Claktory couldn't change this."
+            : result.reason;
+      }
+      return null;
+    } finally {
+      changingSignIn = false;
+      if (!_disposed) notifyListeners();
+    }
+  }
+
+  /// What every answer says beside its result.
+  void _heard(InstallResult result) {
+    if (result.startsAtSignIn case final starts?) startsAtSignIn = starts;
+  }
+
   void _settled(InstallResult result) {
+    _heard(result);
     reason = result.reason;
     detail = result.detail;
     repairable = false;
@@ -689,6 +749,7 @@ class MacSetup extends ChangeNotifier {
       // this Mac): it says so, with Start. Anything else (restarting for
       // an update, say) it waits out.
       final check = await channel.install(const ['install', '--check']);
+      _heard(check);
       if (_disposed || connected.value || _stage != SetupStage.done) return;
       if (check.result == 'stopped' && check.held) {
         _set(SetupStage.stopped);
@@ -708,6 +769,7 @@ class MacSetup extends ChangeNotifier {
     for (var tries = 0; tries < 20; tries++) {
       if (_disposed || connected.value || _stage != SetupStage.done) return;
       final check = await channel.install(const ['install', '--check']);
+      _heard(check);
       if (_disposed || connected.value || _stage != SetupStage.done) return;
       if (check.result == 'stopped' && check.held) {
         return _set(SetupStage.stopped);
@@ -810,7 +872,7 @@ class _SetupStepState extends State<SetupStep> {
         title('Set up Claktory'),
         const SizedBox(height: Space.s),
         Text(
-          'Claktory runs your agents on this Mac. If it already runs on '
+          'Claktory runs your agents on $thisComputer. If it already runs on '
           'another computer, such as a server, use that one instead.',
           style: body,
         ),
@@ -821,7 +883,7 @@ class _SetupStepState extends State<SetupStep> {
             onPressed: setup.useElsewhere,
           ),
           Button(
-            label: 'Set up on this Mac',
+            label: 'Set up on $thisComputer',
             primary: true,
             onPressed: setup.setUpHere,
           ),
@@ -851,8 +913,8 @@ class _SetupStepState extends State<SetupStep> {
         title('Claktory is turned off'),
         const SizedBox(height: Space.s),
         Text(
-          "Your agents aren't running on this Mac. Start Claktory and they "
-          'carry on where they left off.',
+          "Your agents aren't running on $thisComputer. Start Claktory and "
+          'they carry on where they left off.',
           style: body,
         ),
         const SizedBox(height: Space.xl),
@@ -924,7 +986,10 @@ class _SetupStepState extends State<SetupStep> {
         title('Download Claktory again'),
         const SizedBox(height: Space.s),
         Text(
-          "This copy is incomplete, so it can't set up this Mac.",
+          defaultTargetPlatform == TargetPlatform.windows
+              ? "This copy of Claktory is missing some files, so it can't set "
+                    'up this PC.'
+              : "This copy is incomplete, so it can't set up this Mac.",
           style: body,
         ),
         const SizedBox(height: Space.xl),
@@ -945,7 +1010,13 @@ class _SetupStepState extends State<SetupStep> {
   Widget _download() => Button(
     label: 'Download',
     primary: true,
-    onPressed: () => unawaited(launchUrl(downloadMacUrl)),
+    onPressed: () => unawaited(
+      launchUrl(
+        defaultTargetPlatform == TargetPlatform.windows
+            ? downloadWindowsUrl
+            : downloadMacUrl,
+      ),
+    ),
   );
 
   /// A quiet Show details, and the detail under it once opened.

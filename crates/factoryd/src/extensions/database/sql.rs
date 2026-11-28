@@ -79,7 +79,7 @@ pub(crate) fn path(home: &Home, target: &Target) -> PathBuf {
 /// ink, the person's drawings on files and what each device was reading,
 /// which reach an agent only in what the person sends (`crate::ink`); and
 /// the Map's history, which holds the names of pipes, another Claktory's
-/// connections (`crate::history`, Fugo's ruling for #458); and what
+/// connections (`crate::history`); and what
 /// commands the person ran from cards printed (`crate::command_cards`).
 fn private(table: &str) -> bool {
     table.starts_with("memory_")
@@ -479,10 +479,10 @@ mod tests {
             "SELECT m.text FROM messages m JOIN ink_layers i ON 1",
             "SELECT * FROM presentations",
             "SELECT * FROM presentation_sidebars",
-            // The Map's history holds pipes' names (#458, Fugo).
+            // The Map's history holds pipes' names.
             "SELECT data FROM map_history",
             "SELECT * FROM map_history_meta",
-            // What a command on a card printed, which may be anything (#494, Fugo).
+            // What a command on a card printed, which may be anything.
             "SELECT output FROM ask_runs",
         ] {
             let refused = query(&db, &target, sql, None).unwrap_err();

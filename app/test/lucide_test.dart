@@ -13,6 +13,10 @@ void main() {
     },
   );
 
+  test("the Seal extension's stamp is drawn, not its letter", () {
+    expect(hasLucideIcon('stamp'), isTrue);
+  });
+
   testWidgets('a known icon is drawn, an unknown one is its letter', (
     tester,
   ) async {

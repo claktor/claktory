@@ -1,9 +1,9 @@
-//! Voice messages (#197): the person says a message instead of typing it.
+//! Voice messages: the person says a message instead of typing it.
 //! The app uploads the recording and sends it (SendMessage.voice); it waits
 //! in the agent's queue, PENDING, while `claktory-speech` transcribes it on
 //! this computer, then the agent gets its words as the person's message,
 //! with `voice="42s"` on its `<sent>` tag. A chat takes them the same way
-//! (SendChatMessage.voice, #367), its recordings in its own folder.
+//! (SendChatMessage.voice), its recordings in its own folder.
 //!
 //! The person's messages after a PENDING one wait behind it, so the agent
 //! reads them in the order they were sent; events don't. One that FAILED
@@ -12,8 +12,8 @@
 //! dropped instead, as if discarded. What's waiting, and how far it got,
 //! is kept in the store, so a restart carries on with it.
 //!
-//! A voice message can carry what the person typed or pasted with it
-//! (#425): it waits with that as its text, and the agent gets one message,
+//! A voice message can carry what the person typed or pasted with it:
+//! it waits with that as its text, and the agent gets one message,
 //! the typed text, then the words heard after "Voice note: " (`compose`);
 //! the transcript keeps the two apart (UserText.typed and heard).
 //!
@@ -55,7 +55,7 @@ pub(crate) struct Voice {
     pub(crate) error_code: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub(crate) language: String,
-    /// What the person typed with it (#425): the message's text until it's
+    /// What the person typed with it: the message's text until it's
     /// done, then the start of it (`compose`); empty for a voice message
     /// alone.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -183,7 +183,7 @@ fn usable(factory: &Arc<Factory>) -> Result<(), RequestError> {
     }
 }
 
-/// An agent, or a chat (#367): both take voice messages.
+/// An agent, or a chat: both take voice messages.
 fn known(factory: &Factory, id: &str) -> Result<(), RequestError> {
     if crate::chats::is_chat(id) { crate::chats::known(factory, id) } else { factory.known_agent(id) }
 }

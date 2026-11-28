@@ -35,6 +35,12 @@ fn set_up(root: &Path) -> bool {
 /// The profile: everything allowed but the container tool's services and
 /// `root`. The path is quoted, so a folder named `") (allow default` can't
 /// break out.
+///
+/// macOS runs no set-uid program inside a sandbox, so `ps` and `top` would
+/// fail under it: those two exact paths start outside it. Neither starts
+/// another program or writes anything, and what they show a command under
+/// the profile already reads through sysctl. Nothing else does: `crontab`
+/// would leave a job that runs outside it, and `login` a shell.
 pub(crate) fn profile(root: &Path) -> String {
     let root = root.to_string_lossy();
     format!(
@@ -44,6 +50,9 @@ pub(crate) fn profile(root: &Path) -> String {
 (deny mach-lookup (global-name-prefix \"com.apple.container.\"))
 (deny file-read* file-write* (subpath {quoted}))
 (deny network-outbound (remote unix-socket (path-regex {regex})))
+; Set-uid, so never run inside a sandbox: these two alone start outside it.
+(allow process-exec (literal \"/bin/ps\") (with no-sandbox))
+(allow process-exec (literal \"/usr/bin/top\") (with no-sandbox))
 ",
         quoted = string(&root),
         regex = string(&format!("^{}/", literal_regex(&root))),
@@ -132,6 +141,9 @@ mod tests {
             "{profile}"
         );
         assert!(profile.contains("(path-regex \"^/Users/a b/Library/Application Support/com\\\\.apple\\\\.container"), "{profile}");
+        assert!(profile.contains("\n(allow process-exec (literal \"/bin/ps\") (with no-sandbox))\n"), "{profile}");
+        assert!(profile.contains("\n(allow process-exec (literal \"/usr/bin/top\") (with no-sandbox))\n"), "{profile}");
+        assert_eq!(profile.matches("no-sandbox").count(), 2, "{profile}");
     }
 
     #[test]
@@ -167,6 +179,28 @@ mod tests {
         assert!(!listed.status.success(), "{listed:?}");
         let fine = run("echo fine > /dev/null && /usr/bin/true");
         assert!(fine.status.success(), "{fine:?}");
+        // ps and top, set-uid, run; nothing else leaves the profile.
+        let ps = run("/bin/ps aux");
+        assert!(ps.status.success() && String::from_utf8_lossy(&ps.stdout).contains("PID"), "{ps:?}");
+        let top = run("/usr/bin/top -l 1 -n 5");
+        assert!(top.status.success() && String::from_utf8_lossy(&top.stdout).contains("PID"), "{top:?}");
+        let crontab = run("/usr/bin/crontab -l");
+        assert_eq!(crontab.status.code(), Some(126), "{crontab:?}");
+        // A program named ps elsewhere stays under it.
+        let elsewhere = run(&format!(
+            "dir=$(mktemp -d) && cp /bin/cat \"$dir/ps\" && \"$dir/ps\" '{}/volumes/claktory-browser-test/volume.img'",
+            root.display()
+        ));
+        assert!(!String::from_utf8_lossy(&elsewhere.stdout).contains("cookies"), "{elsewhere:?}");
+        // The container tool's socket and its services stay out of reach.
+        let socket = root.join("apiserver.sock");
+        let _listening = std::os::unix::net::UnixListener::bind(&socket).expect("a socket");
+        let reached = run(&format!("printf x | /usr/bin/nc -U -w 1 '{}' && echo REACHED", socket.display()));
+        assert!(!String::from_utf8_lossy(&reached.stdout).contains("REACHED"), "{reached:?}");
+        if let Some(container) = ["/opt/homebrew/bin/container", "/usr/local/bin/container"].into_iter().find(|path| Path::new(path).is_file()) {
+            let listed = run(&format!("{container} list"));
+            assert!(!listed.status.success(), "{listed:?}");
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 }

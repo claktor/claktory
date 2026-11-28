@@ -330,14 +330,14 @@ pub struct OlderPage {
     /// The page's entries held in memory.
     held: Vec<Entry>,
     before: u64,
-    limit: u32,
+    cut: Cut,
     from: Option<u64>,
 }
 
 impl OlderPage {
     /// The page's entries, and whether there are earlier ones.
     pub fn read(self) -> std::io::Result<(Vec<Entry>, bool)> {
-        self.older.page(self.held, self.before, self.limit, self.from)
+        self.older.page(self.held, self.before, self.cut, self.from)
     }
 }
 
@@ -350,12 +350,31 @@ pub struct ForkPoint {
     pub at_ms: i64,
 }
 
-/// What a snapshot of the conversation holds at most: the latest entries,
-/// this many, and about this many bytes (at least one entry, however big).
-const PAGE_ENTRIES: usize = 200;
-const PAGE_BYTES: usize = 256 * 1024;
+/// What a page of the conversation holds at most: this many entries, and
+/// about this many bytes (at least one entry, however big).
+#[derive(Clone, Copy, Debug)]
+struct Cut {
+    entries: usize,
+    bytes: usize,
+}
+
+/// A page asked for without a limit.
+const PAGE: Cut = Cut { entries: 200, bytes: 256 * 1024 };
+/// What opening a conversation sends: about a screenful, so it shows soon
+/// on a slow connection; the app asks for earlier pages as it scrolls up.
+const FIRST_PAGE: Cut = Cut { entries: 50, bytes: 64 * 1024 };
 /// The most entries one page may be asked for.
 const MAX_PAGE_ENTRIES: usize = 1000;
+
+impl Cut {
+    /// A page of at most `limit` entries (0 for `PAGE`'s).
+    fn of(limit: u32) -> Cut {
+        match limit {
+            0 => PAGE,
+            limit => Cut { entries: (limit as usize).min(MAX_PAGE_ENTRIES), ..PAGE },
+        }
+    }
+}
 
 /// What a cleared conversation starts with.
 const CLEARED: &str = "Conversation cleared";
@@ -590,7 +609,7 @@ impl Transcript {
                 }
             }
             let held = &self.entries[usize::try_from(from - self.base).unwrap_or(usize::MAX).min(self.entries.len())..];
-            if at == 0 || page_start(held, from, self.len(), 0, None).is_some() {
+            if at == 0 || page_start(held, from, self.len(), PAGE, None).is_some() {
                 break;
             }
             at -= 1;
@@ -615,18 +634,23 @@ impl Transcript {
     /// first file. The old conversation's files must be out of `dir`.
     /// `old_form` as `save_old_form` takes it.
     pub fn cleared(dir: PathBuf, owner: String, old_form: Arc<AtomicBool>) -> (Transcript, Persist) {
+        Transcript::begun(dir, owner, old_form, CLEARED.to_owned())
+    }
+
+    /// A new, empty conversation, shown starting with `said`.
+    pub(crate) fn begun(dir: PathBuf, owner: String, old_form: Arc<AtomicBool>, said: String) -> (Transcript, Persist) {
         let now = now_ms();
         let mut transcript = Transcript::empty(dir, owner, Some(now));
         transcript.old_form = old_form;
-        transcript.push(now, notice(CLEARED.to_owned(), NoticeLevel::Info));
+        transcript.push(now, notice(said, NoticeLevel::Info));
         let persist = transcript.persist();
         (transcript, persist)
     }
 
-    /// The latest entries, as a snapshot sends them, and whether there are
-    /// earlier ones. Always held (`hold`).
+    /// The latest entries, as a snapshot sends them (`FIRST_PAGE`), and
+    /// whether there are earlier ones. Always held (`hold`).
     pub fn recent(&self) -> (Vec<Entry>, bool) {
-        match self.page(self.len(), 0, None) {
+        match self.page_cut(self.len(), FIRST_PAGE, None) {
             Some(Page::Here(entries, more)) => (entries, more),
             Some(Page::Older(page)) => (page.held, true),
             None => Default::default(),
@@ -634,20 +658,24 @@ impl Transcript {
     }
 
     /// Entries before `before` (a seq, exclusive): from `from` on when set,
-    /// else the latest, at most `limit` (0 for `PAGE_ENTRIES`) and about
-    /// `PAGE_BYTES`, and never starting partway through a model response
-    /// unless that response alone is bigger. Whether there are earlier ones.
-    /// None when `before` is beyond the end; to read from disk first when it
+    /// else the latest, at most `limit` (0 for `PAGE`'s) and about `PAGE`'s
+    /// bytes, and never starting partway through a model response unless
+    /// that response alone is bigger. Whether there are earlier ones. None
+    /// when `before` is beyond the end; to read from disk first when it
     /// starts before the entries held.
     pub fn page(&self, before: u64, limit: u32, from: Option<u64>) -> Option<Page> {
+        self.page_cut(before, Cut::of(limit), from)
+    }
+
+    fn page_cut(&self, before: u64, cut: Cut, from: Option<u64>) -> Option<Page> {
         if before > self.len() {
             return None;
         }
         let offset = self.base.min(before);
         let held = if before > self.base { &self.entries[..usize::try_from(before - self.base).ok()?] } else { &[] };
-        Some(match page_start(held, offset, before, limit, from) {
+        Some(match page_start(held, offset, before, cut, from) {
             Some(start) => Page::Here(held[usize::try_from(start - offset).ok()?..].to_vec(), start > 0),
-            None => Page::Older(OlderPage { older: self.older(), held: held.to_vec(), before, limit, from }),
+            None => Page::Older(OlderPage { older: self.older(), held: held.to_vec(), before, cut, from }),
         })
     }
 
@@ -760,9 +788,14 @@ impl Transcript {
 
     /// Each waiting entry's fingerprint (Agent.waiting_versions): it
     /// changes whenever anything in the entry does, so the app fetches
-    /// again only the cards that changed.
+    /// again only the cards that changed. Never a 0 key or value: prost
+    /// leaves a default key or value out of a map entry, and the app's
+    /// protobuf (protobuf-dart 6.1) reads a missing uint64 key back as an
+    /// int, not an Int64, and throws away the whole message. Without its
+    /// version, the card at seq 0 is fetched again as before versions were
+    /// sent.
     pub fn waiting_versions(&self) -> BTreeMap<u64, u64> {
-        self.waiting.clone()
+        self.waiting.iter().filter(|&(&seq, &version)| seq != 0 && version != 0).map(|(&seq, &version)| (seq, version)).collect()
     }
 
     /// Notes whether `entry` waits for the person now, and as what.
@@ -845,6 +878,17 @@ impl Transcript {
             }
         }
         self.replace_shown(Kind::DevicePairing(pairing))
+    }
+
+    /// Shows a pairing `factoryd pair` started, in the admin agent's
+    /// conversation: as it is now if it shows, else added for display only,
+    /// never in what the agent's model reads.
+    pub fn show_device_pairing(&mut self, pairing: v1::DevicePairing) -> Entry {
+        if let Some(entry) = self.set_device_pairing(pairing.clone()) {
+            return entry;
+        }
+        self.shown_only = true;
+        self.push(now_ms(), Kind::DevicePairing(pairing))
     }
 
     /// Shows an agent's card for starting a pipe as it is now (done, say);
@@ -1570,22 +1614,19 @@ pub(crate) async fn scan_back(factory: &crate::factory::Factory, id: &str, befor
 /// Where a page (`Transcript::page`) of the entries before `before` starts:
 /// `entries` are those from `offset` to `before`. None when it starts before
 /// them, or needs one of the earlier entries to know.
-fn page_start(entries: &[Entry], offset: u64, before: u64, limit: u32, from: Option<u64>) -> Option<u64> {
+fn page_start(entries: &[Entry], offset: u64, before: u64, cut: Cut, from: Option<u64>) -> Option<u64> {
     let end = before;
     let at = |seq: u64| entries.get(usize::try_from(seq.checked_sub(offset)?).ok()?);
     if let Some(from) = from {
         let start = from.min(end);
         return (start >= offset).then_some(start);
     }
-    let limit = match limit {
-        0 => PAGE_ENTRIES,
-        limit => (limit as usize).min(MAX_PAGE_ENTRIES),
-    } as u64;
+    let limit = cut.entries as u64;
     let mut start = end;
     let mut bytes = 0usize;
     while start > 0 && end - start < limit {
         let size = prost::Message::encoded_len(at(start - 1)?);
-        if start < end && bytes + size > PAGE_BYTES {
+        if start < end && bytes + size > cut.bytes {
             break;
         }
         bytes += size;
@@ -1602,7 +1643,7 @@ fn page_start(entries: &[Entry], offset: u64, before: u64, limit: u32, from: Opt
         for seq in response..start {
             extra += prost::Message::encoded_len(at(seq)?);
         }
-        if bytes + extra <= PAGE_BYTES * 2 {
+        if bytes + extra <= cut.bytes * 2 {
             start = response;
         }
     }

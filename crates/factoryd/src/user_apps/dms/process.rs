@@ -308,7 +308,7 @@ async fn follow(factory: &Arc<Factory>, events: Vec<Event>) -> Result<(), Stop> 
     // of their Claktories it serves, follow it now, not at the next round.
     if events.iter().any(|event| event.kind == "device_list") {
         refresh_keys(factory, &[]).await?;
-        follow_list(factory)?;
+        follow_list(factory).await?;
     }
     if events.iter().any(|event| event.kind == "welcome") {
         welcomes(factory).await?;
@@ -338,7 +338,7 @@ async fn full_round(factory: &Arc<Factory>) -> Result<(), Stop> {
     refresh_keys(factory, &peers).await?;
     let welcomed = welcomes(factory).await;
     // After the Welcomes, so a group joined now routes to the home too.
-    follow_list(factory)?;
+    follow_list(factory).await?;
     welcomed?;
     let listed = groups(factory).await?;
     for group in leaf::step(factory, |step| step.groups())? {
@@ -371,7 +371,7 @@ async fn full_round(factory: &Arc<Factory>) -> Result<(), Stop> {
 /// is from (the person's new key, not given to this Claktory yet) changes
 /// nothing. The home lets go of the person's other Claktories the list no
 /// longer names.
-fn follow_list(factory: &Arc<Factory>) -> Result<(), Stop> {
+async fn follow_list(factory: &Arc<Factory>) -> Result<(), Stop> {
     let ours = match crate::remote::secret_key(&factory.home) {
         Ok(key) => *key.public().as_bytes(),
         Err(error) => {
@@ -389,6 +389,13 @@ fn follow_list(factory: &Arc<Factory>) -> Result<(), Stop> {
         Ok(Some((list, groups)))
     })?;
     let Some((list, groups)) = read else { return Ok(()) };
+    // Which of the person's leaves the home may serve (E11-8 (b)).
+    let leaves = |kind: LeafKind| list.list.leaves.iter().filter(|listed| listed.kind == kind).map(|listed| listed.leaf_id.clone()).collect();
+    let listed = home::Listed { devices: leaves(LeafKind::Device), claktories: leaves(LeafKind::Claktory) };
+    match home::set_listed(&**factory, &listed) {
+        Ok(dropped) => unpair_dropped(factory, &dropped).await,
+        Err(error) => tracing::debug!(?error, "the direct-message home didn't keep the person's listed leaves"),
+    }
     let placed = home::placed(&list, &ours);
     let followed = home::follow_list(factory, &placed, &groups).and_then(|changed| {
         if placed == home::Placed::Home {
@@ -405,6 +412,21 @@ fn follow_list(factory: &Arc<Factory>) -> Result<(), Stop> {
         Err(error) => tracing::debug!(?error, "the direct-message home didn't follow the device list"),
     }
     Ok(())
+}
+
+/// Point 6's backstop: a device the person's signed list dropped (Lock out,
+/// Remove on another device) is unpaired from this Claktory too, so it
+/// reaches nothing here even if the removal's own path never ran. By its
+/// account key, which is its leaf id as the person's own signed list names
+/// it, never by a name; idempotent. The key is remembered too, so no
+/// assertion for it lets a device in again: a device that leaves the list
+/// always goes with its key (Lock out, Remove, or signing out, which comes
+/// back as a new device).
+async fn unpair_dropped(factory: &Arc<Factory>, dropped: &[String]) {
+    for leaf_id in dropped {
+        let unpaired = factory.unpair_account_key(leaf_id, crate::remote::Removal::LockOut).await;
+        tracing::info!(leaf_id, unpaired, "a device the person's device list dropped: unpaired here");
+    }
 }
 
 /// Whether `group`, read through everything the worker listed, is at an
@@ -1246,8 +1268,14 @@ async fn rejoin_now(factory: &Arc<Factory>, group: &KeptGroup) -> Result<(), Sto
         let kind = step.kind_of(&leaf, group);
         let floor = claktory_dm_crypto::storage::epoch_floor(step.db(), &group.group_id)?;
         let (_, outgoing) = Group::rejoin(&step.provider()?, &leaf.me, &leaf.pins, kind, &group.group_id, info.bytes(), floor)?;
+        // OpenMLS stored the new epoch as it made the commit: aside until
+        // the worker takes it, so a commit it never takes (refused, lost in
+        // its restart) leaves no epoch of this Claktory's own and its floor
+        // where it was (E11-8).
+        claktory_dm_crypto::storage::stash_rejoin(step.db(), &group.group_id, floor, &outgoing.commit)?;
         Ok(outgoing)
     })?;
+    let digest = claktory_dm_crypto::envelope::digest(&outgoing.commit);
     let commit = outgoing.commit.clone();
     let mut body = json!({"commit": Envelope::new(outgoing.commit).map_err(unreadable)?.to_json()});
     if let Some(info) = outgoing.group_info {
@@ -1262,12 +1290,7 @@ async fn rejoin_now(factory: &Arc<Factory>, group: &KeptGroup) -> Result<(), Sto
         Ok(answer) => {
             let taken: Taken = serde_json::from_slice(&answer).map_err(unreadable)?;
             leaf::step(factory, |step| {
-                let leaf = step.leaf()?;
-                let provider = step.provider()?;
-                let kind = step.kind_of(&leaf, group);
-                if let Some(mut rejoined) = Group::load(&provider, kind, &group.group_id)? {
-                    rejoined.merge_pending(&provider)?;
-                }
+                claktory_dm_crypto::storage::take_rejoin(step.db(), &group.group_id, &digest)?;
                 step.keep_group(&KeptGroup { position: taken.seq, ..group.clone() })?;
                 Ok(())
             })?;
@@ -1278,8 +1301,10 @@ async fn rejoin_now(factory: &Arc<Factory>, group: &KeptGroup) -> Result<(), Sto
             Ok(())
         }
         Err(problem) => {
-            // Not taken (another commit came first): kept without its MLS
-            // state, so it rejoins again, never lost.
+            // Not taken (another commit came first), or its answer lost:
+            // kept without its MLS state, the rejoin's put aside one gone
+            // with it, so it rejoins again, never lost. Taken after all,
+            // the next rejoin's commit takes this one's leaf out.
             leaf::step(factory, |step| {
                 store::forget_group(step.db(), &group.group_id)?;
                 step.keep_group(group)

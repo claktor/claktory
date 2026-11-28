@@ -190,7 +190,7 @@ async fn generate(factory: Arc<Factory>, agent: String, args: GenerateArgs) -> R
 }
 
 /// What the result says of the size and quality: ChatGPT chooses them, so
-/// what was asked for may not be what was made (#403).
+/// what was asked for may not be what was made.
 fn chosen(size: Option<&str>, quality: Option<&str>) -> String {
     let asked: Vec<String> = [
         size.filter(|size| *size != "auto").map(|size| size.replace('x', "×")),

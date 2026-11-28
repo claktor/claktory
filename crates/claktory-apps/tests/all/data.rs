@@ -22,8 +22,9 @@ async fn an_apps_queries_go_to_factoryd_which_answers_them() {
     assert_eq!(factoryd.text("charts", "query", "factory-records SELECT ?1 AS n").await, r#"{"columns":["n"],"rows":[[1]],"more":false}"#);
     let asked = factoryd.queries.pop().expect("factoryd was asked");
     assert_eq!(
-        (asked.app_id.as_str(), asked.source.as_str(), asked.sql.as_str(), asked.params.as_str()),
-        ("charts", "factory-records", "SELECT ?1 AS n", "[1]")
+        (asked.app_id.as_str(), asked.source.as_str(), asked.sql.as_str(), asked.params.as_str(), asked.caller.as_str()),
+        ("charts", "factory-records", "SELECT ?1 AS n", "[1]", "builder"),
+        "the call's agent, for what it reads of people's words"
     );
 
     for (error, message, said) in [

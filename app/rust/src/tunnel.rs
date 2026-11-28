@@ -27,7 +27,7 @@ use std::{
 use async_compression::tokio::{bufread::ZstdDecoder, write::ZstdEncoder};
 use iroh::{
     Endpoint, EndpointAddr, EndpointId, RelayUrl, SecretKey, Watcher,
-    endpoint::{ConnectError, ConnectOptions, Connection, ConnectionError, presets},
+    endpoint::{ConnectError, ConnectOptions, Connection, ConnectionError, TransportErrorCode, presets},
 };
 use tokio::{
     io::{AsyncWriteExt, BufReader, copy},
@@ -362,6 +362,11 @@ pub struct Status {
     /// How long the next dial has ([DIAL_TIMEOUTS]), in ms: the app waits
     /// at least that long for its connection through the tunnel.
     pub dial_timeout_ms: u32,
+    /// How long the dial that made the open connection took, in ms: from
+    /// its start, the endpoint in hand, to the connection made on its
+    /// first path, a fall back to the relay included; 0 while there's
+    /// none. Diagnostics: where a slow connect goes.
+    pub dial_ms: u32,
     /// What kind of network the direct path crosses, from its address
     /// (never the address itself); [Reach::None] while the path isn't
     /// direct.
@@ -816,6 +821,7 @@ impl Dialer {
     /// The open forwarding connection, or a new one.
     pub(crate) async fn forward_connection(&self) -> Result<Connection, crate::forward::ForwardingFailure> {
         use crate::forward::{ALPN_FORWARD, ForwardingFailure};
+        self.0.rebuilt().await;
         let mut slot = self.0.forwards.lock().await;
         if let Some(open) = slot.as_ref()
             && open.close_reason().is_none()
@@ -1055,6 +1061,7 @@ async fn stalled(shared: &Shared, connection: &Connection) -> Option<bool> {
 /// The open connection, or a new one; None when it can't be made (the
 /// status says why).
 async fn connection(shared: &Arc<Shared>) -> Option<Connection> {
+    shared.rebuilt().await;
     let mut slot = shared.connection.lock().await;
     if let Some(open) = slot.as_ref()
         && open.close_reason().is_none()
@@ -1070,6 +1077,7 @@ async fn connection(shared: &Arc<Shared>) -> Option<Connection> {
         }
     };
     shared.status.lock().unwrap().phase = Phase::Dialing;
+    let began = Instant::now();
     let relay_first = shared.relay_first.load(Ordering::Relaxed);
     let mut dialled = dial_within(shared, &endpoint).await;
     if let Dialled::Made(connection) = &dialled
@@ -1109,6 +1117,7 @@ async fn connection(shared: &Arc<Shared>) -> Option<Connection> {
             let mut status = shared.status.lock().unwrap();
             status.phase = Phase::Idle;
             status.path = Path::None;
+            status.dial_ms = 0;
             status.reach = Reach::None;
             *slot = None;
             return None;
@@ -1138,6 +1147,7 @@ async fn connection(shared: &Arc<Shared>) -> Option<Connection> {
         status.failure = Failure::None;
         status.path = path_of(&connection);
         status.reach = reach_of(&connection);
+        status.dial_ms = u32::try_from(began.elapsed().as_millis()).unwrap_or(u32::MAX).max(1);
     }
     shared.connected();
     tokio::spawn(follow(connection.clone(), shared.clone()));
@@ -1178,6 +1188,7 @@ async fn follow(connection: Connection, shared: Arc<Shared>) {
             let (said, failure) = explain_closed(&error);
             let mut status = shared.status.lock().unwrap();
             status.path = Path::None;
+            status.dial_ms = 0;
             status.reach = Reach::None;
             if failure == Failure::None {
                 status.phase = Phase::Idle;
@@ -1241,6 +1252,14 @@ fn path_of(connection: &Connection) -> Path {
 }
 
 impl Shared {
+    /// Once a [Tunnel::reconnect] under way has ended, so a dial goes out
+    /// on what it made, never on the endpoint it's replacing, and isn't
+    /// cancelled by it. Before the connection's slot is taken: reconnect
+    /// takes that slot while it holds `reconnecting`.
+    async fn rebuilt(&self) {
+        drop(self.reconnecting.lock().await);
+    }
+
     /// The current endpoint, made now if there's none (making it failed
     /// before); waits while [Tunnel::reconnect] makes it.
     async fn endpoint(self: &Arc<Self>) -> anyhow::Result<Endpoint> {
@@ -1417,6 +1436,7 @@ impl Shared {
         let mut status = self.status.lock().unwrap();
         status.phase = Phase::Idle;
         status.path = Path::None;
+        status.dial_ms = 0;
         status.reach = Reach::None;
         status.error.clear();
         status.failure = Failure::None;
@@ -1426,6 +1446,7 @@ impl Shared {
         let mut status = self.status.lock().unwrap();
         status.phase = Phase::Failed;
         status.path = Path::None;
+        status.dial_ms = 0;
         status.reach = Reach::None;
         status.error = said.to_owned();
         status.failure = failure;
@@ -1455,20 +1476,30 @@ fn explain_connect(error: &iroh::endpoint::ConnectError) -> (String, Failure) {
 }
 
 /// What a connection's end means; [Failure::None] for an orderly close.
+/// Only the machine's own close with a code of its own (its refusal, or
+/// the device unpaired) says this device was turned away: a close by the
+/// transport (a handshake cut short as the machine stops or starts, a
+/// connection refused while it isn't listening yet) never does, and the
+/// device tries again.
 fn explain_closed(error: &ConnectionError) -> (String, Failure) {
     match error {
         ConnectionError::LocallyClosed => (String::new(), Failure::None),
+        ConnectionError::ApplicationClosed(close) if u64::from(close.error_code) == 0 => (String::new(), Failure::None),
         ConnectionError::ApplicationClosed(close) => {
             let reason = String::from_utf8_lossy(&close.reason).trim().to_owned();
-            if u64::from(close.error_code) == 0 && reason.is_empty() {
-                (String::new(), Failure::None)
-            } else if reason.is_empty() {
+            if reason.is_empty() {
                 ("The machine turned this device away.".to_owned(), Failure::Refused)
             } else {
                 (format!("The machine turned this device away: {reason}"), Failure::Refused)
             }
         }
-        ConnectionError::ConnectionClosed(close) => (format!("The machine closed the connection: {close}"), Failure::Refused),
+        ConnectionError::ConnectionClosed(close)
+            if close.reason.is_empty()
+                && (close.error_code == TransportErrorCode::APPLICATION_ERROR || close.error_code == TransportErrorCode::NO_ERROR) =>
+        {
+            (String::new(), Failure::None)
+        }
+        ConnectionError::ConnectionClosed(close) => (format!("The connection to the machine closed: {close}"), Failure::Other),
         ConnectionError::TimedOut => {
             ("The connection to the machine timed out: it may be off, asleep or offline.".to_owned(), Failure::Unreachable)
         }
@@ -1481,6 +1512,52 @@ mod tests {
     use super::*;
     use iroh::RelayMode;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn transport_close(code: TransportErrorCode, reason: &str) -> ConnectionError {
+        ConnectionError::ConnectionClosed(iroh::endpoint::ConnectionClose {
+            error_code: code,
+            frame_type: noq_proto::MaybeFrame::None,
+            reason: reason.as_bytes().to_vec().into(),
+        })
+    }
+
+    fn application_close(code: u32, reason: &str) -> ConnectionError {
+        ConnectionError::ApplicationClosed(iroh::endpoint::ApplicationClose {
+            error_code: code.into(),
+            reason: reason.as_bytes().to_vec().into(),
+        })
+    }
+
+    /// A backend that stops or starts (a restart) closes a connection
+    /// still in its handshake with a bare transport close, or refuses one
+    /// it isn't ready for: the device keeps trying, never told it was
+    /// removed.
+    #[test]
+    fn a_close_by_the_transport_is_no_refusal() {
+        for code in [TransportErrorCode::APPLICATION_ERROR, TransportErrorCode::NO_ERROR] {
+            assert_eq!(explain_closed(&transport_close(code, "")), (String::new(), Failure::None), "{code:?}");
+        }
+        for (code, reason) in [
+            (TransportErrorCode::CONNECTION_REFUSED, ""),
+            (TransportErrorCode::APPLICATION_ERROR, "closing"),
+            (TransportErrorCode::PROTOCOL_VIOLATION, ""),
+        ] {
+            assert_eq!(explain_closed(&transport_close(code, reason)).1, Failure::Other, "{code:?} {reason}");
+        }
+        assert_eq!(explain_closed(&application_close(0, "")), (String::new(), Failure::None));
+        assert_eq!(explain_closed(&application_close(0, "done")), (String::new(), Failure::None));
+    }
+
+    /// The machine turning this device away still reads as refused: its own
+    /// close with its code, the reason said when there is one.
+    #[test]
+    fn the_machines_own_refusal_is_a_refusal() {
+        let unpaired = explain_closed(&application_close(1, "this device isn't paired with this machine"));
+        assert_eq!(unpaired.1, Failure::Refused);
+        assert!(unpaired.0.contains("isn't paired"), "{}", unpaired.0);
+        assert_eq!(explain_closed(&application_close(1, "")).1, Failure::Refused);
+        assert_eq!(explain_closed(&application_close(2, "this device was unpaired")).1, Failure::Refused);
+    }
 
     /// On the real network (#388): a device endpoint homes on Claktory's
     /// relay, and the status says how long that took; one whose relay
@@ -1732,6 +1809,7 @@ mod tests {
         let status = tunnel.status();
         assert_eq!(status.phase, Phase::Connected);
         assert_eq!(status.path, Path::Direct, "same machine, no relays");
+        assert!(status.dial_ms >= 1 && status.dial_ms < 5000, "{}", status.dial_ms);
         // This machine's own addresses, whichever answered first: its
         // Tailscale one too, where it has one.
         assert!(matches!(status.reach, Reach::Local | Reach::Lan | Reach::Tailnet), "{:?}", status.reach);
@@ -1811,9 +1889,11 @@ mod tests {
         assert_eq!(tunnel.status().phase, Phase::Connected);
 
         // As after the app comes back from the background.
+        assert!(tunnel.status().dial_ms >= 1);
         tunnel.reconnect().await;
         let status = tunnel.status();
         assert_eq!(status.phase, Phase::Idle);
+        assert_eq!(status.dial_ms, 0, "no connection, no dial to say");
         assert_eq!(status.failure, Failure::None, "a resume isn't a failure");
         assert!(status.error.is_empty());
 
@@ -2281,6 +2361,27 @@ mod tests {
         echoes(&mut socket, b"waited").await;
         reconnecting.await.unwrap();
         assert_eq!(made.lock().unwrap().len(), 2);
+        tunnel.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_socket_asked_while_a_reconnect_is_under_way_dials_only_once_it_ends() {
+        let backend = echo_backend().await;
+        let tunnel = Arc::new(Tunnel::open(local_device().await, backend.addr()).await.unwrap());
+        // As a reconnect holds it from its start, before it has taken the
+        // connection or the endpoint.
+        let under_way = tunnel.shared.reconnecting.lock().await;
+        let asked = tokio::spawn({
+            let tunnel = tunnel.clone();
+            async move { ask(&tunnel).await }
+        });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(tunnel.status().phase, Phase::Idle, "no dial on the endpoint being replaced");
+        assert!(tunnel.shared.connection.lock().await.is_none());
+        drop(under_way);
+        let mut socket = asked.await.unwrap();
+        echoes(&mut socket, b"after").await;
+        assert_eq!(tunnel.status().phase, Phase::Connected);
         tunnel.close().await;
     }
 

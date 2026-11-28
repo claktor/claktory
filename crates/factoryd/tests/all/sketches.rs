@@ -1,4 +1,4 @@
-//! Sketches (#209 phase 3 §6): a blank white PNG in one of the person's
+//! Sketches: a blank white PNG in one of the person's
 //! projects' folders, never over anything there, then an ordinary image
 //! with an ink layer on it.
 

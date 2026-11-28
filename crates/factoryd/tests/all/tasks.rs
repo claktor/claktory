@@ -57,7 +57,7 @@ async fn agents_list_and_stop_background_tasks_and_admins_hear_of_long_ones() {
     let started = call(&mut client, &mut view, "builder", "bash", r#"{"command":"sleep 30","run_in_background":true}"#).await;
     assert!(started.starts_with("Started task-1"), "{started}");
     assert_eq!(call(&mut client, &mut view, "builder", "tasks_list", "{}").await, "task-1 builder: sleep 30 — running <1m");
-    // Its header counts it (area 4 §8.9); no one else's does.
+    // Its header counts it; no one else's does.
     view.follow(&mut client, |view| view.agent("builder").tasks_running == 1).await;
     assert_eq!(view.agent("writer").tasks_running, 0);
 
@@ -200,7 +200,7 @@ async fn an_agents_commands_find_claktorys_own_tools_first() {
     assert_eq!(std::fs::read_to_string(&file).expect("the task ran rg"), "Claktory's rg in-task\n");
 }
 
-/// Friend bug #44: the computer restarted, ending two of an idle agent's
+/// The computer restarted, ending two of an idle agent's
 /// background tasks. Nothing starts them again; the agent hears of them
 /// once, together, with each one's command, folder, start and log, and
 /// decides itself. A task that's still running isn't listed, and stays

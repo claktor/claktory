@@ -18,11 +18,12 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::Path;
 
 use windows_sys::Win32::Foundation::{
-    DUPLICATE_SAME_ACCESS, DuplicateHandle, GENERIC_READ, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
+    DUPLICATE_SAME_ACCESS, DuplicateHandle, GENERIC_READ, GetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+    SetHandleInformation,
 };
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::Storage::FileSystem::{CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING};
-use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_HANDLE, STD_OUTPUT_HANDLE};
+use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
 use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::Threading::{
     CREATE_NEW_CONSOLE, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
@@ -227,6 +228,37 @@ fn end(output: Output) -> std::io::Result<(OwnedHandle, Option<OwnedHandle>)> {
     }
 }
 
+/// Runs `spawn` (std's Command, which a child inherits every inheritable
+/// handle from) with this process's standard input, output and error kept
+/// from it, then puts them back as they were. A child that outlives this
+/// process then doesn't hold its output open, so whatever reads that (a
+/// script's pipe, an ssh session) ends when this process does. For a
+/// program that starts others to run on after it (claktory-qa's
+/// sandboxes); a spawn on another thread meanwhile would lose them too.
+pub fn keeping_standard_handles<T>(spawn: impl FnOnce() -> T) -> T {
+    let mut kept: Vec<HANDLE> = Vec::new();
+    for which in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+        // SAFETY: only reads this process's standard handle; it isn't ours to close.
+        let handle = unsafe { GetStdHandle(which) };
+        if handle.is_null() || handle == INVALID_HANDLE_VALUE || kept.contains(&handle) {
+            continue;
+        }
+        let mut flags = 0;
+        // SAFETY: an open handle and a flags word to write.
+        let inheritable = unsafe { GetHandleInformation(handle, &raw mut flags) } != 0 && flags & HANDLE_FLAG_INHERIT != 0;
+        // SAFETY: as above; only its inherit flag changes.
+        if inheritable && unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) } != 0 {
+            kept.push(handle);
+        }
+    }
+    let spawned = spawn();
+    for handle in kept {
+        // SAFETY: the same standard handle, made inheritable again as it was.
+        unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) };
+    }
+    spawned
+}
+
 /// `handle`, made inheritable, for the attribute list to name. Only what's
 /// in the list is inherited, so another spawn elsewhere in the backend
 /// (std's, which inherits everything inheritable) is the only thing that
@@ -395,6 +427,51 @@ mod tests {
             .unwrap()
             .into_string()
             .unwrap()
+    }
+
+    const OUTLIVING: &str = "CLAKTORY_SPAWN_TEST_OUTLIVING";
+
+    /// Run by the test below as a process of its own: starts a program that
+    /// outlives it (std's Command, its output going elsewhere), says so, and ends.
+    #[test]
+    fn child_starts_one_that_outlives_it() {
+        let Some(kept) = std::env::var_os(OUTLIVING) else { return };
+        let mut ping = std::process::Command::new("ping");
+        ping.args(["-n", "8", "127.0.0.1"]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null());
+        let started = if kept == "1" { keeping_standard_handles(|| ping.spawn()) } else { ping.spawn() };
+        println!("STARTED {}", started.expect("ping").id());
+    }
+
+    /// How long reading the child's output to its end takes, and the
+    /// program it started.
+    fn read_to_end(kept: bool) -> (std::time::Duration, u32) {
+        use std::io::Read as _;
+        let exe = std::env::current_exe().expect("test binary");
+        let mut child = std::process::Command::new(exe)
+            .args(["windows::spawn::tests::child_starts_one_that_outlives_it", "--exact", "--nocapture", "--test-threads=1"])
+            .env(OUTLIVING, if kept { "1" } else { "0" })
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("child");
+        let started = std::time::Instant::now();
+        let mut output = String::new();
+        child.stdout.take().expect("its output").read_to_string(&mut output).expect("read");
+        let took = started.elapsed();
+        let _ = child.wait();
+        let pid = output.split("STARTED ").nth(1).and_then(|rest| rest.split_whitespace().next()?.parse().ok()).expect("its pid");
+        (took, pid)
+    }
+
+    #[test]
+    fn a_program_started_keeping_the_standard_handles_doesnt_hold_its_starters_output_open() {
+        let (took, pid) = read_to_end(true);
+        super::super::system::terminate_process(pid);
+        assert!(took < std::time::Duration::from_secs(4), "the output ended only after {took:?}");
+        // The control: started plainly, it holds the output until it ends,
+        // which is what the test guards against.
+        let (took, pid) = read_to_end(false);
+        super::super::system::terminate_process(pid);
+        assert!(took >= std::time::Duration::from_secs(5), "the output ended after {took:?} anyway, so the test proves nothing");
     }
 
     #[test]

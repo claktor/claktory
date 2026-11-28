@@ -10,15 +10,21 @@
 # release, checks it against the manifest, puts it in ~/.factory/releases/ as
 # scripts/release.sh would, and installs it with the install-release.sh that
 # comes in the release (on Linux, its install-linux.sh: a systemd user
-# service, remote access on, and a pairing code for the Mac's app). Running it
-# again repairs the install. Afterwards the backend checks the channel itself,
+# service and remote access on). Running it again repairs the install. Afterwards the backend checks the channel itself,
 # and the app offers each new release.
 #
-#   curl -fsSL <channel>/install.sh | bash -s -- [--yes] [--json] [--app-only]
+#   curl -fsSL <channel>/install.sh | bash -s -- [--yes] [--json] [--app-only] [--email EMAIL | --show-code]
 #
-#   --yes         ask nothing and wait for nothing: no pairing code on a first
-#                 Linux install (make one with factoryd pair), and the Mac's
-#                 app isn't opened
+#   --email EMAIL sign this Claktory in to the Claktory account at EMAIL with
+#                 no code (#546): the person approves it on one of their
+#                 devices signed in to that account, which then connects to it
+#                 (`factoryd account authorize`); for agents setting a server up
+#   --show-code   for a person at this terminal with no account: a first Linux
+#                 install prints a pairing code for their first device and
+#                 waits for it there. Never for agents: no code is ever shown
+#                 where an agent runs. Not with --yes, --json or --email
+#   --yes         ask nothing and wait for nothing, and the Mac's app isn't
+#                 opened
 #   --json        for agents: implies --yes; what a person would read goes to
 #                 stderr, and stdout gets one JSON line, {"ok":true,…} (with
 #                 factoryd status's answer) or {"ok":false,"error":…,"message":…}.
@@ -47,6 +53,14 @@
 #                 The last line is {"ok":…}: the installer's, once Claktory
 #                 runs with the move in, or receive's own when the move
 #                 stopped (exit 3 refused, 1 failed, 130 stopped).
+#   --receive --email EMAIL
+#                 the same move through the Claktory account at EMAIL (#546):
+#                 no code and no digits; the person approves it on a device
+#                 connected to the old Claktory. Nothing is read from stdin
+#                 or the terminal, so an agent can run it with --json piped
+#                 or not:
+#                   bash -c "$(curl -fsSL <channel>/install.sh)" -- --receive --email EMAIL --json </dev/null
+#                 The moved Claktory keeps its own account and devices.
 #   FACTORY_UPDATE_URL=<manifest url>  another channel, such as a file:// one
 #   install-online.sh --download-only DIR   only download and check the
 #                                           release, into DIR/<version>
@@ -110,7 +124,7 @@ macos_number() {
 }
 
 main() {
-  local url="${FACTORY_UPDATE_URL:-$MANIFEST_URL}" download_only="" app_only=false import_bundle="" receive=false
+  local url="${FACTORY_UPDATE_URL:-$MANIFEST_URL}" download_only="" app_only=false import_bundle="" receive=false email="" show_code=false
   local import_maps=()
   while (($#)); do
     case "$1" in
@@ -133,10 +147,21 @@ main() {
         shift
         ;;
       --receive) receive=true ;;
-      *) stop usage 3 "install.sh doesn't know $1. It takes --yes, --json, --app-only, --import BUNDLE [--map OLD=NEW], --receive and --download-only DIR." ;;
+      --email)
+        email="${2:-}"
+        [[ "$email" == *@* ]] || stop usage 3 "--email takes your Claktory account's address, like you@example.com."
+        shift
+        ;;
+      --show-code) show_code=true ;;
+      *) stop usage 3 "install.sh doesn't know $1. It takes --yes, --json, --app-only, --email EMAIL, --show-code, --import BUNDLE [--map OLD=NEW], --receive and --download-only DIR." ;;
     esac
     shift
   done
+  if $show_code; then
+    $YES && stop usage 3 "--show-code waits at this terminal for your first device: no --yes or --json."
+    [[ -z "$email" ]] || stop usage 3 "--show-code and --email are two ways to connect your first device: use one."
+    [[ -r /dev/tty ]] || refuse "--show-code waits at this terminal for your first device, which needs one."
+  fi
   if [[ -n "$import_bundle" ]] && $receive; then
     stop usage 3 "--import and --receive are two ways to move a Claktory here: use one."
   fi
@@ -152,7 +177,10 @@ main() {
   if $receive; then
     $app_only && stop usage 3 "--receive brings a whole Claktory, not only the app: no --app-only."
     [[ -z "$download_only" ]] || stop usage 3 "--receive and --download-only don't mix."
-    if $JSON; then
+    $show_code && stop usage 3 "--receive brings the old Claktory's devices with it: no --show-code."
+    if [[ -n "$email" ]]; then
+      : # approved on the person's device: nothing to read here
+    elif $JSON; then
       ! $SCRIPT_ON_STDIN || stop usage 3 "--receive --json reads the person's yes or no on stdin, and piped into bash that's the script itself: run it as bash -c \"\$(curl -fsSL <this script's address>)\" -- --receive --json"
     else
       [[ -r /dev/tty ]] || refuse "--receive confirms the move's digits, which needs a terminal (or --json, for an agent)."
@@ -308,39 +336,48 @@ main() {
   elif $receive; then
     # factoryd receive shows the move code (and a QR) and waits for the old
     # computer; its yes/no about the digits is read from the terminal, since
-    # this script's own stdin is the curl pipe.
-    local receive_status=0
+    # this script's own stdin is the curl pipe. With --email it asks the
+    # person's account instead, approved on their device, and reads nothing.
+    local receive_status=0 receive_args=() receive_in=/dev/tty
+    [[ -z "$email" ]] || receive_args=(--email "$email") receive_in=/dev/null
     if $JSON; then
       # Its events go out as they come; its own last line is kept, and
       # given only if the move stops here (else the installer's follows).
       set +e
-      "$HOME/.factory/bin/factoryd" receive --json | while IFS= read -r line; do
+      # The person's yes or no comes on this script's stdin; with --email nothing does.
+      if [[ -n "$email" ]]; then exec 3</dev/null; else exec 3<&0; fi
+      "$HOME/.factory/bin/factoryd" receive ${receive_args[@]+"${receive_args[@]}"} --json <&3 | while IFS= read -r line; do
         case "$line" in
           '{"ok":'*) printf '%s\n' "$line" >"$work/receive-end" ;;
           *) printf '%s\n' "$line" ;;
         esac
       done
       receive_status="${PIPESTATUS[0]}"
+      exec 3<&-
       set -e
       if ((receive_status != 0)); then
         if [[ -s "$work/receive-end" ]]; then cat "$work/receive-end"; else printf '{"ok":false,"error":"receive_failed","message":"the move didn'"'"'t finish."}\n'; fi
         exit "$receive_status"
       fi
     else
-      "$HOME/.factory/bin/factoryd" receive </dev/tty >&2 || receive_status=$?
+      "$HOME/.factory/bin/factoryd" receive ${receive_args[@]+"${receive_args[@]}"} <"$receive_in" >&2 || receive_status=$?
     fi
     if ((receive_status == 130)); then
       stop receive_stopped 130 "Stopped before the move finished. Claktory stays installed but not started; run this same command again to carry on."
     elif ((receive_status == 3)); then
-      stop receive_refused 3 "the move didn't go ahead (refused or called off; see above). Nothing changed here: Claktory stays installed but not started, and running this same command again starts over with a new code."
+      stop receive_refused 3 "the move didn't go ahead (refused or called off; see above). Nothing changed here: Claktory stays installed but not started, and running this same command again starts over$([[ -n "$email" ]] && echo ", asking your account again" || echo " with a new code")."
     elif ((receive_status != 0)); then
       stop receive_failed 1 "the move didn't finish; see above. Run this same command again to carry on where it stopped."
     fi
     say "The move is done; starting Claktory."
+    # It came signed in, with its devices: no first-device setup after it.
+    email=""
   fi
   if [[ "$os" == Linux ]]; then
     local pair=() status=0
-    $YES && pair=(--no-pair)
+    $YES && pair+=(--no-pair)
+    $show_code && pair+=(--show-code)
+    [[ -z "$email" ]] || pair+=(--email "$email")
     # Its own words go to the person; the last of them, when it fails, is why.
     # tee runs as a job of its own, reading a FIFO, so it can be waited for:
     # a refusal that exits at once still has its words read, and its code
@@ -384,6 +421,10 @@ main() {
     stop not_running 4 "Claktory is installed but isn't running: $(mac_stopped_reason). Its log: ~/.factory/factoryd.log"
   local cli
   cli="$(link_cli "$bin")"
+  if [[ -n "$email" ]]; then
+    # The no-code setup (#546): waits a while for the person's approval.
+    "$bin" account authorize --email "$email" </dev/null >&2 || true
+  fi
   if $YES; then
     say "Claktory $version is installed in ~/Applications and running."
   else
@@ -442,6 +483,11 @@ say_cli() {
 answer() {
   $JSON || return 0
   local cli="$1" app="$2" status on_path=false extra
+  # Read again now: an --email sign-in ran after the first read, and the
+  # answer says where the account stands at the end.
+  if [[ -n "$cli" ]] && "$cli" status --json >"$work/out/status.json.now" 2>/dev/null; then
+    mv -f "$work/out/status.json.now" "$work/out/status.json"
+  fi
   status="$(cat "$work/out/status.json" 2>/dev/null || true)"
   [[ "$status" == "{"*"}" ]] || status='{}'
   status="$(sed -e 's/"ok":true,//' -e 's/,"ok":true}/}/' -e 's/^{"ok":true}$/{}/' <<<"$status")"

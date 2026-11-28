@@ -27,6 +27,18 @@ async fn an_app_starts_answers_tool_calls_and_stops() {
     assert_eq!((result.text.as_str(), result.data.as_str(), result.is_error), ("hi from builder", "hi", false));
     let Body::CallResult(unknown) = factoryd.call("echo", "nope", "").await else { panic!("a result") };
     assert_eq!((unknown.text.as_str(), unknown.is_error), ("no tool nope", true), "the app's own error, not a crash");
+    // Who's calling, during a call: its project, whether it's an admin
+    // agent and whether it read outside content.
+    assert_eq!(factoryd.text("echo", "whoami", "").await, "builder site false true");
+    let rivet = factory_protocol::apps::Call {
+        app_id: "echo".into(),
+        tool: "whoami".into(),
+        caller: "rivet".into(),
+        caller_admin: true,
+        ..Default::default()
+    };
+    let Body::CallResult(rivet) = factoryd.call_with(rivet).await else { panic!("a result") };
+    assert_eq!(rivet.text, "rivet - true false");
 
     assert_eq!(factoryd.stop_app("echo").await, "");
     assert_eq!(error(factoryd.call("echo", "echo", "hi").await), "echo isn't running.");
@@ -118,7 +130,14 @@ async fn events_status_and_timers_reach_factoryd() {
     assert_eq!(factoryd.text("chat", "emit", "hello").await, "emitted");
     let emit = factoryd.told(|body| if let Body::Emit(emit) = body { Some(emit.clone()) } else { None }).await;
     assert_eq!((emit.app_id.as_str(), emit.kind.as_str(), emit.scope.as_str(), emit.text.as_str()), ("chat", "said", "chat", "hello"));
-    assert_eq!((emit.data.as_str(), emit.dedupe_key.as_str()), ("{\"text\":\"hello\"}", "hello"));
+    assert_eq!((emit.data.as_str(), emit.dedupe_key.as_str(), emit.to_agent.as_str()), ("{\"text\":\"hello\"}", "hello", ""));
+    assert_eq!(factoryd.text("chat", "emit-to", "lea moved").await, "emitted");
+    let to = factoryd.told(|body| match body {
+        Body::Emit(emit) if !emit.to_agent.is_empty() => Some(emit.clone()),
+        _ => None,
+    });
+    let to = to.await;
+    assert_eq!((to.to_agent.as_str(), to.kind.as_str(), to.scope.as_str(), to.text.as_str()), ("lea", "said", "chat", "moved"));
 
     factoryd.text("chat", "status", "Give it a bot token in the Marketplace's Apps tab.").await;
     let status = factoryd
@@ -129,7 +148,8 @@ async fn events_status_and_timers_reach_factoryd() {
         .await;
     assert_eq!(status, "Give it a bot token in the Marketplace's Apps tab.");
 
-    // A timer fires between calls, with nothing else asked.
+    // A timer fires between calls, with nothing else asked, and nobody
+    // calling (caller-info is none: the tick says no one).
     factoryd.text("chat", "timer", "50").await;
     let tick = tokio::time::timeout(
         Duration::from_secs(10),

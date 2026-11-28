@@ -295,7 +295,14 @@ async fn the_browser_goes_only_to_https_sites_on_the_internet_and_never_to_a_pas
     }
     factoryd::errands::serve_for_test(
         "https://www.example.org/log-in",
-        Some(r#"<title>Bitwarden</title><a href="https://vault.bitwarden.com/#/login">Log In</a>"#),
+        Some(&format!(
+            r#"<title>Bitwarden</title><p>{}</p><a href="https://vault.bitwarden.com/#/login">Log In</a>"#,
+            "Every word on this page takes a person a moment to read. ".repeat(20)
+        )),
+    );
+    factoryd::errands::serve_for_test(
+        "https://www.example.org/vault-button",
+        Some(r#"<title>Vault</title><button onclick="location.href = 'https://vault.bitwarden.com/#/vault'">Continue</button>"#),
     );
     factoryd::errands::resolve_for_test("intranet.example.org", std::net::IpAddr::from([10, 0, 0, 5]));
     let (mut client, workspace, _) = Client::connect(addr).await;
@@ -352,16 +359,27 @@ async fn the_browser_goes_only_to_https_sites_on_the_internet_and_never_to_a_pas
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     assert!(said.contains("Claktory kept the page from going to https://vault.bitwarden.com"), "{said}");
+    assert!(said.contains("One moment."), "the tab stays on its page: {said}");
 
-    // A click that would go there is told so in its own answer, at once.
+    // A click whose page script goes there is clicked, and told so in its
+    // own answer; the tab stays where it is.
+    open(&mut client, &mut view, "https://www.example.org/vault-button").await;
+    let (said, _) = call(&mut client, &mut view, "runner", "browser_read", json!({})).await;
+    let (document, vault) = reference(&said, "Continue");
+    let (said, _) = call(&mut client, &mut view, "runner", "browser_act", json!({"op": "click", "document": document, "target": vault})).await;
+    assert!(said.contains("Claktory kept the page from going to https://vault.bitwarden.com"), "{said}");
+    let (said, _) = call(&mut client, &mut view, "runner", "browser_read", json!({})).await;
+    assert!(said.contains("Continue"), "the tab stays on its page: {said}");
+
+    // A link that goes there is refused at once, without the time a person
+    // takes to read the page first.
     open(&mut client, &mut view, "https://www.example.org/log-in").await;
     let (said, _) = call(&mut client, &mut view, "runner", "browser_read", json!({})).await;
     let (document, log_in) = reference(&said, "Log In");
     let started = std::time::Instant::now();
-    let (said, _) =
-        call(&mut client, &mut view, "runner", "browser_act", json!({"op": "click", "document": document, "target": log_in})).await;
-    assert!(said.contains("Claktory's browser doesn't open password managers."), "{said}");
-    assert!(started.elapsed() < Duration::from_secs(15), "{:?}", started.elapsed());
+    let (said, _) = call(&mut client, &mut view, "runner", "browser_act", json!({"op": "click", "document": document, "target": log_in})).await;
+    assert!(said.contains("it goes to https://vault.bitwarden.com: Claktory's browser doesn't open password managers."), "{said}");
+    assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
 }
 
 /// A session its agent leaves unused ends by itself; using it keeps it
@@ -553,22 +571,20 @@ async fn who_gets_the_browser_and_what_turning_it_off_ends() {
     assert!(!matches!(apply_request(&mut client, &mut view, reads).await, Body::Error(_)));
     assert_eq!(refused(&mut client, &mut view, "reader").await, "Agents that read reports can't use the browser.");
 
-    // factoryd's own commands, which any agent's shell can run, can turn it
-    // off but never on.
+    // factoryd's own commands, which any agent's shell can run with the
+    // tool token, never turn it on: that's the person's.
     let mut command = Client::open(addr).await;
     let hello = v1::Hello {
         protocol_version: factory_protocol::PROTOCOL_VERSION,
         client_version: format!("factoryd-cli {}", env!("CARGO_PKG_VERSION")),
-        token: common::local_token(addr),
+        token: common::tool_token(addr),
         ..Default::default()
     };
     command.send(v1::ClientMessage { id: 1, body: Some(Request::Hello(hello)) }).await;
     let (workspace, _) = command.welcomed().await;
     let mut seen = View { workspace, ..View::default() };
     let Body::Error(error) = apply_request(&mut command, &mut seen, browser("lead", true)).await else { panic!("refused from a command") };
-    assert_eq!(error.message, "Only the person, in Agent settings, or an admin agent such as Rivet turns on the browser.");
-    assert_eq!(error.code(), v1::ErrorCode::InvalidRequest);
-    assert!(!matches!(apply_request(&mut command, &mut seen, browser("lead", false)).await, Body::Error(_)));
+    assert_eq!(error.code(), v1::ErrorCode::PersonOnly);
 
     // Turned off, its session ends and its browser tools are refused.
     select(&mut client, &mut view, "runner").await;
@@ -695,6 +711,25 @@ async fn old_browser_settings_and_errand_requests_read_as_they_are_now() {
     }
 }
 
+/// Runner clicks a button whose listener opens a window with no opener
+/// (hidden from the reader, which refuses a handler that visibly does).
+async fn open_a_window(client: &mut Client, view: &mut View) {
+    factoryd::errands::serve_for_test(
+        "https://elsewhere.example.net/opens",
+        Some(
+            "<title>Opens</title><button id=b>Open it</button><script>const w = window, o = 'op' + 'en'; \
+             b.addEventListener('click', () => w[o]('https://pay.example.org/checkout', '_blank', 'noopener'))</script>",
+        ),
+    );
+    call(client, view, "runner", "browser_open", json!({"url": "https://elsewhere.example.net/opens"})).await;
+    let (said, _) = call(client, view, "runner", "browser_read", json!({})).await;
+    let document = said.split("\"document\":\"").nth(1).and_then(|rest| rest.split('"').next()).expect("its document").to_owned();
+    let button = said.split("\"ref\":\"").nth(1).and_then(|rest| rest.split('"').next()).expect("the button").to_owned();
+    call(client, view, "runner", "browser_act", json!({"op": "click", "document": document, "target": button})).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    call(client, view, "runner", "browser_read", json!({})).await;
+}
+
 /// A check that the agent is a person, a payment, the person taking the
 /// browser over and handing it back, and stopping it: the session follows
 /// the browser's turns.
@@ -721,13 +756,89 @@ async fn a_session_follows_the_browsers_turns() {
     assert!(made.first().is_some_and(|call| call.starts_with(&format!("begin {id}"))), "{made:?}");
     assert!(made.contains(&format!("release {id} 1")), "{made:?}");
 
-    // A check that it's a person is no one's turn: Claktory tries again.
-    factoryd::errands::check_timing_for_test(&factory, [Duration::from_secs(2); 3], Duration::from_millis(200));
+    // No check on the page: nothing to hand over.
+    let (said, card) = call(&mut client, &mut view, "runner", "browser_handoff", json!({"kind": "check", "what": "A check."})).await;
+    assert!(card.is_none() && said.contains("no check that you're a person on this page"), "{said}");
+
+    // A window the page opens is closed: Claktory's fence holds only the
+    // page it drives.
+    open_a_window(&mut client, &mut view).await;
+    assert_eq!(factoryd::errands::page_tabs_for_test(&factory).await, 1, "no window it opened");
+    call(&mut client, &mut view, "runner", "browser_open", json!({"url": "https://pay.example.org/checkout"})).await;
+
+    // A check that it's a person is the agent's to get past: it's told so,
+    // with the page, and nothing waits.
+    factoryd::errands::check_timing_for_test(&factory, Duration::from_millis(200));
     factoryd::errands::show_for_test(&factory, "<title>Just a moment...</title><p>Checking your browser</p>").await;
     let (said, card) = call(&mut client, &mut view, "runner", "browser_read", json!({})).await;
-    assert!(card.is_none() && said.contains("tries the page again"), "{said}");
-    factoryd::errands::show_for_test(&factory, "<title>Sign up</title><p>Organization</p>").await;
-    view.follow(&mut client, |view| told(view, "cleared when Claktory tried") && idle(view, "runner")).await;
+    assert!(card.is_none() && said.contains("Get past it yourself") && said.contains("Checking your browser"), "{said}");
+    let (said, _) = call(&mut client, &mut view, "runner", "browser_screenshot", json!({})).await;
+    assert!(said.contains("pay.example.org/checkout") && !said.starts_with("paused"), "{said}");
+
+    // It couldn't: the person gets past it in a live view of its tab, which
+    // stays driven; meanwhile the agent browses in a tab of its own,
+    // anywhere but the check's site.
+    factoryd::errands::serve_for_test("https://elsewhere.example.net/", Some("<title>Elsewhere</title><p>Another site's page</p>"));
+    factoryd::errands::serve_for_test(
+        "https://elsewhere.example.net/away",
+        Some("<title>Away</title><p>One moment.</p><script>setTimeout(() => location.href = 'https://pay.example.org/checkout', 50)</script>"),
+    );
+    calls();
+    let (said, card) = call(&mut client, &mut view, "runner", "browser_handoff", json!({"kind": "check", "what": "A check that I'm a person."})).await;
+    let (seq, asked) = card.unwrap_or_else(|| panic!("a request: {said}"));
+    assert!(asked.title.contains("get past a check on example.org"), "{}", asked.title);
+    let handoff = asked.handoff.clone().expect("the handoff");
+    assert_eq!((handoff.kind(), handoff.domain.as_str()), (v1::ErrandHandoffKind::Captcha, "example.org"));
+    assert!(!calls().iter().any(|call| call.starts_with("handoff")), "no one takes the browser for a check");
+    assert_eq!(session(&view).state(), ErrandState::Running);
+    let viewed = async {
+        while factoryd::errands::check_view_for_test(&factory, "runner").is_none() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(10), viewed).await.expect("the check's tab opens to a live view once its card is in");
+    let (said, _) = call(&mut client, &mut view, "runner", "browser_open", json!({"url": "https://pay.example.org/checkout"})).await;
+    assert!(said.starts_with("paused") && said.contains("check on example.org"), "{said}");
+    call(&mut client, &mut view, "runner", "browser_open", json!({"url": "https://elsewhere.example.net/"})).await;
+    let (said, _) = call(&mut client, &mut view, "runner", "browser_read", json!({})).await;
+    assert!(said.contains("Another site's page"), "another site meanwhile: {said}");
+    let (said, _) = call(&mut client, &mut view, "runner", "browser_screenshot", json!({})).await;
+    assert!(said.contains("elsewhere.example.net") && !said.starts_with("paused"), "{said}");
+    // Nor does a page of its own take it there.
+    call(&mut client, &mut view, "runner", "browser_open", json!({"url": "https://elsewhere.example.net/away"})).await;
+    let mut said = String::new();
+    for _ in 0..20 {
+        said = call(&mut client, &mut view, "runner", "browser_read", json!({})).await.0;
+        if said.contains("Claktory kept the page from going to") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(said.contains("Claktory kept the page from going to https://pay.example.org: a check on example.org waits"), "{said}");
+    // A window it opens is closed, as anywhere.
+    open_a_window(&mut client, &mut view).await;
+    assert_eq!(factoryd::errands::page_tabs_for_test(&factory).await, 2, "the check's tab and the agent's own, no window it opened");
+    factoryd::errands::show_held_for_test(&factory, "runner", "<title>Sign up</title><p>Organization</p>").await;
+    let done = client_message::Body::AnswerAsk(v1::AnswerAsk { agent_id: "runner".into(), seq, ..Default::default() });
+    apply_request(&mut client, &mut view, done).await;
+    view.follow(&mut client, |view| told(view, "got past the check on example.org") && idle(view, "runner")).await;
+    assert_eq!(session(&view).state(), ErrandState::Running);
+    let (said, _) = call(&mut client, &mut view, "runner", "browser_read", json!({})).await;
+    assert!(said.contains("Organization") && !said.contains("Another site's page"), "back on the check's tab: {said}");
+    assert_eq!(factoryd::errands::check_view_for_test(&factory, "runner"), None, "its live view ends with the request");
+
+    // A check's tab that leaves its site takes its request back, and the
+    // agent drives that tab again.
+    factoryd::errands::show_for_test(&factory, "<title>Just a moment...</title><p>Checking your browser</p>").await;
+    let (said, card) = call(&mut client, &mut view, "runner", "browser_handoff", json!({"kind": "check", "what": "A check that I'm a person."})).await;
+    let (seq, _) = card.unwrap_or_else(|| panic!("a request: {said}"));
+    factoryd::errands::show_held_for_test(&factory, "runner", "<title>Welcome</title><p>Past the check</p>").await;
+    factoryd::errands::check_left_for_test(&factory, "runner").await;
+    view.follow(&mut client, |view| told(view, "The check's tab left example.org") && idle(view, "runner")).await;
+    let withdrawn = view.entries.iter().any(|entry| entry.seq == seq && matches!(&entry.kind, Some(Kind::AskPerson(ask)) if ask.state() != v1::AskPersonState::Pending));
+    assert!(withdrawn, "its request is taken back");
+    let (said, _) = call(&mut client, &mut view, "runner", "browser_read", json!({})).await;
+    assert!(said.contains("Past the check"), "on the check's tab again: {said}");
 
     // A payment stays driven, and I've paid drives it on.
     call(&mut client, &mut view, "runner", "browser_open", json!({"url": "https://pay.example.org/checkout"})).await;
@@ -1530,4 +1641,163 @@ async fn a_login_the_person_gives_on_its_card_is_typed_on_its_site_and_reaches_n
     let actions: Vec<&str> = log.entries.iter().map(|entry| entry.action.as_str()).collect();
     assert!(actions.contains(&"Typed Shop login into the password field") && actions.contains(&"Signed in with Shop login"), "{actions:?}");
     assert!(!format!("{log:?}").contains(PASSWORD));
+}
+
+/// Runner signs in on `login` (its Email and Password fields), served with
+/// `pages` (address, HTML) beside it, with `password` the person gives on
+/// the card: what browser_sign_in said, and what the page reads then.
+async fn signing_in(login: &str, pages: &[(&str, &str)], password: &str) -> (String, String) {
+    use client_message::Body as Request;
+    let dir = temp_dir();
+    let (addr, factory) = start(&dir).await;
+    if !factoryd::errands::local_chrome_for_test(&factory, &dir.join("profile")) {
+        eprintln!("no Chrome here: skipped");
+        return (String::new(), String::new());
+    }
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    runner_with_browser(&mut client, &mut view, &dir).await;
+    factoryd::errands::open_browser_for_test(&factory, "runner").expect("its browser");
+    select(&mut client, &mut view, "runner").await;
+    for (address, html) in pages {
+        factoryd::errands::serve_for_test(address, Some(html));
+    }
+    call(&mut client, &mut view, "runner", "browser_open", json!({"url": login})).await;
+    let (said, _) = call(&mut client, &mut view, "runner", "browser_read", json!({})).await;
+    let (document, user) = reference(&said, "Email");
+    let (_, field) = reference(&said, "Password");
+    let sign_in = json!({"document": document, "username": user, "password": field});
+    call(&mut client, &mut view, "runner", "browser_sign_in", sign_in.clone()).await;
+    let origin = url::Url::parse(login).unwrap().origin().ascii_serialization();
+    let request = factoryd::vault::logins::login_request_for_test(&factory, "runner", &origin).expect("the login request");
+    let entry = |variable: &str, value: &str| v1::SecretEntry { variable: variable.into(), value: value.into(), file: false };
+    let decide = v1::DecideSecretRequest {
+        agent_id: "runner".into(),
+        request_id: request.id.clone(),
+        approve: true,
+        entries: vec![entry("USERNAME", "matt@example.com"), entry("PASSWORD", password)],
+        ..Default::default()
+    };
+    apply_request(&mut client, &mut view, Request::DecideSecretRequest(decide)).await;
+    view.follow(&mut client, |view| told(view, "call browser_sign_in again") && idle(view, "runner")).await;
+    let (said, _) = call(&mut client, &mut view, "runner", "browser_sign_in", sign_in).await;
+    let (now, _) = call(&mut client, &mut view, "runner", "browser_read", json!({})).await;
+    assert!(!format!("{:?}", view.entries).contains(password), "the password in the conversation");
+    assert!(!said.contains(password) && !now.contains(password), "the password told to the agent");
+    (said, now)
+}
+
+/// A sign-in form that checks the password in the page: the right one goes
+/// home, a wrong one shows `wrong` (nothing, as some sites do, when empty).
+/// Enter is ignored when `enter` is false: only the button sends it.
+fn checking_form(home: &str, password: &str, wrong: &str, enter: bool) -> String {
+    let password = serde_json::to_string(password).unwrap();
+    let ignore_enter = if enter { "" } else { "document.addEventListener('keydown', e => { if (e.key === 'Enter') e.preventDefault(); }, true);" };
+    format!(
+        r#"<!doctype html><title>Sign in</title>
+        <form id=f><label>Email <input type=email name=user autocomplete=username></label>
+        <label>Password <input type=password name=pw autocomplete=current-password></label>
+        <button type=submit>Sign in</button></form><p id=said></p>
+        <script>{ignore_enter}
+        document.getElementById('f').addEventListener('submit', e => {{
+          e.preventDefault();
+          if (e.target.pw.value === {password}) {{ location.href = '{home}'; return; }}
+          document.getElementById('said').textContent = {wrong:?};
+        }});</script>"#
+    )
+}
+
+#[tokio::test]
+async fn a_sign_in_the_site_doesnt_take_is_never_called_signed_in() {
+    let form = checking_form("https://quiet.example/home", "right-one", "", true);
+    let (said, now) = signing_in("https://quiet.example/login", &[("https://quiet.example/login", &form), ("https://quiet.example/home", HOME)], "wrong-one").await;
+    if said.is_empty() {
+        return;
+    }
+    assert!(said.starts_with("Not signed in: quiet.example still shows its sign-in form"), "{said}");
+    assert!(now.contains(r#""path":"/login""#), "{now}");
+}
+
+#[tokio::test]
+async fn a_sign_in_the_site_refuses_says_so() {
+    let form = checking_form("https://refusing.example/home", "right-one", "Wrong email or password. Try again.", true);
+    let (said, _) = signing_in("https://refusing.example/login", &[("https://refusing.example/login", &form), ("https://refusing.example/home", HOME)], "wrong-one").await;
+    if said.is_empty() {
+        return;
+    }
+    assert!(said.starts_with("refusing.example didn't accept"), "{said}");
+}
+
+#[tokio::test]
+async fn a_form_that_ignores_enter_is_sent_with_its_button() {
+    let form = checking_form("https://button.example/home", "right-one", "", false);
+    let (said, now) = signing_in("https://button.example/login", &[("https://button.example/login", &form), ("https://button.example/home", HOME)], "right-one").await;
+    if said.is_empty() {
+        return;
+    }
+    assert!(said.starts_with("Signed in to button.example"), "{said}");
+    assert!(now.contains("Welcome back."), "{now}");
+}
+
+#[tokio::test]
+async fn a_password_of_quotes_brackets_and_accents_reaches_the_site_exactly() {
+    const PASSWORD: &str = "q\"\\'<>&é Ünï密🔑x";
+    let form = checking_form("https://exact.example/home", PASSWORD, "Wrong password.", true);
+    let (said, now) = signing_in("https://exact.example/login", &[("https://exact.example/login", &form), ("https://exact.example/home", HOME)], PASSWORD).await;
+    if said.is_empty() {
+        return;
+    }
+    assert!(said.starts_with("Signed in to exact.example"), "{said}");
+    assert!(now.contains("Welcome back."), "{now}");
+}
+
+#[tokio::test]
+async fn a_sign_in_that_lands_on_a_challenge_isnt_signed_in() {
+    let form = checking_form("https://challenged.example/checkpoint/challenge", "right-one", "", true);
+    let challenge = "<!doctype html><title>Security check</title><p>Let's do a quick security check.</p>";
+    let pages = [("https://challenged.example/login", form.as_str()), ("https://challenged.example/checkpoint/challenge", challenge)];
+    let (said, _) = signing_in("https://challenged.example/login", &pages, "right-one").await;
+    if said.is_empty() {
+        return;
+    }
+    assert!(said.contains("Not signed in: the site went to") && said.contains("/checkpoint/challenge"), "{said}");
+}
+
+#[tokio::test]
+async fn a_sign_in_is_told_its_next_address_without_the_query() {
+    let form = checking_form("https://tokened.example/home?session=abc123secret", "right-one", "", true);
+    let pages = [("https://tokened.example/login", form.as_str()), ("https://tokened.example/home?session=abc123secret", HOME)];
+    let (said, _) = signing_in("https://tokened.example/login", &pages, "right-one").await;
+    if said.is_empty() {
+        return;
+    }
+    assert!(said.starts_with("Signed in to tokened.example") && said.contains("https://tokened.example/home"), "{said}");
+    assert!(!said.contains("session") && !said.contains("abc123secret"), "{said}");
+}
+
+#[tokio::test]
+async fn a_form_that_would_put_the_password_in_the_address_is_refused_before_anything_is_typed() {
+    let dir = temp_dir();
+    let (addr, factory) = start(&dir).await;
+    if !factoryd::errands::local_chrome_for_test(&factory, &dir.join("profile")) {
+        eprintln!("no Chrome here: skipped");
+        return;
+    }
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    runner_with_browser(&mut client, &mut view, &dir).await;
+    factoryd::errands::open_browser_for_test(&factory, "runner").expect("its browser");
+    select(&mut client, &mut view, "runner").await;
+    let form = r#"<!doctype html><title>Sign in</title><form method=get action="/home">
+        <label>Email <input type=email name=user></label><label>Password <input type=password name=pw></label>
+        <button>Sign in</button></form><script>window.keys = 0; addEventListener('keydown', () => window.keys++, true);</script>"#;
+    factoryd::errands::serve_for_test("https://getform.example/login", Some(form));
+    call(&mut client, &mut view, "runner", "browser_open", json!({"url": "https://getform.example/login"})).await;
+    let (said, _) = call(&mut client, &mut view, "runner", "browser_read", json!({})).await;
+    let (document, user) = reference(&said, "Email");
+    let (_, field) = reference(&said, "Password");
+    let sign_in = json!({"document": document, "username": user, "password": field});
+    let (said, _) = call(&mut client, &mut view, "runner", "browser_sign_in", sign_in).await;
+    assert!(said.contains("would put the password in the page's address"), "{said}");
+    assert!(factoryd::vault::logins::login_request_for_test(&factory, "runner", "https://getform.example").is_none(), "nobody was asked");
 }

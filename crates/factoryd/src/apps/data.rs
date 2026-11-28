@@ -12,6 +12,10 @@
 //!   authorizer (default deny: a table or column added later stays out).
 //! - **Conversations** (`conversations`): the messages agents got, with
 //!   their text (`CONVERSATIONS_READS`), and nothing else of factory.db.
+//! - **Schedule** (`schedule`): Activity, and what names it: monitors' names
+//!   and when they fire, checklist items' words and when they're looked at
+//!   again, and each agent's project (`SCHEDULE_READS`, `SCHEDULE_TABLES`).
+//!   Never what a monitor runs or says to its agent.
 //! - **An agent's database** (`agent:<id>`), each one the person chooses.
 //! - **All of Claktory's records** (`factory-records`): factory.db as the
 //!   Database extension reads it. No longer granted: kept, and listed, only
@@ -20,6 +24,7 @@
 //!   Rivet, on a card) chooses, as the table `rows` (`super::files`).
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -29,7 +34,7 @@ use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 use rusqlite::types::ValueRef;
 use serde_json::{Value, json};
 
-use super::bundle::{ACTIVITY, AGENT_DATABASE, CONVERSATIONS, FACTORY_RECORDS, FILE, Manifest};
+use super::bundle::{ACTIVITY, AGENT_DATABASE, CONVERSATIONS, FACTORY_RECORDS, FILE, Manifest, SCHEDULE};
 use super::files;
 use super::{AppConfig, no_app};
 use crate::config::Config;
@@ -40,6 +45,7 @@ use crate::factory::{Factory, RequestError};
 pub(crate) const FACTORY_SOURCE: &str = "factory-records";
 pub(crate) const ACTIVITY_SOURCE: &str = "activity";
 pub(crate) const CONVERSATIONS_SOURCE: &str = "conversations";
+pub(crate) const SCHEDULE_SOURCE: &str = "schedule";
 /// An agent's database's source id: this, then the agent's id.
 pub(crate) const AGENT_PREFIX: &str = "agent:";
 const MAX_ROWS: usize = 10_000;
@@ -107,11 +113,46 @@ pub(crate) const CONVERSATIONS_READS: &[(&str, &[&str])] = &[(
     ],
 )];
 
+/// What Schedule reads of factory.db besides Activity's: what monitors and
+/// checklist items are called, and when an item is looked at again. A
+/// monitor's spec never: it holds a check's or a watch's command.
+pub(crate) const SCHEDULE_READS: &[(&str, &[&str])] =
+    &[("monitors", &["name"]), ("checklist_items", &["text", "retry_at", "reask_at"])];
+
+/// The tables Schedule makes in each connection's temp database
+/// (`schedule_tables`): at, every and cron monitors' specs, as stored
+/// (`{"at": …}`, `{"every": …, "start"?: …}`, `{"cron": …}`), and the agents
+/// there are now, with their project's id and name (null in the workspace)
+/// and whether they're admin agents (0 or 1).
+pub(crate) const SCHEDULE_TABLES: &[(&str, &[&str])] =
+    &[("monitor_specs", &["agent", "id", "kind", "spec"]), ("agents", &["id", "name", "project", "admin", "project_name"])];
+
+/// What a source may read, past its authorizer: factory.db's tables and
+/// columns, and the tables it makes in the connection's temp database.
+struct Allowed {
+    main: &'static [&'static [(&'static str, &'static [&'static str])]],
+    temp: &'static [(&'static str, &'static [&'static str])],
+}
+
+const ACTIVITY_ALLOWED: Allowed = Allowed { main: &[ACTIVITY_READS], temp: &[] };
+const CONVERSATIONS_ALLOWED: Allowed = Allowed { main: &[CONVERSATIONS_READS], temp: &[] };
+const SCHEDULE_ALLOWED: Allowed = Allowed { main: &[ACTIVITY_READS, SCHEDULE_READS], temp: SCHEDULE_TABLES };
+
+/// An agent as Schedule's `agents` table has it.
+struct ScheduleAgent {
+    id: String,
+    name: String,
+    project: Option<String>,
+    admin: bool,
+    project_name: Option<String>,
+}
+
 /// Which data a source is.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Reads {
     Activity,
     Conversations,
+    Schedule,
     /// All of factory.db, as the Database extension reads it.
     Records,
     Agent(String),
@@ -133,6 +174,7 @@ impl Source {
         match self.reads {
             Reads::Activity => v1::AppDataKind::Activity,
             Reads::Conversations => v1::AppDataKind::Conversations,
+            Reads::Schedule => v1::AppDataKind::Unspecified,
             Reads::Records => v1::AppDataKind::FactoryRecords,
             Reads::Agent(_) => v1::AppDataKind::AgentDatabase,
             Reads::File(_) => v1::AppDataKind::File,
@@ -168,12 +210,12 @@ impl Source {
         }
     }
 
-    /// The tables and columns it may read of its database; None for all
-    /// but the private ones.
-    fn allowed(&self) -> Option<&'static [(&'static str, &'static [&'static str])]> {
+    /// What it may read of its database; None for all of it.
+    fn allowed(&self) -> Option<&'static Allowed> {
         match self.reads {
-            Reads::Activity => Some(ACTIVITY_READS),
-            Reads::Conversations => Some(CONVERSATIONS_READS),
+            Reads::Activity => Some(&ACTIVITY_ALLOWED),
+            Reads::Conversations => Some(&CONVERSATIONS_ALLOWED),
+            Reads::Schedule => Some(&SCHEDULE_ALLOWED),
             Reads::Records | Reads::Agent(_) | Reads::File(_) => None,
         }
     }
@@ -195,6 +237,16 @@ fn conversations(reason: &str) -> Source {
         reads: Reads::Conversations,
         label: "Conversations".to_owned(),
         holds: "The messages your agents get, with their text: yours, other agents' and events.".to_owned(),
+        reason: reason.to_owned(),
+    }
+}
+
+fn schedule(reason: &str) -> Source {
+    Source {
+        id: SCHEDULE_SOURCE.to_owned(),
+        reads: Reads::Schedule,
+        label: "Schedule".to_owned(),
+        holds: "What your agents have scheduled: their monitors' names and when they fire, their checklist items' words and when they're looked at again, and each agent's project. Never what a monitor runs or tells its agent.".to_owned(),
         reason: reason.to_owned(),
     }
 }
@@ -240,6 +292,7 @@ fn sources(config: &Config, manifest: &Manifest, granted: &[String]) -> Vec<Sour
         let found: Vec<Source> = match data.kind.as_str() {
             ACTIVITY => vec![activity(&data.reason)],
             CONVERSATIONS => vec![conversations(&data.reason)],
+            SCHEDULE => vec![schedule(&data.reason)],
             AGENT_DATABASE if data.agent == "*" => {
                 config.agents.iter().filter_map(|agent| agent_source(config, &agent.id, &data.reason)).collect()
             }
@@ -328,6 +381,7 @@ pub(crate) fn requested(config: &Config, manifest: &Manifest) -> Vec<v1::AppData
             FACTORY_RECORDS => records(&data.reason).info(false),
             ACTIVITY => activity(&data.reason).info(false),
             CONVERSATIONS => conversations(&data.reason).info(false),
+            SCHEDULE => schedule(&data.reason).info(false),
             FILE => v1::AppDataSource {
                 id: format!("{}*", files::PREFIX),
                 kind: v1::AppDataKind::File.into(),
@@ -377,6 +431,7 @@ pub(crate) fn added(before: &Manifest, after: &Manifest) -> Vec<String> {
             (FACTORY_RECORDS, _) => "Ask to read all of Claktory's records".to_owned(),
             (ACTIVITY, _) => "Ask to read your agents' activity".to_owned(),
             (CONVERSATIONS, _) => "Ask to read your agents' conversations".to_owned(),
+            (SCHEDULE, _) => "Ask to read your agents' schedule".to_owned(),
             (FILE, _) => "Ask to read files you choose".to_owned(),
             (_, "*") => "Ask to read agents' own databases".to_owned(),
             (_, agent) => format!("Ask to read the database of the agent \"{agent}\""),
@@ -434,23 +489,69 @@ pub(crate) async fn query(factory: &Arc<Factory>, asked: wire::DataQuery) -> wir
         return query_file(factory, id, &asked).await;
     }
     let home = factory.home.clone();
+    let agents = if source.reads == Reads::Schedule { schedule_agents(&factory.lock().config) } else { Vec::new() };
+    // What an agent's call reads of people's words goes back to it in the
+    // call's answer: the agent is marked as having read outside content.
+    let watch = !asked.caller.is_empty() && holds_others_words(&source.id);
+    let read_from = format!("what the {} app read from {}", manifest.name, source.label);
     let ran = tokio::task::spawn_blocking(move || {
         let target = source.target();
         let db = sql::open_read_only(&home, &target).map_err(|why| (DataError::Failed, why))?;
         let Some(mut db) = db else {
             return Err((DataError::Failed, format!("{} has nothing in it yet.", source.label)));
         };
+        if source.reads == Reads::Schedule {
+            schedule_tables(&mut db, &agents).map_err(|error| (DataError::Failed, error.to_string()))?;
+        }
         if let Some(allowed) = source.allowed() {
             limit(&mut db, allowed).map_err(|error| (DataError::Failed, error.to_string()))?;
         }
-        run(&db, &target, &asked.sql, &asked.params)
+        let json = run(&db, &target, &asked.sql, &asked.params)?;
+        let words = watch && reads_words(&mut db, &source.reads, &asked.sql);
+        Ok((json, words, asked.caller))
     })
     .await;
     match ran {
-        Ok(Ok(json)) => wire::DataAnswer { json, ..Default::default() },
+        Ok(Ok((json, words, caller))) => {
+            if words {
+                crate::errands::read_outside(factory, &caller, &read_from);
+            }
+            wire::DataAnswer { json, ..Default::default() }
+        }
         Ok(Err((error, message))) => answer(error, message),
         Err(_) => answer(DataError::Failed, "The query stopped."),
     }
+}
+
+/// The columns of Conversations' messages that hold what someone wrote.
+const MESSAGE_WORDS: &[&str] = &["summary", "text", "attachments"];
+
+/// Whether reading `column` of `table` from `reads` takes what people
+/// wrote: Conversations' messages' words, or any column of all of
+/// Claktory's records. A read of no column (`count(*)`) never does.
+fn words(reads: &Reads, table: &str, column: &str) -> bool {
+    match reads {
+        Reads::Conversations => table == "messages" && MESSAGE_WORDS.contains(&column),
+        Reads::Records => !column.is_empty(),
+        _ => false,
+    }
+}
+
+/// Whether `sql`, which just ran in `db`, read what people wrote from
+/// `reads` (`words`): SQLite says which columns it reads as it prepares
+/// it again, never running it. One it can't say counts as reading them.
+fn reads_words(db: &mut rusqlite::Connection, reads: &Reads, sql: &str) -> bool {
+    let found = Arc::new(AtomicBool::new(false));
+    let (seen, reads) = (found.clone(), reads.clone());
+    let watched = db.authorizer(Some(move |context: AuthContext<'_>| {
+        if let AuthAction::Read { table_name, column_name } = context.action
+            && words(&reads, table_name, column_name)
+        {
+            seen.store(true, Ordering::Relaxed);
+        }
+        Authorization::Allow
+    }));
+    watched.is_err() || db.prepare(sql).is_err() || found.load(Ordering::Relaxed)
 }
 
 /// A query of a file: walked, opened and read again now, as a table.
@@ -550,14 +651,51 @@ fn run(db: &rusqlite::Connection, target: &Target, text: &str, params: &str) -> 
     Ok(json!({"columns": columns, "rows": out, "more": more}).to_string())
 }
 
+fn schedule_agents(config: &Config) -> Vec<ScheduleAgent> {
+    config
+        .agents
+        .iter()
+        .map(|agent| ScheduleAgent {
+            id: agent.id.clone(),
+            name: agent.name.clone(),
+            project: agent.project.clone(),
+            admin: crate::proposals::is_admin(agent),
+            project_name: agent.project.as_deref().and_then(|id| config.project(id)).map(|project| project.name.clone()),
+        })
+        .collect()
+}
+
+/// Makes Schedule's tables (`SCHEDULE_TABLES`) in `db`'s temp database, a
+/// copy for this connection alone: the specs of the monitors that only
+/// wait for a time, and `agents`. Copied rather than a view over
+/// `monitors`, so no statement of the app's can reach `monitors.spec`
+/// itself, whatever it calls its own tables.
+fn schedule_tables(db: &mut rusqlite::Connection, agents: &[ScheduleAgent]) -> rusqlite::Result<()> {
+    db.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
+    db.pragma_update(None, "query_only", false)?;
+    let made = (|| {
+        db.execute_batch(
+            "CREATE TEMP TABLE monitor_specs AS SELECT agent, id, kind, spec FROM main.monitors WHERE kind IN ('at', 'every', 'cron');
+             CREATE TEMP TABLE agents (id TEXT NOT NULL, name TEXT NOT NULL, project TEXT, admin INTEGER NOT NULL, project_name TEXT);",
+        )?;
+        let mut insert = db.prepare("INSERT INTO temp.agents (id, name, project, admin, project_name) VALUES (?1, ?2, ?3, ?4, ?5)")?;
+        for agent in agents {
+            insert.execute(rusqlite::params![agent.id, agent.name, agent.project, agent.admin, agent.project_name])?;
+        }
+        Ok(())
+    })();
+    db.pragma_update(None, "query_only", true)?;
+    made
+}
+
 /// Holds `db` to `allowed`'s tables and columns: every other read, and
 /// anything but reading, is refused (not blanked), through views, CTEs and
 /// subqueries alike, since SQLite asks about each column it reads from a
 /// table, whatever the statement looks like. The private tables stay
 /// refused, as everything unlisted is.
-fn limit(db: &mut rusqlite::Connection, allowed: &'static [(&'static str, &'static [&'static str])]) -> rusqlite::Result<()> {
+fn limit(db: &mut rusqlite::Connection, allowed: &'static Allowed) -> rusqlite::Result<()> {
     let own: Vec<String> = db.prepare("SELECT name FROM sqlite_schema")?.query_map([], |row| row.get(0))?.collect::<Result<_, _>>()?;
-    db.authorizer(Some(move |context: AuthContext<'_>| allows(allowed, &own, &context.action)))
+    db.authorizer(Some(move |context: AuthContext<'_>| allows(allowed, &own, context.database_name, &context.action)))
 }
 
 /// Whether `table`, in a read of no column, is a WITH clause's or a
@@ -571,18 +709,20 @@ pub(super) fn derived(table: &str, own: &[impl AsRef<str>]) -> bool {
     !lower.starts_with("sqlite_") && !lower.starts_with("pragma_") && !own.iter().any(|name| name.as_ref().eq_ignore_ascii_case(table))
 }
 
-fn allows(allowed: &[(&str, &[&str])], own: &[String], action: &AuthAction<'_>) -> Authorization {
+/// Whether `action`, in `database` ("main", "temp"), is one `allowed` lets
+/// through.
+fn allows(allowed: &Allowed, own: &[String], database: Option<&str>, action: &AuthAction<'_>) -> Authorization {
     match action {
         AuthAction::Read { table_name, column_name: "" } if derived(table_name, own) => Authorization::Allow,
         AuthAction::Select | AuthAction::Recursive => Authorization::Allow,
         AuthAction::Function { function_name } if !function_name.eq_ignore_ascii_case("load_extension") => Authorization::Allow,
         AuthAction::Read { table_name, column_name } => {
-            let listed = allowed.iter().find(|(table, _)| table == table_name);
+            let lists: &[&[(&str, &[&str])]] = if database == Some("temp") { &[allowed.temp] } else { allowed.main };
             // "" is a read of no column (count(*)): only the table's rows.
-            match listed {
-                Some((_, columns)) if column_name.is_empty() || columns.contains(column_name) => Authorization::Allow,
-                _ => Authorization::Deny,
-            }
+            let listed = lists.iter().flat_map(|list| list.iter()).any(|(table, columns)| {
+                table == table_name && (column_name.is_empty() || columns.contains(column_name))
+            });
+            if listed { Authorization::Allow } else { Authorization::Deny }
         }
         _ => Authorization::Deny,
     }
@@ -671,6 +811,34 @@ mod tests {
     }
 
     #[test]
+    fn what_people_wrote_is_told_from_counts_and_times() {
+        let read = |reads: Reads, sql: &str| {
+            let mut db = rusqlite::Connection::open_in_memory().unwrap();
+            db.execute_batch("CREATE TABLE messages (id INTEGER, created INTEGER, summary TEXT, text TEXT, attachments TEXT)").unwrap();
+            reads_words(&mut db, &reads, sql)
+        };
+        for sql in [
+            "SELECT text FROM messages",
+            "SELECT id FROM messages WHERE summary LIKE '%key%'",
+            "SELECT count(attachments) FROM messages",
+            "WITH m AS (SELECT Text AS t FROM messages) SELECT count(*) FROM m",
+            "SELECT * FROM messages",
+        ] {
+            assert!(read(Reads::Conversations, sql), "{sql}");
+            assert!(read(Reads::Records, sql), "{sql}");
+        }
+        for sql in ["SELECT count(*) FROM messages", "SELECT 1", "SELECT id, created FROM messages"] {
+            assert!(!read(Reads::Conversations, sql), "{sql}");
+        }
+        assert!(!read(Reads::Records, "SELECT count(*) FROM messages"));
+        assert!(read(Reads::Records, "SELECT created FROM messages"), "all of the records: any column");
+        assert!(read(Reads::Conversations, "SELECT nothing FROM nowhere"), "what can't be told counts");
+        for reads in [Reads::Activity, Reads::Schedule, Reads::Agent("lea".into())] {
+            assert!(!read(reads, "SELECT text FROM messages"));
+        }
+    }
+
+    #[test]
     fn one_read_only_statement_answers_its_rows_as_json() {
         let db = db();
         let target = Target::Own("lea".into());
@@ -720,7 +888,7 @@ mod tests {
     #[test]
     fn activity_reads_only_its_columns_however_the_statement_is_written() {
         let mut db = records();
-        limit(&mut db, ACTIVITY_READS).unwrap();
+        limit(&mut db, &ACTIVITY_ALLOWED).unwrap();
         let target = Target::Factory;
         let rows = |sql: &str| -> Value { serde_json::from_str::<Value>(&run(&db, &target, sql, "").unwrap()).unwrap()["rows"].clone() };
         assert_eq!(rows("SELECT agent, COUNT(*) FROM messages GROUP BY agent"), json!([["lea", 2]]));
@@ -761,7 +929,7 @@ mod tests {
     #[test]
     fn conversations_read_the_messages_and_nothing_else() {
         let mut db = records();
-        limit(&mut db, CONVERSATIONS_READS).unwrap();
+        limit(&mut db, &CONVERSATIONS_ALLOWED).unwrap();
         let target = Target::Factory;
         let said: Value = serde_json::from_str(&run(&db, &target, "SELECT text FROM messages ORDER BY id", "").unwrap()).unwrap();
         assert_eq!(said["rows"], json!([["my bank password is hunter2"], ["hi"]]));
@@ -816,7 +984,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let store = crate::store::Store::open(&dir.join("factory.db")).unwrap();
         let db = store.db();
-        for (table, columns) in ACTIVITY_READS.iter().chain(CONVERSATIONS_READS) {
+        for (table, columns) in ACTIVITY_READS.iter().chain(CONVERSATIONS_READS).chain(SCHEDULE_READS) {
             let have: Vec<String> =
                 crate::store::query(&db, &format!("SELECT name FROM pragma_table_info('{table}')"), [], |row| row.get(0)).unwrap();
             for column in *columns {
@@ -825,6 +993,86 @@ mod tests {
         }
         drop(db);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Schedule reads what names things and when they're due, and a
+    /// monitor's spec only when it waits for a time: never a check's or a
+    /// watch's command, nor a monitor's prompt, however the statement asks.
+    #[test]
+    fn schedule_reads_names_and_times_but_never_a_monitors_command() {
+        let dir = std::env::temp_dir().join(format!("factoryd-app-schedule-{}-{}", std::process::id(), crate::transcript::now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("factory.db");
+        let store = crate::store::Store::open(&path).unwrap();
+        store
+            .db()
+            .execute_batch(
+                "INSERT INTO monitors (agent, id, name, prompt, kind, spec, idle_only, created_by, created, state, reason, fires, carry, cursor, updated)
+                 VALUES ('lea', 1, 'Logs', 'read the logs', 'every', '{\"every\":\"6h\"}', 1, '', 0, 'active', '', 0, '', '{}', 0),
+                        ('lea', 2, 'Disk', 'say if full', 'check', '{\"check\":\"curl -H token:hunter2 x\"}', 1, '', 0, 'active', '', 0, '', '{}', 0),
+                        ('ana', 3, 'Release', 'ship', 'at', '{\"at\":1796000000}', 1, '', 0, 'active', '', 0, '', '{}', 0);
+                 INSERT INTO checklist_items (agent, id, text, status, owner, created, updated, retry_at) VALUES ('lea', 1, 'Ship v2', 'open', '', 0, 0, 1796000000);",
+            )
+            .unwrap();
+        drop(store);
+        let before = std::fs::read(&path).unwrap();
+        let mut db = rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        db.pragma_update(None, "query_only", true).unwrap();
+        let agents = [
+            ScheduleAgent { id: "lea".into(), name: "Lea".into(), project: Some("site".into()), admin: false, project_name: Some("Web Site".into()) },
+            ScheduleAgent { id: "rivet".into(), name: "Rivet".into(), project: None, admin: true, project_name: None },
+        ];
+        schedule_tables(&mut db, &agents).unwrap();
+        limit(&mut db, &SCHEDULE_ALLOWED).unwrap();
+        let target = Target::Factory;
+        let rows = |sql: &str| -> Value { serde_json::from_str::<Value>(&run(&db, &target, sql, "").unwrap()).unwrap()["rows"].clone() };
+        assert_eq!(rows("SELECT name, kind, next_due FROM monitors ORDER BY id"), json!([["Logs", "every", null], ["Disk", "check", null], ["Release", "at", null]]));
+        assert_eq!(
+            rows("SELECT agent, id, kind, spec FROM monitor_specs ORDER BY id"),
+            json!([["lea", 1, "every", "{\"every\":\"6h\"}"], ["ana", 3, "at", "{\"at\":1796000000}"]])
+        );
+        assert_eq!(rows("SELECT text, retry_at, reask_at FROM checklist_items"), json!([["Ship v2", 1796000000, null]]));
+        assert_eq!(
+            rows("SELECT id, name, project, admin, project_name FROM agents ORDER BY id"),
+            json!([["lea", "Lea", "site", 0, "Web Site"], ["rivet", "Rivet", null, 1, null]])
+        );
+        assert_eq!(
+            rows("SELECT a.project, m.name FROM monitor_specs s JOIN monitors m USING (agent, id) JOIN agents a ON a.id = s.agent"),
+            json!([["site", "Logs"]])
+        );
+        for sql in [
+            "SELECT spec FROM monitors",
+            "SELECT spec FROM main.monitors",
+            "SELECT * FROM monitors",
+            "SELECT prompt FROM monitors",
+            "SELECT carry, cursor, reason FROM monitors",
+            "WITH monitor_specs AS (SELECT agent, spec FROM main.monitors) SELECT * FROM monitor_specs",
+            "SELECT * FROM (SELECT spec FROM monitors) AS monitor_specs",
+            "SELECT id FROM monitors WHERE spec LIKE '%hunter2%'",
+            "SELECT text FROM messages",
+            "SELECT blocked_on FROM checklist_items",
+        ] {
+            let (error, message) = run(&db, &target, sql, "").unwrap_err();
+            assert_eq!(error, DataError::Invalid, "{sql}");
+            assert!(message.contains("isn't in this source"), "{sql}: {message}");
+        }
+        assert_eq!(run(&db, &target, "DELETE FROM temp.agents", "").unwrap_err().0, DataError::Invalid);
+        drop(db);
+        assert_eq!(std::fs::read(&path).unwrap(), before, "factory.db as it was");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Widening Schedule is a reviewed change, as Activity's is.
+    #[test]
+    fn schedule_is_this_list() {
+        let listed = |list: &[(&str, &[&str])]| -> String {
+            list.iter().flat_map(|(table, columns)| columns.iter().map(move |column| format!("{table}.{column}"))).collect::<Vec<_>>().join(" ")
+        };
+        assert_eq!(listed(SCHEDULE_READS), "monitors.name checklist_items.text checklist_items.retry_at checklist_items.reask_at");
+        assert_eq!(
+            listed(SCHEDULE_TABLES),
+            "monitor_specs.agent monitor_specs.id monitor_specs.kind monitor_specs.spec agents.id agents.name agents.project agents.admin agents.project_name"
+        );
     }
 
     #[test]

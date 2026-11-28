@@ -16,6 +16,14 @@
 //     --target integration_test/phone_viewers_tour_test.dart \
 //     --define FILES=/tmp/tour/a.pdf,/tmp/tour/b.md \
 //     --define SHOTS_DIR=/tmp/viewers [--define AGENT=Rivet]
+//
+// With --define OPEN_SHOT_MS=300, each file is shot that long after it's
+// opened, then again that long after it's opened a second time, from the
+// copy kept on the device (to see what a far link shows meanwhile: build
+// with FACTORY_QA_ROUND_TRIP_MS and FACTORY_QA_DOWNLINK_KBPS).
+// With --define SEAL=true, each file is a sealed one instead: a shot of
+// it, then of its sealed version (Open sealed version) when it has one,
+// then of it again after Back.
 import 'dart:io';
 
 import 'package:factory_app/main.dart' as app;
@@ -30,6 +38,8 @@ import 'package:integration_test/integration_test.dart';
 const _code = String.fromEnvironment('PAIRING_CODE');
 const _agent = String.fromEnvironment('AGENT', defaultValue: 'Rivet');
 const _files = String.fromEnvironment('FILES');
+const _openShotMs = int.fromEnvironment('OPEN_SHOT_MS');
+const _seal = bool.fromEnvironment('SEAL');
 const _shots = String.fromEnvironment(
   'SHOTS_DIR',
   defaultValue: '/tmp/viewers',
@@ -68,8 +78,8 @@ void main() {
       }
     }
 
-    Future<void> shot(String name) async {
-      await settle();
+    Future<void> shot(String name, {int wait = 1200}) async {
+      if (wait > 0) await settle(wait);
       final request = File('$_shots/request');
       final done = File('$_shots/$name.png');
       if (done.existsSync()) done.deleteSync();
@@ -200,7 +210,39 @@ void main() {
         note('SKIPPED $path: no viewer opened');
         continue;
       }
+      if (_openShotMs > 0) {
+        await settle(_openShotMs);
+        await shot('$name-0-opening', wait: 0);
+        await settle(3000);
+        await shot('$name-1-opened', wait: 0);
+        await tester.tap(find.bySemanticsLabel('Back').last);
+        await settle(1500);
+        routes.showFile(agent.id, path);
+        await settle(_openShotMs);
+        await shot('$name-2-reopening', wait: 0);
+        await settle(1500);
+        await tester.tap(find.bySemanticsLabel('Back').last);
+        await settle(1500);
+        continue;
+      }
       await settle(4000);
+      if (_seal) {
+        await shot('$name-1-current');
+        final open = find.text('Open sealed version');
+        if (open.evaluate().isNotEmpty) {
+          await tester.tap(open.last);
+          await settle(3000);
+          await shot('$name-2-sealed');
+          await tester.tap(find.bySemanticsLabel('Back').last);
+          await settle(1500);
+          await shot('$name-3-back');
+        } else {
+          note('$path: no Open sealed version');
+        }
+        await tester.tap(find.bySemanticsLabel('Back').last);
+        await settle(1500);
+        continue;
+      }
       await shot('$name-1-portrait');
       await tester.tapAt(spot());
       await shot('$name-2-portrait-tapped');

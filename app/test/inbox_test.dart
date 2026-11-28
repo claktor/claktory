@@ -405,7 +405,7 @@ void main() {
     await settle(tester);
     expect(find.byType(ProposalCard), findsOneWidget);
     // It reads as a link at rest, before the pointer finds it: underlined,
-    // in the muted text color (Matt).
+    // in the muted text color.
     final palette = Palette.of(tester.element(find.text('Open chat')));
     final link = tester.widget<Text>(find.text('Open chat')).style!;
     expect(link.decoration, TextDecoration.underline);

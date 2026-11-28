@@ -1,12 +1,12 @@
-// Recordings kept on this device until their Claktory has them (#401,
-// Matt's decision: an unsent recording stays on the device until the
-// Claktory confirms it got it, then it's deleted). A voice message to an
-// agent or a chat, or a field's dictation, is recorded straight into a
-// private folder (Recorder.swift's voiceFolder: never backed up, this
-// user's only; Android's no_backup folder), with what it's for beside it
-// (kept.json), so a dropped connection, the app quit or killed, loses
-// nothing: on the next launch it comes back where it belongs and is sent
-// again, with the same ids, so nothing doubles.
+// Recordings kept on this device until their Claktory has them (an
+// unsent recording stays on the device until the Claktory confirms it
+// got it, then it's deleted). A voice message to an agent or a chat, or
+// a field's dictation, is recorded straight into a private folder
+// (Recorder.swift's voiceFolder: never backed up, this user's only;
+// Android's no_backup folder), with what it's for beside it (kept.json),
+// so a dropped connection, the app quit or killed, loses nothing: on the
+// next launch it comes back where it belongs and is sent again, with the
+// same ids, so nothing doubles.
 import 'dart:async';
 import 'dart:convert';
 import 'dart:developer' as developer;
@@ -39,7 +39,7 @@ final _random = Random.secure();
 String newVoiceId() =>
     List.generate(16, (_) => _random.nextInt(16).toRadixString(16)).join();
 
-/// A file going with a kept voice message (#425): where it is on this
+/// A file going with a kept voice message: where it is on this
 /// device and its upload's id, so the message goes again whole.
 class KeptFile {
   const KeptFile({
@@ -56,7 +56,7 @@ class KeptFile {
 
   /// As kept beside its voice message in [folder]: by its name there when
   /// it's kept with it ([keepWith]), so it's found again wherever the
-  /// system puts the app's folders after a relaunch or an update (#615);
+  /// system puts the app's folders after a relaunch or an update;
   /// by its path when it stayed where the person chose it.
   Map<String, Object?> toJson({String? folder}) => {
     if (folder != null && path.startsWith('$folder/'))
@@ -196,19 +196,19 @@ class KeptVoice extends Recording {
   /// A dictation's upload finished: it's asked for the words only.
   bool uploaded;
 
-  /// A voice message's typed text, sent with it as one message (#425).
+  /// A voice message's typed text, sent with it as one message.
   String text;
 
-  /// The other files going with a voice message (#425), after the
+  /// The other files going with a voice message, after the
   /// recording.
   List<KeptFile> files;
 
-  /// A voice note waiting in its message box, not sent yet (#425): after a
+  /// A voice note waiting in its message box, not sent yet: after a
   /// relaunch it goes back to the box, not to the outbox.
   bool draft;
 
   /// A dictation's words, already being asked for: it was finished from
-  /// the floating bar with its field gone (#409), so they're ready when
+  /// the floating bar with its field gone, so they're ready when
   /// the field is back. In memory only; the field takes it.
   Future<String>? heard;
 
@@ -393,7 +393,7 @@ void _sweepStray(Directory entry) {
 }
 
 /// Sweeps the kept folder's empty folders, left by recordings the app
-/// never heard the end of (Sale's row 86): when a recording starts, so
+/// never heard the end of: when a recording starts, so
 /// they don't wait for the next launch.
 Future<void> sweepEmptyRecordings() async {
   final path = await keptVoiceFolder();
@@ -522,7 +522,7 @@ class KeptVoices extends ChangeNotifier {
     found.sort((a, b) => a.made.compareTo(b.made));
     for (final voice in found) {
       switch (voice.kind) {
-        // A voice note left in its message box (#425): back in the box.
+        // A voice note left in its message box: back in the box.
         case KeptKind.agent || KeptKind.chat when voice.draft:
           VoiceNotes.of(backend).restore(voice);
         case KeptKind.agent:
@@ -602,7 +602,7 @@ class KeptVoices extends ChangeNotifier {
   }
 }
 
-/// The voice notes waiting in message boxes (#425), one per box at most,
+/// The voice notes waiting in message boxes, one per box at most,
 /// by the box's key ([MessageTarget.key]): recorded while the box had text
 /// (or files), they go with it as one message when it's sent. Kept on the
 /// device as any recording not sent yet ([KeptVoice.draft]), so a relaunch

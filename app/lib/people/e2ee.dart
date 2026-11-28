@@ -409,6 +409,12 @@ class DmRoutes {
 
   static const _dms = '/v1/apps/dms';
 
+  /// The person's friends' accounts, as their friends list has it.
+  Future<List<String>> friends() async => [
+    for (final item in _list(await session.get('$_dms/contacts'), 'contacts'))
+      _text(item, 'account_id'),
+  ];
+
   /// [account]'s keys; null before it set any up.
   Future<DmAccountKeys?> keys(String account) async {
     try {
@@ -1217,7 +1223,10 @@ class E2ee extends ChangeNotifier {
           await sync();
           // What changed while nothing followed: keys events come only
           // from here on.
-          if (setup == DmSetup.ready) await _refreshAllKeys();
+          if (setup == DmSetup.ready) {
+            if (_device case final device?) await _readFriends(device);
+            await _refreshAllKeys();
+          }
           continue;
         }
         final answer = await session.get(
@@ -1241,6 +1250,13 @@ class E2ee extends ChangeNotifier {
               }
             case 'handoff':
               await takeHandoff();
+            case 'contacts':
+              _events.add(event);
+              // Befriended or unfriended: pinned now, and routed or not.
+              if (_device case final device? when setup == DmSetup.ready) {
+                await _meetFriends(device);
+                if (_drained) await _sendRoutes(device);
+              }
             default:
               _events.add(event);
           }
@@ -3446,7 +3462,12 @@ class E2ee extends ChangeNotifier {
   /// Takes the person's own dead devices out of [group] in one commit:
   /// after a start-over's rejoin, none holds the new epoch's secrets.
   Future<void> _removeDead(DmDevice device, DmServerGroup group) async {
-    final commit = await device.removeDeadLeaves(groupId: group.id);
+    // No worker list versions yet: Polnareff's E11-8 app half (polna/e118)
+    // passes GET groups' own, so a device on an older list waits.
+    final commit = await device.removeDeadLeaves(
+      groupId: group.id,
+      listVersions: const [],
+    );
     if (commit == null) return;
     try {
       await _commit(group.groupId, commit);
@@ -4470,6 +4491,8 @@ class E2ee extends ChangeNotifier {
         groupId: dmUnb64(group),
         content: content,
         nowMs: _nowMs(),
+        // As removeDeadLeaves: the worker's versions come with polna/e118.
+        listVersions: const [],
       );
     } catch (error) {
       problem = '$error';
@@ -4731,8 +4754,10 @@ class E2ee extends ChangeNotifier {
   /// so one changed while the app was closed (a friend's home moved,
   /// Zucchero's row 567) is read here, as following starts.
   ///
-  /// Only accounts pinned here, in conversations this device holds: never
-  /// a first contact the service's list alone would bring (Fugo, M3).
+  /// Of a conversation's accounts, only those pinned here: never a first
+  /// contact the service's list of a group's accounts alone would bring.
+  /// The person's friends, whom they chose, are pinned here at friending
+  /// when they aren't yet, as in [_meetFriends].
   Future<void> _refreshAllKeys() async {
     final device = _device;
     if (device == null) return;
@@ -4740,10 +4765,13 @@ class E2ee extends ChangeNotifier {
       accountId,
       for (final group in await _groupsHere(device))
         if (group.kind == 'conversation') ...group.accounts,
+      ..._friends,
     }..remove('');
     for (final account in accounts) {
       if (_closed) return;
-      if (device.pin(account: account) == null) continue;
+      if (device.pin(account: account) == null && !_friends.contains(account)) {
+        continue;
+      }
       try {
         await refreshKeys(account);
       } catch (error) {
@@ -5403,6 +5431,50 @@ class E2ee extends ChangeNotifier {
   /// changes (and again after the connection came back).
   var _routesSent = '';
 
+  /// The person's friends, as their friends list said last: each is
+  /// pinned here at friending, and their home routed with no
+  /// conversation, so the first message either of them sends is
+  /// taken there while no device of the other's has joined it yet.
+  var _friends = <String>{};
+
+  /// Whether [_friends] was read since this engine started: until then the
+  /// routes leave no one out for not being a friend, and the home's
+  /// friends' routes aren't sent before it is.
+  var _friendsKnown = false;
+
+  /// Reads the friends list into [_friends]; null when it couldn't.
+  Future<Set<String>?> _readFriends(DmDevice device) async {
+    try {
+      final friends = {...await routes.friends()}
+        ..remove('')
+        ..remove(accountId);
+      _friendsKnown = true;
+      return _friends = friends;
+    } catch (error) {
+      problem = '$error';
+      return null;
+    }
+  }
+
+  /// The friends list again, after it changed: each friend new since is
+  /// pinned now, as a first message would pin them (a pin already here
+  /// is never replaced: a changed key is marked, as always). Only the
+  /// person's own friends, whom they chose: a request they accepted or
+  /// one of theirs accepted.
+  Future<void> _meetFriends(DmDevice device) async {
+    final before = _friends;
+    final now = await _readFriends(device);
+    if (now == null) return;
+    for (final account in now.difference(before)) {
+      if (_closed) return;
+      try {
+        await refreshKeys(account);
+      } catch (error) {
+        problem = '$error';
+      }
+    }
+  }
+
   /// Gives the home its routing table, from what this device verified
   /// (Fugo (a)–(c)): each friend in a conversation as its MLS group's
   /// checked members say, their home from their signed list as this
@@ -5412,6 +5484,11 @@ class E2ee extends ChangeNotifier {
   Future<void> _sendRoutes(DmDevice device, {bool again = false}) async {
     final link = _ours;
     if (link == null || !link.connected.value) return;
+    // A first table without the friends would take their homes off it,
+    // and with them what they left pending there.
+    if (!_friendsKnown) await _readFriends(device);
+    var unfriend = _friendsKnown;
+    var reread = false;
     final byHome =
         <String, ({String account, List<int> home, Set<String> groups})>{};
     for (final group in await _groupsHere(device)) {
@@ -5430,6 +5507,14 @@ class E2ee extends ChangeNotifier {
         ?joining[group.groupId],
       };
       for (final account in accounts) {
+        // Unfriended: their home goes off the table, conversation and all.
+        // One not on the list as last read may be a friend since: read
+        // again first, and left on when it can't be read.
+        if (unfriend && !_friends.contains(account) && !reread) {
+          reread = true;
+          unfriend = await _readFriends(device) != null;
+        }
+        if (unfriend && !_friends.contains(account)) continue;
         final home = device.deviceList(account: account)?.home;
         if (home == null || home.isEmpty) continue;
         final key = '$account/${dmB64(home)}';
@@ -5439,6 +5524,23 @@ class E2ee extends ChangeNotifier {
           groups: {},
         )).groups.add(group.groupId);
       }
+    }
+    // Each friend's home, with no conversation: only under a pin taken
+    // here, never while their key changed unseen.
+    for (final account in _friends) {
+      final pin = device.pin(account: account);
+      if (pin == null ||
+          pin.changedUnseen ||
+          pin.mismatched ||
+          keyRefused.contains(account)) {
+        continue;
+      }
+      final home = device.deviceList(account: account)?.home;
+      if (home == null || home.isEmpty) continue;
+      byHome.putIfAbsent(
+        '$account/${dmB64(home)}',
+        () => (account: account, home: home, groups: {}),
+      );
     }
     final keys = byHome.keys.toList()..sort();
     final said = [

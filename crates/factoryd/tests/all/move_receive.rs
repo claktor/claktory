@@ -68,7 +68,7 @@ fn receive(home: &Home) -> (tokio::task::JoinHandle<Result<String, factoryd::mov
     };
     let home = home.clone();
     let task = tokio::spawn(async move {
-        let options = Options { committed: false, local_only: true };
+        let options = Options { committed: false, local_only: true, ..Options::default() };
         // A port no Claktory listens on, which no other test takes meanwhile.
         let nowhere = std::net::SocketAddr::from(([127, 0, 0, 1], 1));
         factoryd::move_import::receive::receive(&home, nowhere, &options, &ui).await
@@ -364,9 +364,11 @@ async fn a_claktory_moves_over_the_network_resuming_after_a_drop_and_starts_only
         here.root().join("import/bundle/home/agents/writer/notes.txt").exists() || here.root().join("agents/writer/notes.txt").exists()
     );
 
-    // Imported and verified, it says so; it still doesn't start.
+    // Imported and verified, it says so; it still doesn't start. No code
+    // for the old computer's app: it comes over as a device let in by its
+    // account key.
     let Frame::Ready { old_app_code } = wire.next_but_progress().await else { panic!("ready") };
-    assert!(old_app_code.is_some_and(|code| code.contains(&format!("t={}", source.token))));
+    assert_eq!(old_app_code, None);
     assert!(factoryd::move_import::unfinished(&here).is_some(), "not until the source commits");
 
     // The source commits: done, and it's this computer's Claktory now.
@@ -613,7 +615,7 @@ async fn receive_json_says_each_step_in_a_line_and_takes_the_persons_answer_on_s
     let ui = receive_json::ui(emit, Arc::new(tokio::sync::Mutex::new(typed)));
     let home = here.clone();
     let task = tokio::spawn(async move {
-        let options = Options { committed: false, local_only: true };
+        let options = Options { committed: false, local_only: true, ..Options::default() };
         let nowhere = std::net::SocketAddr::from(([127, 0, 0, 1], 1));
         factoryd::move_import::receive::receive(&home, nowhere, &options, &ui).await
     });
@@ -740,4 +742,42 @@ async fn a_read_only_file_is_copied_again_and_the_same_computer_can_start_its_mo
     wire.send(Frame::Cancel { why: String::new() }).await;
     let ended = tokio::time::timeout(WAIT, task).await.expect("in time").expect("joined").expect_err("called off");
     assert!(matches!(ended, factoryd::move_import::ImportError::CalledOff(_)), "{ended:?}");
+}
+
+/// A move with the account: once the source took the person's approved move
+/// (`receive/approved.json`, as the poll left it), receive shows no code and
+/// asks no digits, lets in only the endpoint the source named, whatever
+/// secret a dialer says, and turns any other away.
+#[tokio::test]
+async fn an_approved_move_lets_in_only_the_source_that_took_it_with_no_code_or_digits() {
+    let target = temp_dir();
+    let home = Home::new(target.join("home"));
+    let source_key = SecretKey::generate();
+    let approved = home.root().join("import/receive/approved.json");
+    std::fs::create_dir_all(approved.parent().unwrap()).expect("receive folder");
+    let record = serde_json::json!({"source_key": source_key.public().to_string(), "source_claktory_id": "studio", "approver": "key"});
+    std::fs::write(&approved, record.to_string()).expect("approved");
+    let (task, mut person) = receive(&home);
+    // Where it listens, with no secret: nothing a person could paste.
+    let code = person.code().await;
+    assert!(code.secret.is_empty(), "{code:?}");
+
+    // Another computer, even saying the code's old secret, is turned away.
+    let stranger = endpoint().await;
+    let mut wire = Wire::dial(&stranger, &code).await;
+    let Frame::Failed { why } = wire.hello(&code, &"ab".repeat(32)).await else { panic!("turned away") };
+    assert!(why.contains("waiting for the Claktory you approved"), "{why}");
+
+    // The source that took it: welcomed, with no digits asked of anyone.
+    let source = endpoint_with(&source_key).await;
+    let mut wire = Wire::dial(&source, &code).await;
+    let Frame::Welcome { resumed, .. } = wire.hello(&code, "").await else { panic!("welcomed") };
+    assert!(!resumed);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(person.asked.lock().unwrap().is_empty(), "digits were asked");
+    assert!(person.said().contains("as you approved"), "{}", person.said());
+    let claim: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(home.root().join("import/receive/claim.json")).expect("claimed")).expect("json");
+    assert_eq!(claim["source"], source_key.public().to_string());
+    task.abort();
 }

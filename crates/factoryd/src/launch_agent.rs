@@ -4,7 +4,7 @@
 //! writes (`ProcessType Interactive`: without it launchd throttles Factory and
 //! everything agents run) reaches older installs only here. Each round of
 //! WANTED is tried once (`ROUND`): AssociatedBundleIdentifiers came in
-//! round 2, so Login Items names the job after the app (friend bug #28).
+//! round 2, so Login Items names the job after the app.
 //!
 //! The backend checks the plist once it's past any update's trial. Only a
 //! plist that runs this Factory's own supervisor counts (the dev Factory isn't
@@ -35,7 +35,7 @@ use crate::home::Home;
 pub(crate) const LABEL: &str = "dev.factory.factoryd";
 
 /// The Mac app's bundle id: the job's AssociatedBundleIdentifiers, so
-/// Login Items shows it as Claktory (friend bug #28).
+/// Login Items shows it as Claktory.
 pub(crate) const APP_BUNDLE_ID: &str = "dev.factory.app";
 
 /// What the plist must say, as installers write it now: each key's value
@@ -44,7 +44,7 @@ const WANTED: [(&str, &str); 2] =
     [("ProcessType", r#""Interactive""#), ("AssociatedBundleIdentifiers", concat!(r#"[""#, "dev.factory.app", r#""]"#))];
 
 /// Which WANTED the marker's update tried: 1 had only ProcessType; 2 adds
-/// AssociatedBundleIdentifiers (friend bug #28). Each round is tried once.
+/// AssociatedBundleIdentifiers. Each round is tried once.
 const ROUND: u64 = 2;
 
 /// The keys of WANTED `plist` doesn't have as wanted.

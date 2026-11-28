@@ -10,6 +10,7 @@ import 'package:flutter/widgets.dart';
 import '../annotations.dart';
 import '../backend.dart';
 import '../controls.dart';
+import '../diagnostics_record.dart' show ViewedFrom;
 import '../identity.dart';
 import '../mobile/metrics.dart';
 import '../mobile/viewer_chrome.dart';
@@ -188,9 +189,12 @@ class _SystemPlayback implements VideoPlayback {
 /// comment shows on the timeline in its agent's color; a click on one
 /// plays from there.
 class VideoViewer extends StatefulWidget {
-  const VideoViewer({super.key, required this.path});
+  const VideoViewer({super.key, required this.path, this.sealed});
 
   final String path;
+
+  /// The seal whose kept version shows, rather than the file.
+  final FileSeal? sealed;
 
   @override
   State<VideoViewer> createState() => _VideoViewerState();
@@ -200,6 +204,13 @@ class _VideoViewerState extends State<VideoViewer>
     with FileLoading<VideoViewer> {
   @override
   String get path => widget.path;
+
+  @override
+  FileSeal? get sealed => widget.sealed;
+
+  @override
+  Widget sealedViewer(FileSeal sealed) =>
+      VideoViewer(path: path, sealed: sealed);
 
   @override
   String get loadingLabel => 'Loading video…';
@@ -340,7 +351,11 @@ class _VideoViewerState extends State<VideoViewer>
         _copy != null &&
         !(playing.preview && wantOriginal)) {
       try {
-        final now = await backend.readFile(path, maxBytes: 1);
+        final now = await backend.readFile(
+          path,
+          maxBytes: 1,
+          sealedSha256: sealedSha256,
+        );
         if (!mounted || generation != _generation) return;
         if (now.error.isEmpty && now.sha256 == playing.sha256) {
           setState(() {
@@ -359,7 +374,8 @@ class _VideoViewerState extends State<VideoViewer>
     }
     // Kept on this device and still the file: played from there,
     // the original if it's here, else the preview made for this screen.
-    final cache = FileCache.of(backend);
+    final cache = keptCopies(backend);
+    askingFor(backend);
     if (cache != null) {
       final found = await cache.lookup(backend, path, [
         originalVariant,
@@ -370,12 +386,18 @@ class _VideoViewerState extends State<VideoViewer>
         _dropPartial();
         _size = found.kept.content.size.toInt();
         _noPreview = false;
+        final content = found.kept.content;
+        setState(
+          () => seals =
+              found.seals ?? (content.hasSeals() ? content.seals : null),
+        );
         return _start(
           found.kept.file,
           found.kept.content,
           preview: found.kept.content.isPreview,
           keptIn: cache,
           unchecked: !found.current,
+          from: ViewedFrom.kept,
         );
       }
     }
@@ -414,6 +436,7 @@ class _VideoViewerState extends State<VideoViewer>
         if (partial.preview) preview = previewScreen();
         head = await backend.readFile(
           path,
+          sealedSha256: sealedSha256,
           maxBytes: 1,
           expectedSha256: partial.sha256,
           preview: preview,
@@ -435,6 +458,7 @@ class _VideoViewerState extends State<VideoViewer>
           head ??
           await backend.readFile(
             path,
+            sealedSha256: sealedSha256,
             maxBytes: videoChunk,
             onProgress: progress,
             carryOn: wantOriginal ? null : stopWhenSlow(backend),
@@ -450,6 +474,7 @@ class _VideoViewerState extends State<VideoViewer>
         preview = previewScreen();
         first = await backend.readFile(
           path,
+          sealedSha256: sealedSha256,
           maxBytes: videoPiece,
           onProgress: progress,
           preview: preview,
@@ -471,6 +496,7 @@ class _VideoViewerState extends State<VideoViewer>
       setState(() {
         _noPreview = first.preview == FilePreview.FILE_PREVIEW_UNAVAILABLE;
         if (!_replacing) file = first.deepCopy()..data = const [];
+        seals = first.hasSeals() ? first.seals : null;
         failure = null;
       });
       final name = path.split('/').last;
@@ -504,6 +530,7 @@ class _VideoViewerState extends State<VideoViewer>
         while (offset < _size) {
           final chunk = await backend.readFile(
             path,
+            sealedSha256: sealedSha256,
             maxBytes: videoPiece,
             offset: offset,
             expectedSha256: first.sha256,
@@ -571,6 +598,8 @@ class _VideoViewerState extends State<VideoViewer>
         whole,
         preview: preview != null,
         keptIn: kept == null ? null : cache,
+        from: ViewedFrom.read,
+        bytes: _size - resumeAt,
       );
       if (kept != null) cache!.release(kept.file);
     } on RequestFailure catch (error) {
@@ -590,6 +619,8 @@ class _VideoViewerState extends State<VideoViewer>
     required bool preview,
     FileCache? keptIn,
     bool unchecked = false,
+    required ViewedFrom from,
+    int bytes = 0,
   }) async {
     keptIn?.hold(copy);
     final playback = newVideoPlayback();
@@ -619,6 +650,7 @@ class _VideoViewerState extends State<VideoViewer>
     await playback.open(copy.path);
     if (was != null && was > 0) await playback.seek(was);
     if (!mounted) return;
+    noteShown(first, from: from, bytes: bytes);
     final comments = this.comments;
     if (comments != null && first.sha256.isNotEmpty) {
       comments.show(kind: 'video', text: '', version: first.sha256);
@@ -898,7 +930,8 @@ class _VideoViewerState extends State<VideoViewer>
       details: details,
       controls: controls,
       comments: comments == null ? null : CommentsButton(controller: comments),
-      actions: [PaneAction('Reload', reload)],
+      actions: [PaneAction('Reload', reload), ...sealActions()],
+      notice: sealNotice(),
       phoneKind: PhoneViewerKind.video,
       // One row over its foot, as the system's player has it; a preview
       // says so above it.

@@ -102,7 +102,18 @@ impl Stand {
     }
 
     pub(crate) async fn query(&self, source: &str, sql: &str, params: &str) -> wire::DataAnswer {
-        let asked = wire::DataQuery { app_id: "charts".into(), source: source.into(), sql: sql.into(), params: params.into() };
+        self.query_by("", source, sql, params).await
+    }
+
+    /// A query as the app makes it during `caller`'s call of its tool.
+    async fn query_by(&self, caller: &str, source: &str, sql: &str, params: &str) -> wire::DataAnswer {
+        let asked = wire::DataQuery {
+            app_id: "charts".into(),
+            source: source.into(),
+            sql: sql.into(),
+            params: params.into(),
+            caller: caller.into(),
+        };
         match self.ask(Host::DataQuery(asked)).await {
             Host::DataAnswer(answer) => answer,
             other => panic!("expected DataAnswer, got {other:?}"),
@@ -336,6 +347,24 @@ async fn an_app_reads_only_what_the_person_granted_and_only_to_read() {
     assert_eq!(rows(&stand.query("conversations", "SELECT count(text) >= 0 FROM messages", "").await), json!([[1]]));
     let runs = stand.query("conversations", "SELECT count(*) FROM runs", "").await;
     assert_eq!(runs.error(), DataError::Invalid, "{runs:?}");
+    // What a call reads of people's words goes back to its agent, which is
+    // marked as having read outside content; counts, times, and reads
+    // outside a call mark no one.
+    let marked = || {
+        let db = rusqlite::Connection::open(home_of(addr).db_path()).expect("factory.db");
+        let mut marked = db.prepare("SELECT agent, what FROM errand_outside_read").expect("the marks");
+        marked.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).expect("read").map(Result::unwrap).collect::<Vec<_>>()
+    };
+    for (caller, source, sql) in [
+        ("rivet", "conversations", "SELECT count(*), max(created) FROM messages"),
+        ("rivet", "activity", "SELECT count(*) FROM messages"),
+        ("", "conversations", "SELECT text FROM messages"),
+    ] {
+        assert_eq!(stand.query_by(caller, source, sql, "").await.error(), DataError::None);
+    }
+    assert_eq!(marked(), []);
+    assert_eq!(stand.query_by("rivet", "conversations", "SELECT count(*) FROM messages WHERE text LIKE '%k%'", "").await.error(), DataError::None);
+    assert_eq!(marked(), [("rivet".to_owned(), "what the Charts app read from Conversations".to_owned())]);
     client.ok(grant("conversations", false)).await;
 
     // An agent's own database, granted, then taken back: refused at once.

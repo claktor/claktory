@@ -1,4 +1,4 @@
-//! A segment's file (#383). A segment Claktory writes now is JSON Lines,
+//! A segment's file. A segment Claktory writes now is JSON Lines,
 //! `segment-NNNN.jsonl`: a line per message, appended as the message ends,
 //! a line when another part of the segment changes (its frame, its pinned
 //! prompt sections), and lines for how it started (a compaction's summary,

@@ -121,7 +121,7 @@ mod tests {
     use super::*;
 
     fn signed(identifier: &str, team: Option<&str>, adhoc: bool) -> Signature {
-        Signature { identifier: identifier.into(), team: team.map(Into::into), adhoc, cdhash: vec![0xab; 20] }
+        Signature { identifier: identifier.into(), team: team.map(Into::into), adhoc, cdhash: vec![0xab; 20], runtime: !adhoc }
     }
 
     #[test]

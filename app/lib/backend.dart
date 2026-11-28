@@ -28,6 +28,8 @@ import 'viewers/file_cache.dart' show FileCache;
 import 'voice_keep.dart'
     show KeptKind, KeptVoices, forgetKeptVoices, keptClaktoryKey;
 import 'paced.dart';
+import 'local_socket.dart';
+import 'older_app.dart' show OlderApp, OlderAppWatch;
 import 'pairing.dart';
 import 'state.dart';
 import 'tunnel_client.dart';
@@ -47,7 +49,8 @@ const _clientVersion = String.fromEnvironment(
   defaultValue: 'dev',
 );
 
-/// This Mac's Factory's port. Only a release build talks to the real one
+/// This PC's Factory's port, which Windows reaches its own at ([WindowsLocal];
+/// a Mac uses its socket). Only a release build talks to the real one
 /// (7420) unless told otherwise; debug and profile builds and tests default
 /// to the dev one (7421), so a stray run never knocks on the person's
 /// Claktory. `--dart-define=FACTORY_PORT=…` picks one either way.
@@ -57,45 +60,6 @@ const localPort = String.fromEnvironment(
   defaultValue: kReleaseMode ? '7420' : '7421',
 );
 const _localEndpoint = 'ws://127.0.0.1:$localPort';
-
-/// This Mac's Factory's own pairing code, which its backend keeps in its
-/// data folder (the dev one's for dev builds): the app reaches it through
-/// the private tunnel like any other, with this code's token. Null when
-/// there's none, from a backend before the tunnel.
-Future<RemoteFactory?> readLocalPairing() async {
-  // Windows reaches its own with its app-token instead ([WindowsLocal]): no
-  // code is ever read or shown there (windows.md, authority B).
-  if (Platform.isWindows) return null;
-  final home = Platform.environment['HOME'] ?? '';
-  const folder = bool.fromEnvironment('FACTORY_DEV')
-      ? '.factory-dev'
-      : '.factory';
-  try {
-    final code = await File('$home/$folder/remote/local-pairing')
-        .readAsString();
-    return parsePairingCode(code);
-  } on IOException {
-    // Moved to another computer: the copy left here keeps its code with
-    // the rest of what it fenced off, and takes its token, on the open
-    // port only (its tunnel's key went with the move), to delete the copy.
-    try {
-      final code = await File('$home/$folder/moved/remote/local-pairing')
-          .readAsString();
-      final moved = parsePairingCode(code);
-      if (moved == null) return null;
-      return RemoteFactory(
-        code: moved.code,
-        host: moved.host,
-        port: moved.port,
-        token: moved.token,
-        fingerprint: moved.fingerprint,
-        name: moved.name,
-      );
-    } on IOException {
-      return null;
-    }
-  }
-}
 
 const _minRetryDelay = Duration(milliseconds: 250);
 const _maxRetryDelay = Duration(seconds: 5);
@@ -196,10 +160,13 @@ class Backend implements AppViewTransport {
     TunnelRuntime? tunnelRuntime,
     DiagnosticsRecorder? diagnostics,
     this.localBackend = true,
-    Future<RemoteFactory?> Function()? localPairing,
-    @visibleForTesting this.localEndpoint = _localEndpoint,
+    @visibleForTesting this.localEndpoint,
     @visibleForTesting WindowsLocal? windowsLocal,
+    @visibleForTesting this.localSocket,
+    @visibleForTesting this.localPeerCheck = checkLocalPeer,
+    @visibleForTesting OlderAppWatch? olderApps,
   }) : queued = queued ?? QueuedStore(),
+       _olderApps = olderApps ?? OlderAppWatch(appVersion: _clientVersion),
        _windowsLocal =
            windowsLocal ?? (Platform.isWindows ? const WindowsLocal() : null),
        _tunnels = tunnels ?? RustTunnels(),
@@ -208,7 +175,6 @@ class Backend implements AppViewTransport {
            (tunnels == null
                ? const RustTunnelRuntime()
                : const AnsweringRuntime()),
-       _localPairing = localPairing ?? readLocalPairing,
        diagnostics =
            diagnostics ??
            (tunnels == null ? DiagnosticsRecorder.onDevice() : null),
@@ -351,6 +317,10 @@ class Backend implements AppViewTransport {
 
   /// The last file in any agent's panes the backend said changed.
   final fileChanged = ValueNotifier<FileChanged?>(null);
+
+  /// The last file sealed (the Seal extension), with its seals now: a
+  /// viewer showing that file (by [FileSeals.path]) follows it.
+  final fileSeals = ValueNotifier<FileSeals?>(null);
 
   /// The latest list of a file's ink layers, whichever file: asked for
   /// (listInkLayers), or sent whenever a layer on its path is saved or
@@ -616,13 +586,17 @@ class Backend implements AppViewTransport {
   Future<void> clearBrowserLog() =>
       _request(ClientMessage(clearBrowserLog: ClearBrowserLog()));
 
-  /// What the person does with Claktory's browser (#435): stop it, delete
-  /// its data, set its time zone and languages, sign it out of an identity
-  /// provider. One of those, nothing else: the person never drives it
-  /// (Matt, card 222).
+  /// What the person does with Claktory's browser: watch an agent's, solve
+  /// a check in the one tab its request hands them, stop it, delete its
+  /// data, set its time zone and languages, sign it out of an identity
+  /// provider. One of those, nothing else: the person drives it only in a
+  /// check's tab.
   Future<void> sendAgentBrowser(ClientMessage message) {
     assert(
       const {
+        ClientMessage_Body.watchAgentTab,
+        ClientMessage_Body.agentTabFrameAck,
+        ClientMessage_Body.agentTabInput,
         ClientMessage_Body.stopAgentBrowser,
         ClientMessage_Body.deleteAgentBrowserData,
         ClientMessage_Body.setAgentBrowserLocale,
@@ -631,6 +605,12 @@ class Backend implements AppViewTransport {
     );
     return _request(message);
   }
+
+  /// An agent's browser's live views, to this connection while it watches
+  /// one (WatchAgentTab): their frames, and a view ending on Claktory's
+  /// side (AgentTabFrame, AgentTabViewEnded).
+  Stream<ServerMessage> get agentTabMessages => _agentTab.stream;
+  final _agentTab = StreamController<ServerMessage>.broadcast(sync: true);
 
   /// The folder a new project named [name] would get now (Cioccolata's
   /// PreviewProjectFolder: the backend's rule, never copied here), "" for
@@ -1190,6 +1170,7 @@ class Backend implements AppViewTransport {
     if (_closed) return;
     _log('starting the connection from scratch: $why');
     _tryNow = true;
+    _scratchNext = true;
     _note(ConnectionKind.reconnect, {ConnectionKey.reason: reason});
     _reconnectQuietly();
     final abandon = _abandon;
@@ -1222,7 +1203,18 @@ class Backend implements AppViewTransport {
       return;
     }
     if (!again && _tunnelBack != null) return;
-    unawaited(open.reconnect());
+    final rebuilding = open.reconnect().then<void>(
+      (_) {},
+      onError: (Object error) => _log("the tunnel's reconnect failed: $error"),
+    );
+    _tunnelRebuilding = (tunnel: open, done: rebuilding);
+    unawaited(
+      rebuilding.whenComplete(() {
+        if (identical(_tunnelRebuilding?.done, rebuilding)) {
+          _tunnelRebuilding = null;
+        }
+      }),
+    );
     if (!again) return;
     _tunnelBack?.cancel();
     _tunnelBack = Timer(tunnelBackWithin, () {
@@ -1250,6 +1242,20 @@ class Backend implements AppViewTransport {
 
   /// While the tunnel has [tunnelBackWithin] to bring the connection back.
   Timer? _tunnelBack;
+
+  /// The tunnel's reconnect [_reconnectTunnel] asked for, until it ends: a
+  /// try waits for it ([_tunnelTo]), since a dial made meanwhile goes out
+  /// on the endpoint it's replacing and fails.
+  ({Tunnel tunnel, Future<void> done})? _tunnelRebuilding;
+
+  /// How long a try waits for the tunnel's reconnect before it dials
+  /// anyway: closing the old endpoint and making the new one take seconds
+  /// at most.
+  Duration tunnelRebuildWithin = const Duration(seconds: 15);
+
+  /// How long the try under way waited for the tunnel's reconnect, if it
+  /// did: diagnostics' `connected` says it.
+  Duration? _rebuildWaited;
 
   /// Said once each time the app is in the background.
   var _leftInBackground = false;
@@ -1374,6 +1380,33 @@ class Backend implements AppViewTransport {
   /// picks a Factory again.
   final refused = ValueNotifier<String?>(null);
 
+  /// What this Mac's own Claktory said when it didn't let this app in on
+  /// its socket (not Claktory's own app, or Claktory Dev not
+  /// pinned yet); null otherwise. Unlike [refused] it keeps trying: the
+  /// backend may let it in a moment later (`scripts/dev.sh app` pins it).
+  final localRefused = ValueNotifier<String?>(null);
+
+  /// This Mac's Claktory went back to a version without this app's socket
+  /// after an update failed: the older version's app, to offer; null
+  /// otherwise.
+  final olderApp = ValueNotifier<OlderApp?>(null);
+
+  final OlderAppWatch _olderApps;
+
+  /// [localRefused]'s words when what answered on this Mac's socket isn't
+  /// its Claktory ([checkLocalPeer]).
+  static const _notClaktory =
+      "Another program on this Mac answered in Claktory's place, so the app "
+      "didn't connect to it. If you didn't expect this, check what's running "
+      'on this Mac. The app tries again by itself.';
+
+  /// [localRefused]'s words when this Mac doesn't say where the person's
+  /// home folder is, so Claktory's socket can't be found
+  /// ([localClaktorySocket]).
+  static const _homeUnknown =
+      "The app couldn't find your home folder on this Mac, so it didn't "
+      'connect to Claktory. Restart your Mac, then open Claktory again.';
+
   /// This Claktory needs this device to show it's the owner's before it
   /// lets it in (ERROR_CODE_SIGN_IN_REQUIRED): its grace to confirm is
   /// over, or it was found through the account and this device isn't
@@ -1414,11 +1447,39 @@ class Backend implements AppViewTransport {
     _account = account?..addListener(_accountChanged);
   }
 
+  /// Why this device can't approve a computer joining or a move here
+  /// (`Welcome.cannot_approve`, the backend's words); empty when it can.
+  final cannotApprove = ValueNotifier<String>('');
+
   /// Signed in on this device while this Claktory waits for it to
-  /// confirm: it confirms now, without connecting again.
+  /// confirm: it confirms now, without connecting again. Signed in while
+  /// this connection can't approve: it connects again, so the Claktory
+  /// learns this device's account key from its Hello.
   void _accountChanged() {
     final target = _target;
     final key = _helloKey;
+    // Signed in or out while on this Mac's own: it's shown the change in
+    // a Hello afresh, with its assertion or without (E11-8).
+    final signedIn = account?.signedIn ?? false;
+    if (target == null &&
+        connected.value &&
+        _helloVia == null &&
+        signedIn != _helloSignedIn) {
+      _log('signed ${signedIn ? 'in' : 'out'}: connecting afresh');
+      unawaited(_socket?.close());
+      return;
+    }
+    // Signed in while this connection can't approve: shown in a Hello
+    // afresh, once, the one this connection went with having had none.
+    if (signedIn &&
+        !_helloSignedIn &&
+        confirmBy.value == null &&
+        cannotApprove.value.isNotEmpty &&
+        connected.value &&
+        target != null) {
+      _helloAgain();
+      return;
+    }
     if (confirmBy.value == null ||
         !connected.value ||
         target == null ||
@@ -1433,11 +1494,26 @@ class Backend implements AppViewTransport {
       }
       try {
         await confirmThisDevice(assertion);
-        if (target == _target) confirmBy.value = null;
+        if (target != _target) return;
+        confirmBy.value = null;
+        // Confirmed, it may approve too, which only a new Hello says.
+        if (cannotApprove.value.isNotEmpty) _helloAgain();
       } on RequestFailure catch (failure) {
         _log("couldn't confirm this device: ${failure.message}");
       }
     }());
+  }
+
+  /// Connects again over the same tunnel, so a new Hello goes, with this
+  /// device's account now.
+  void _helloAgain() {
+    if (_closed) return;
+    _log('signed in to the account: connecting again so it can approve');
+    _reconnectQuietly();
+    _retryDelay = _minRetryDelay;
+    _redialed = _socket;
+    unawaited(_socket?.close());
+    _wakeUp();
   }
 
   /// On a Factory on another machine, the paired device this connection is
@@ -1454,16 +1530,9 @@ class Backend implements AppViewTransport {
   /// What the tunnels run on: made afresh when it stops answering (#214).
   final TunnelRuntime _runtime;
 
-  /// Reads this Mac's own pairing code, each time it connects: a backend
-  /// that's been updated may have a new one.
-  final Future<RemoteFactory?> Function() _localPairing;
-
-  /// This app's key for this Mac's Factory: any key on this machine gets
-  /// in with its code, so one made for each run.
-  late final _localKey = newDeviceKey();
-
-  /// This Mac's Factory's open port, as a WebSocket address.
-  final String localEndpoint;
+  /// In tests, a WebSocket address this computer's own Claktory is reached
+  /// at instead of its socket (a Mac) or its loopback port (Windows).
+  final String? localEndpoint;
 
   /// How this PC's own Claktory is reached on Windows: its app-token, sent
   /// only once the server end of the connection is this same account's.
@@ -1473,6 +1542,14 @@ class Backend implements AppViewTransport {
   /// The app-token this try's Hello carries to this PC's Claktory, read
   /// afresh each try (the backend writes a new one at every start).
   String? _localAppToken;
+
+  /// In tests, the Unix socket this Mac's own Claktory is reached at
+  /// instead of its home's.
+  final String? localSocket;
+
+  /// How who listens at the socket is checked before a word goes to it
+  /// ([checkLocalPeer]); a test's stand-in in tests.
+  final LocalPeerCheck localPeerCheck;
 
   /// Whether this device runs a Factory of its own to show when no other
   /// is chosen: a Mac does, a phone doesn't, and waits to be paired.
@@ -1615,23 +1692,22 @@ class Backend implements AppViewTransport {
         signInRequired.value = _signInToConnect;
         continue;
       }
-      // This Mac's Factory through the tunnel too, with its own code; the
-      // open port is for a backend from before it, and with the code's
-      // token when the tunnel to it fails (every other try then).
-      final local = target == null ? await _localPairing() : null;
-      final via = target ?? local;
-      // Without a tunnel (a moved copy's code), the open port only.
-      final loopback =
-          via == null || (local != null && (_loopbackNext || !local.tunnelled));
-      if (local != null) _loopbackNext = false;
+      // This Mac's own Claktory over its socket, <home>/app.sock:
+      // its backend knows this app by its signature, so no code or token.
+      // Moved or following a move, the same.
+      final via = target;
+      final loopback = via == null;
       _welcomed = false;
       final tryNumber = ++_tries;
+      _scratchTry = _scratchNext ? tryNumber : null;
+      _scratchNext = false;
       _tryRoute = loopback
           ? ConnectionRoute.local
           : via.tunnelled
           ? ConnectionRoute.tunnel
           : ConnectionRoute.plain;
       _tryStarted = DateTime.now();
+      _rebuildWaited = null;
       _readyDue = false;
       _tryNet = switch (deviceNetwork.value) {
         final path? => netKind(path),
@@ -1647,7 +1723,12 @@ class Backend implements AppViewTransport {
       int? closeCode;
       // A Claktory on another machine is shown this device's assertion:
       // asked for now, while the tunnel dials, rather than after.
-      final assertion = target != null && target.tunnelled
+      // This Mac's own is shown it too, on its socket, so its backend knows
+      // which account key the app is signed in with (E11-8): any tunnel
+      // key does there, which the backend doesn't compare.
+      final assertion = target == null
+          ? _accountAssertion(_localAssertionKey)
+          : target.tunnelled
           ? _assertionAhead(target, deviceKey(target))
           : null;
       var abandoned = false;
@@ -1660,14 +1741,20 @@ class Backend implements AppViewTransport {
             late: _let,
           );
         } else if (loopback) {
+          final endpoint = localEndpoint;
           socket = await _orAbandoned(
-            _connectWithin(WebSocket.connect(localEndpoint)),
+            _connectWithin(
+              endpoint == null
+                  ? connectLocalSocket(path: localSocket, check: localPeerCheck)
+                  : WebSocket.connect(endpoint),
+            ),
             late: _let,
           );
         } else if (via.tunnelled) {
-          final tunnel = await _orAbandoned(
-            _tunnelTo(via, key: target == null ? _localKey : null),
-          );
+          _openingFor = tryNumber;
+          final tunnel = await _orAbandoned(_tunnelTo(via)).whenComplete(() {
+            if (_openingFor == tryNumber) _openingFor = null;
+          });
           // Plain ws: iroh already encrypts it end to end, to the key the
           // pairing code names.
           // A dead connection inside the tunnel takes the handshake with
@@ -1726,16 +1813,16 @@ class Backend implements AppViewTransport {
         // pong queued behind everything else still on its way (Sale's row
         // 81, #413).
         _socket = socket;
+        if (loopback) {
+          _olderApps.connected();
+          olderApp.value = null;
+        }
         _watchTunnel();
         // What the tunnel had received when this connection opened, for
         // the log when it closes.
         final receivedBefore = _tunnelReceived;
         _helloVia = via;
-        _helloKey = via == null || !via.tunnelled || loopback
-            ? null
-            : target == null
-            ? _localKey
-            : deviceKey(via);
+        _helloKey = via == null || !via.tunnelled ? null : deviceKey(via);
         // Not had in time (claktory.com slow or out of reach): found
         // through the account, it tries again (what's on its way is kept
         // for then); paired with a code, it goes without.
@@ -1745,6 +1832,7 @@ class Backend implements AppViewTransport {
                 assertion.timeout(assertionWithin, onTimeout: () => null),
               );
         _helloAssertion = asserted ?? '';
+        _helloSignedIn = account?.signedIn ?? false;
         if (_closed || target != _target) {
           await _let(socket);
           continue;
@@ -1825,15 +1913,18 @@ class Backend implements AppViewTransport {
 
         welcome = _welcomeTimer = Timer(welcomeWithin, welcomeDue);
         // Read until it closes, or the try is given up on (then closed).
-        final done = Completer<void>();
+        final done = _reading = Completer<void>();
+        var ended = false;
         final reading = socket.listen(
           (frame) {
             if (frame is List<int>) _receive(frame);
           },
           onError: (Object error, StackTrace stack) {
+            ended = true;
             if (!done.isCompleted) done.completeError(error, stack);
           },
           onDone: () {
+            ended = true;
             if (!done.isCompleted) done.complete();
           },
           cancelOnError: true,
@@ -1842,7 +1933,7 @@ class Backend implements AppViewTransport {
           await _orAbandoned(done.future);
         } finally {
           welcome?.cancel();
-          if (!done.isCompleted) {
+          if (!ended) {
             unawaited(reading.cancel());
             unawaited(_let(socket));
           }
@@ -1873,12 +1964,30 @@ class Backend implements AppViewTransport {
           _reconnectTunnel();
           _watchBack();
         }
+      } on LocalPeerRefused catch (refusal) {
+        // What listens at this Mac's socket isn't its own Claktory (Fugo's
+        // layer 2): nothing was said to it. It's said, and tried again, as
+        // when this Mac's Claktory turns the app away: the real one may be
+        // back in a moment.
+        _log(
+          "what listens at this Mac's socket isn't Claktory: ${refusal.why}",
+        );
+        localRefused.value = _notClaktory;
+        why = ConnectionFailure.other;
+      } on LocalHomeUnknown {
+        // Not looked for anywhere else (Fugo): said, and tried again.
+        _log("this Mac's user database doesn't say where the home folder is");
+        localRefused.value = _homeUnknown;
+        why = ConnectionFailure.other;
       } on HandshakeException catch (error) {
         _log("its certificate isn't the pinned one: $error");
         why = ConnectionFailure.handshake;
       } on IOException catch (error) {
         _log('connection failed: ${_withoutTunnelPath(error)}');
         why = ConnectionFailure.unreachable;
+        if (loopback && _windowsLocal == null && localEndpoint == null) {
+          await _lookForOlderApp();
+        }
       } on TunnelOpenFailure catch (failure) {
         _log("couldn't open the tunnel: ${failure.message}");
         why = ConnectionFailure.tunnel;
@@ -1909,9 +2018,6 @@ class Backend implements AppViewTransport {
         ConnectionKey.code: ?closeCode,
       }, began == null ? Duration.zero : DateTime.now().difference(began));
       _welcomedAt = null;
-      // This Mac's own through the tunnel never got welcomed: the open
-      // port next, with its code's token.
-      if (local != null && !loopback && !_welcomed) _loopbackNext = true;
       _disconnected();
       if (!_welcomed) _triedQuietly(tryNumber);
       _watchTunnel();
@@ -1921,7 +2027,8 @@ class Backend implements AppViewTransport {
       if (target != null &&
           target == _target &&
           status?.failure == TunnelFailure.refused) {
-        refused.value = status!.error;
+        _log('refused at the tunnel: ${status!.error}');
+        refused.value = status.error;
       }
       if (_closed) return;
       if (target != _target || abandoned) continue;
@@ -1955,10 +2062,6 @@ class Backend implements AppViewTransport {
     }
   }
 
-  /// The next try at this Mac's own Factory goes to its open port, with
-  /// its pairing code's token: the tunnel to it just failed.
-  var _loopbackNext = false;
-
   /// Whether the current connection was welcomed.
   var _welcomed = false;
 
@@ -1987,6 +2090,9 @@ class Backend implements AppViewTransport {
   /// The current connection's Hello: its refusal is the connection's.
   var _helloId = 0;
 
+  /// Completed when the current connection is over: closed, or refused.
+  Completer<void>? _reading;
+
   /// The device assertion the current connection's Hello showed; empty if
   /// none.
   String _helloAssertion = '';
@@ -1996,7 +2102,7 @@ class Backend implements AppViewTransport {
   /// of that connection runs as this same Windows account. Otherwise the
   /// connection closes with nothing sent, and the next try starts again.
   Future<WebSocket> _windowsLoopback(WindowsLocal local) async {
-    final connecting = connectLoopback(localEndpoint);
+    final connecting = connectLoopback(localEndpoint ?? _localEndpoint);
     final (socket, ownPort) = await connecting.timeout(
       _connectWindow(null),
       onTimeout: () {
@@ -2006,7 +2112,7 @@ class Backend implements AppViewTransport {
         throw TimeoutException('no connection', _connectWindow(null));
       },
     );
-    final serverPort = Uri.parse(localEndpoint).port;
+    final serverPort = Uri.parse(localEndpoint ?? _localEndpoint).port;
     bool ours;
     try {
       ours = await local.sameUser(serverPort, ownPort);
@@ -2031,6 +2137,10 @@ class Backend implements AppViewTransport {
     _localAppToken = token;
     return socket;
   }
+
+  /// Whether this device was signed in to its account at the current
+  /// connection's Hello.
+  var _helloSignedIn = false;
 
   /// [connecting], or a [TimeoutException] after [_connectWindow] (with
   /// the tunnel it goes [through]); one that connects after all is closed,
@@ -2091,12 +2201,31 @@ class Backend implements AppViewTransport {
   Future<String?> _assertionFor(RemoteFactory target, String key) async {
     final account = this.account;
     if (account == null || !account.signedIn) return '';
+    final String device;
     try {
-      final ids = await _tunnels.pairingIds(
+      device = (await _tunnels.pairingIds(
         deviceKey: key,
         endpointId: target.endpointId,
-      );
-      return await account.assertionFor(ids.device);
+      )).device;
+    } catch (error) {
+      _log("couldn't get a device assertion: $error");
+      return null;
+    }
+    return _accountAssertion(device);
+  }
+
+  /// A tunnel key for the assertion this Mac's own Claktory is shown on
+  /// its socket: one for each run, as any does there.
+  late final _localAssertionKey = newDeviceKey();
+
+  /// A device assertion for the tunnel key [tunnelKey] (hex), as
+  /// [_assertionFor] says: empty when this device isn't signed in to its
+  /// account or the service refuses one, null to try again.
+  Future<String?> _accountAssertion(String tunnelKey) async {
+    final account = this.account;
+    if (account == null || !account.signedIn) return '';
+    try {
+      return await account.assertionFor(tunnelKey);
     } on AccountServiceError catch (error) {
       _log("couldn't get a device assertion: $error");
       return error.status >= 500 ? null : '';
@@ -2175,6 +2304,7 @@ class Backend implements AppViewTransport {
           : '${target.host}_${target.port}',
     );
     refused.value = null;
+    localRefused.value = null;
     signInRequired.value = null;
     otherAccount.value = null;
     confirmBy.value = null;
@@ -2204,9 +2334,9 @@ class Backend implements AppViewTransport {
   /// makes its endpoint, so one that takes longer is stuck (#214).
   Duration tunnelOpenWithin = const Duration(seconds: 15);
 
-  /// The tunnel to [target], opened the first time, as [key] (else this
-  /// device's key for it).
-  Future<Tunnel> _tunnelTo(RemoteFactory target, {String? key}) async {
+  /// The tunnel to [target], opened the first time, as this device's key
+  /// for it.
+  Future<Tunnel> _tunnelTo(RemoteFactory target) async {
     if (_qaStallNext) {
       _qaStallNext = false;
       _log('QA: this try hangs for good');
@@ -2222,7 +2352,24 @@ class Backend implements AppViewTransport {
       }
     }
     final open = _tunnel;
-    if (open != null && _tunnelTarget == target) return open;
+    if (open != null && _tunnelTarget == target) {
+      final rebuilding = _tunnelRebuilding;
+      if (rebuilding != null && identical(rebuilding.tunnel, open)) {
+        final waited = Stopwatch()..start();
+        await rebuilding.done.timeout(
+          tunnelRebuildWithin,
+          onTimeout: () => _log(
+            "the tunnel's reconnect took over "
+            '${tunnelRebuildWithin.inSeconds}s: dialing anyway',
+          ),
+        );
+        _rebuildWaited = waited.elapsed;
+        _log(
+          "waited ${waited.elapsedMilliseconds}ms for the tunnel's reconnect",
+        );
+      }
+      return open;
+    }
     await _closeTunnel();
     // Something under the tunnels may be stuck (a runtime whose tasks no
     // longer run, as after the app came back from suspension): asked
@@ -2241,7 +2388,7 @@ class Backend implements AppViewTransport {
     final Tunnel opened;
     try {
       final opening = _tunnels.open(
-        deviceKey: key ?? deviceKey(target),
+        deviceKey: deviceKey(target),
         endpointId: target.endpointId,
         relays: relays,
         addresses: target.addresses,
@@ -2272,6 +2419,7 @@ class Backend implements AppViewTransport {
         received: 0,
         linkReceived: 0,
         dialTimeoutMs: 0,
+        dialMs: 0,
         reach: TunnelReach.none,
       );
       throw TunnelOpenFailure('$error');
@@ -2420,7 +2568,61 @@ class Backend implements AppViewTransport {
     }
     _backNext = null;
     _freshFailure();
+    if (_joinsTry()) return;
     reconnectFromScratch('asked to');
+  }
+
+  /// The next try starts from scratch ([reconnectFromScratch]).
+  var _scratchNext = false;
+
+  /// The try that started from scratch, while it's the latest.
+  int? _scratchTry;
+
+  /// The try opening its tunnel ([_tunnelTo]), while it does.
+  int? _openingFor;
+
+  /// The try and its stage (opening its tunnel, or dialing) a Reconnect
+  /// first joined, and when ([_joinsTry]).
+  ({int attempt, bool dialing, DateTime at})? _joined;
+
+  /// Whether Reconnect lets the try under way finish rather than start
+  /// from scratch: while the tunnel dials, since on a weak link each tap
+  /// would otherwise throw the dial away and start from zero, so none
+  /// could finish; and while a try started from scratch is still opening
+  /// its tunnel, since a second tap would only start it again. Only for as
+  /// long as that stage has, and a little more, from the first tap that
+  /// joined it: one stuck past that is started from scratch after all.
+  bool _joinsTry() {
+    final status = _tunnel?.status;
+    final Duration has;
+    final bool dialing;
+    if (status != null && status.phase == TunnelPhase.dialing) {
+      dialing = true;
+      has = Duration(milliseconds: status.dialTimeoutMs);
+    } else if (_openingFor != null && _openingFor == _scratchTry) {
+      dialing = false;
+      has = tunnelOpenWithin;
+    } else {
+      _joined = null;
+      return false;
+    }
+    final now = DateTime.now();
+    var joined = _joined;
+    if (joined == null ||
+        joined.attempt != _tries ||
+        joined.dialing != dialing) {
+      joined = _joined = (attempt: _tries, dialing: dialing, at: now);
+    }
+    if (now.difference(joined.at) > has + const Duration(seconds: 2)) {
+      _joined = null;
+      return false;
+    }
+    _log(
+      dialing
+          ? 'Reconnect during a dial: letting it finish'
+          : 'Reconnect while the tunnel opens afresh: letting it finish',
+    );
+    return true;
   }
 
   /// A quiet try is due past [signInRequired] (probeSignIn).
@@ -2465,6 +2667,21 @@ class Backend implements AppViewTransport {
     _wake = Completer<void>();
   }
 
+  /// After this Mac's socket couldn't be reached: whether it's gone for
+  /// good, an update having failed back to a version without it.
+  Future<void> _lookForOlderApp() async {
+    try {
+      final path = localSocket ?? await localClaktorySocket();
+      final offer = await _olderApps.failed(path);
+      if (offer != null && olderApp.value == null) {
+        _log('the socket is gone: this Mac went back to ${offer.backTo}');
+      }
+      if (!_closed) olderApp.value = offer;
+    } on LocalHomeUnknown {
+      olderApp.value = null;
+    }
+  }
+
   Future<void> close() async {
     _android?.dispose();
     _closed = true;
@@ -2478,6 +2695,7 @@ class Backend implements AppViewTransport {
     unawaited(_notified.close());
     unawaited(_browser.close());
     unawaited(_historyPushes.close());
+    unawaited(_agentTab.close());
     _quiet?.cancel();
     _sleepWatch?.cancel();
     unawaited(_network?.cancel());
@@ -3150,6 +3368,32 @@ class Backend implements AppViewTransport {
       ),
     ),
   );
+
+  /// [agentId]'s checklist (`GetChecklist`), as its panel shows it, without
+  /// opening the panel; null when it has Checklist off.
+  Future<Checklist?> getChecklist(String agentId) async {
+    final reply = await _call(
+      ClientMessage(getChecklist: GetChecklist(agentId: agentId)),
+    );
+    if (!reply.hasExtensionView()) {
+      throw const RequestFailure("Couldn't read the checklist. Try again.");
+    }
+    final view = reply.extensionView;
+    return view.hasChecklist() ? view.checklist : null;
+  }
+
+  /// The background tasks [agentId] sees (`ListTasks`), as its Tasks panel
+  /// shows them, without opening the panel; null when it has Tasks off.
+  Future<Tasks?> listTasks(String agentId) async {
+    final reply = await _call(
+      ClientMessage(listTasks: ListTasks(agentId: agentId)),
+    );
+    if (!reply.hasExtensionView()) {
+      throw const RequestFailure("Couldn't list the tasks. Try again.");
+    }
+    final view = reply.extensionView;
+    return view.hasTasks() ? view.tasks : null;
+  }
 
   /// Every agent's monitors (`ListMonitors`), only [agentId]'s, those in
   /// [projectId] or in [states] when given; by agent, then number.
@@ -3937,6 +4181,25 @@ class Backend implements AppViewTransport {
     return reply.recoveryKey.key;
   }
 
+  /// This Claktory's word that this device is allowed on it, for
+  /// approving the account service's request [requestId] (a computer
+  /// joining the account, or a move of this Claktory): the "allowed" to
+  /// send with the approval, good for 120 seconds. Never shown or kept.
+  Future<String> proveAllowedDevice(String requestId) async {
+    final reply = await _call(
+      ClientMessage(
+        proveAllowedDevice: ProveAllowedDevice(requestId: requestId),
+      ),
+    );
+    // Only a word for this request answers it.
+    if (!reply.hasAllowedDeviceWord() ||
+        reply.allowedDeviceWord.allowed.isEmpty ||
+        reply.allowedDeviceWord.requestId != requestId) {
+      throw const RequestFailure("Claktory didn't vouch for this device.");
+    }
+    return reply.allowedDeviceWord.allowed;
+  }
+
   /// Asks which group of the recovery key the person types back to show
   /// they saved it (R1): a fresh one each time, for this device only.
   Future<RecoveryKeyCheck> checkRecoveryKey() async {
@@ -3963,6 +4226,43 @@ class Backend implements AppViewTransport {
   /// theirs. A refusal is a sentence to show.
   Future<void> useRecoveryKey() =>
       _request(ClientMessage(useRecoveryKey: UseRecoveryKey()));
+
+  /// Starts a new recovery key for the account, made on this device:
+  /// [publicKey] is its pair's public half and [deviceKey] this device's
+  /// account key, the one it connected with (both base64url). Answers the
+  /// statement's payload (base64url) for the device to check and sign.
+  Future<String> newAccountRecoveryKey({
+    required String publicKey,
+    required String deviceKey,
+  }) async {
+    final reply = await _call(
+      ClientMessage(
+        newRecoveryKey: NewRecoveryKey(
+          publicKey: publicKey,
+          deviceKey: deviceKey,
+        ),
+      ),
+    );
+    if (!reply.hasRecoveryKeyToSign() ||
+        reply.recoveryKeyToSign.payload.isEmpty) {
+      throw const RequestFailure('Claktory sent nothing to sign.');
+    }
+    return reply.recoveryKeyToSign.payload;
+  }
+
+  /// This device's signature on [newAccountRecoveryKey]'s payload: the
+  /// key becomes the account's. A refusal is a sentence to show.
+  Future<void> publishRecoveryKey({
+    required String deviceKey,
+    required String deviceSig,
+  }) => _request(
+    ClientMessage(
+      publishRecoveryKey: PublishRecoveryKey(
+        deviceKey: deviceKey,
+        deviceSig: deviceSig,
+      ),
+    ),
+  );
 
   /// Empties the build cache at [path].
   Future<void> clearBuildCache(String path) =>
@@ -4823,7 +5123,11 @@ class Backend implements AppViewTransport {
   /// after a piece, [onFirst] after the first. With [preview] (this
   /// screen's size), a smaller copy made for it may come instead, saying
   /// so (`FileContent.preview`, #379); with [previewPage] too, that page
-  /// of a PDF as an image.
+  /// of a PDF as an image. With [sealedSha256], the version of it kept
+  /// when it was sealed at that SHA-256 (the Seal extension), never a
+  /// preview. With [unlessSha256], the version this device keeps: still
+  /// it, the answer says `unchanged` and brings no bytes (a Claktory from
+  /// before reads it as asked).
   Future<FileContent> readFile(
     String path, {
     int maxBytes = 0,
@@ -4834,14 +5138,18 @@ class Backend implements AppViewTransport {
     ReadFirst? onFirst,
     PreviewBox? preview,
     int previewPage = 0,
+    String sealedSha256 = '',
+    String unlessSha256 = '',
   }) => pacedRead(
-    range: (offset, maxBytes, expected) => _readRange(
+    range: (at, most, expected) => _readRange(
       path,
-      maxBytes: maxBytes,
-      offset: offset,
+      maxBytes: most,
+      offset: at,
       expectedSha256: expected,
       preview: preview,
       previewPage: previewPage,
+      sealedSha256: sealedSha256,
+      unlessSha256: at == offset ? unlessSha256 : '',
     ),
     connected: connected,
     pace: _downPace,
@@ -4851,6 +5159,39 @@ class Backend implements AppViewTransport {
     onProgress: onProgress,
     carryOn: carryOn,
     onFirst: onFirst,
+    hurry: _hurry,
+  );
+
+  /// Whether the person is doing something on this connection, so a
+  /// file's next piece is a short one ([Pace.quick]): what they ask for
+  /// waits behind it on the same stream. Something else was asked for, or
+  /// they touched the screen, within [hurryFor].
+  bool _hurry() {
+    final now = DateTime.now();
+    return now.difference(_lastAsked) < hurryFor ||
+        _followingInput && now.difference(UserInput.instance.last) < hurryFor;
+  }
+
+  /// How long after a request or a touch a file's pieces stay short.
+  static const hurryFor = Duration(seconds: 3);
+
+  /// When a request other than a file's next piece was last asked.
+  var _lastAsked = DateTime.fromMillisecondsSinceEpoch(0);
+
+  /// Pieces past the start of a file on their way: a big file's read.
+  var _bulkPieces = 0;
+
+  /// Whether a big file is on its way, a piece of it past its start
+  /// asked for and not yet here (diagnostics).
+  bool get bulkReading => _bulkPieces > 0;
+
+  /// Deletes the copy Claktory kept of the version [sha256] of [path] when
+  /// it was sealed (the person's alone): its seals stay as they were made,
+  /// but that version, kept by its content, no longer opens for any seal.
+  Future<void> deleteSealedCopy(String path, String sha256) => _request(
+    ClientMessage(
+      deleteSealedCopy: DeleteSealedCopy(path: path, sha256: sha256),
+    ),
   );
 
   /// About how long [bytes] of a file would take to come over this link,
@@ -4869,21 +5210,32 @@ class Backend implements AppViewTransport {
     required String expectedSha256,
     PreviewBox? preview,
     int previewPage = 0,
+    String sealedSha256 = '',
+    String unlessSha256 = '',
   }) async {
     final asked = DateTime.now();
-    final reply = await _call(
-      ClientMessage(
-        readFile: ReadFile(
-          path: path,
-          maxBytes: Int64(maxBytes),
-          offset: Int64(offset),
-          expectedSha256: expectedSha256,
-          previewWidth: preview?.width,
-          previewHeight: preview?.height,
-          previewPage: previewPage == 0 ? null : previewPage,
+    final bulk = offset > 0;
+    if (bulk) _bulkPieces++;
+    final ServerMessage reply;
+    try {
+      reply = await _call(
+        ClientMessage(
+          readFile: ReadFile(
+            path: path,
+            maxBytes: Int64(maxBytes),
+            offset: Int64(offset),
+            expectedSha256: expectedSha256,
+            previewWidth: preview?.width,
+            previewHeight: preview?.height,
+            previewPage: previewPage == 0 ? null : previewPage,
+            sealedSha256: sealedSha256.isEmpty ? null : sealedSha256,
+            unlessSha256: unlessSha256.isEmpty ? null : unlessSha256,
+          ),
         ),
-      ),
-    );
+      );
+    } finally {
+      if (bulk) _bulkPieces--;
+    }
     if (!reply.hasFileContent()) {
       throw const RequestFailure('Claktory sent no file.');
     }
@@ -5145,6 +5497,9 @@ class Backend implements AppViewTransport {
     }
     final id = _nextId++;
     message.id = Int64(id);
+    if (!message.hasReadFile() || message.readFile.offset == 0) {
+      _lastAsked = DateTime.now();
+    }
     final completer = Completer<ServerMessage>();
     _pending[id] = completer;
     try {
@@ -5274,6 +5629,7 @@ class Backend implements AppViewTransport {
     switch (message.whichBody()) {
       case ServerMessage_Body.welcome:
         _welcomed = true;
+        localRefused.value = null;
         // A connection made afresh starts awake: its tunnel may be new.
         if (_idle) _leaveIdle();
         _slowTries = 0;
@@ -5290,6 +5646,7 @@ class Backend implements AppViewTransport {
         deviceId = message.welcome.deviceId;
         welcomeName = message.welcome.name;
         welcomeColor = message.welcome.color;
+        cannotApprove.value = message.welcome.cannotApprove;
         confirmBy.value = message.welcome.confirmByMs > 0
             ? DateTime.fromMillisecondsSinceEpoch(
                 message.welcome.confirmByMs.toInt(),
@@ -5303,17 +5660,31 @@ class Backend implements AppViewTransport {
         _setAside = null;
         // Let in after all (asked again: probeSignIn).
         signInRequired.value = null;
+        _joined = null;
         connected.value = true;
         _log('connected to factoryd ${message.welcome.serverVersion}');
         _sendWhenBack();
         _selectAgain();
         final started = _tryStarted;
         _welcomedAt = DateTime.now();
+        final through = _tryRoute == ConnectionRoute.tunnel
+            ? _tunnel?.status
+            : null;
         _note(ConnectionKind.connected, {
           ConnectionKey.attempt: _tries,
           ConnectionKey.route: _tryRoute == ConnectionRoute.tunnel
-              ? _pathRoute(_tunnel?.status.path ?? TunnelPath.none)
+              ? _pathRoute(through?.path ?? TunnelPath.none)
               : _tryRoute,
+          // Where a connect through the tunnel went: waiting for its
+          // endpoint, its dial, and whether its relay was up by then.
+          if (_rebuildWaited case final waited?)
+            ConnectionKey.rebuildMs: waited.inMilliseconds,
+          if (through != null && through.dialMs > 0)
+            ConnectionKey.dialMs: through.dialMs,
+          if (through != null &&
+              through.relayConnected &&
+              through.relayUpMs > 0)
+            ConnectionKey.relayMs: through.relayUpMs,
           // The network, when it wasn't known yet as the try began (the
           // first try after a launch, before the system has told it).
           if (_tryNet == null && deviceNetwork.value != null)
@@ -5348,13 +5719,17 @@ class Backend implements AppViewTransport {
             final key = keptClaktoryKey(_target);
             unawaited(FileCache.forget(key));
             unawaited(forgetKeptVoices(key));
+            _log('refused by its Hello: ${message.error.message}');
             refused.value = message.error.message;
           } else if (!connected.value) {
-            // This Mac's own, not ready for this app yet (just installed,
-            // its code not written): it tries again, reading the code
-            // afresh.
+            // This Mac's own didn't know this app by its signature: it
+            // says why, and tries again (the Dev app's pin may come).
             _log('this Mac\'s Claktory refused: ${message.error.message}');
-            unawaited(_socket?.close());
+            localRefused.value = message.error.message;
+            // Over at once: not waiting for a closing handshake its
+            // backend may never send.
+            final reading = _reading;
+            if (reading != null && !reading.isCompleted) reading.complete();
           }
         } else if (toHello &&
             message.error.code == ErrorCode.ERROR_CODE_SIGN_IN_REQUIRED) {
@@ -5436,6 +5811,10 @@ class Backend implements AppViewTransport {
         transcript.delta(message.delta, revision: message.transcriptRevision);
       case ServerMessage_Body.explorer:
         explorer.apply(message.explorer);
+      // An answer to GetChecklist or ListTasks is the asker's, never the
+      // open panel's.
+      case ServerMessage_Body.extensionView when message.replyTo != 0:
+        _pending.remove(message.replyTo.toInt())?.complete(message);
       case ServerMessage_Body.extensionView:
         extensionView.apply(message.extensionView);
       case ServerMessage_Body.queuedMessages:
@@ -5453,6 +5832,8 @@ class Backend implements AppViewTransport {
       case ServerMessage_Body.envPreview:
       case ServerMessage_Body.recoveryKey:
       case ServerMessage_Body.recoveryKeyCheck:
+      case ServerMessage_Body.allowedDeviceWord:
+      case ServerMessage_Body.recoveryKeyToSign:
       case ServerMessage_Body.secretUses:
       case ServerMessage_Body.entryPage:
       case ServerMessage_Body.uploadProgress:
@@ -5496,6 +5877,12 @@ class Backend implements AppViewTransport {
         }
       case ServerMessage_Body.historyChanged:
         historyChanged.value = message.historyChanged.historyVersion;
+      case ServerMessage_Body.agentTabFrame:
+      case ServerMessage_Body.agentTabViewEnded:
+      case ServerMessage_Body.agentTabNote:
+        // An agent's browser's live view, to this connection while it
+        // watches (errands/tab_view.dart).
+        _agentTab.add(message);
       case ServerMessage_Body.agentBrowserFrame:
       case ServerMessage_Body.agentBrowserClipboard:
       case ServerMessage_Body.agentBrowserViewMoved:
@@ -5510,6 +5897,11 @@ class Backend implements AppViewTransport {
       // A recovery-codes card's, to this connection only (#435 W8b): to
       // the card that asked, never kept here.
       case ServerMessage_Body.recoveryCodes:
+      // ListDeviceActivity's answer, to the asker (Settings → Device
+      // activity).
+      case ServerMessage_Body.deviceActivity:
+      // RequestAddDevice's answer: `factoryd pair` asks it, never this app.
+      case ServerMessage_Body.addDeviceRequested:
         _pending.remove(message.replyTo.toInt())?.complete(message);
       case ServerMessage_Body.deviceVouched:
         // VouchDevice's answer, to this app only (#529).
@@ -5541,6 +5933,8 @@ class Backend implements AppViewTransport {
         _pending.remove(message.replyTo.toInt())?.complete(message);
       case ServerMessage_Body.fileChanged:
         fileChanged.value = message.fileChanged;
+      case ServerMessage_Body.fileSeals:
+        fileSeals.value = message.fileSeals;
       case ServerMessage_Body.pipeTranscript:
         pipeChat.load(message.pipeTranscript);
       case ServerMessage_Body.pipeMessageUpdate:
@@ -5611,6 +6005,21 @@ class Backend implements AppViewTransport {
   void _note(
     ConnectionKind kind, [
     Map<ConnectionKey, Object> detail = const {},
+    Duration took = Duration.zero,
+  ]) {
+    final record = diagnostics;
+    if (record == null || !record.on) return;
+    record.add(kind, detail, took);
+    if (record.waitingCount >= diagnosticsSendPast) {
+      unawaited(_sendDiagnostics());
+    }
+  }
+
+  /// Records how opening a file in a viewer went, while diagnostics are
+  /// on.
+  void noteViewer(
+    ViewerKind kind,
+    Map<ViewerKey, Object> detail, [
     Duration took = Duration.zero,
   ]) {
     final record = diagnostics;
@@ -5893,6 +6302,7 @@ const _toStdout = [
   'no connection within ',
   'connection closed (code ',
   'the network moved',
+  'refused ',
 ];
 
 /// The selected chat's conversation: an agent's transcript store, keyed by

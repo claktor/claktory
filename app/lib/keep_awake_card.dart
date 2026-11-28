@@ -11,9 +11,9 @@ import 'scope.dart';
 import 'settings_shell.dart' show SettingsLink;
 import 'tell_rivet.dart' show ErrorLine;
 
-/// Needs you's question while Workspace.keep_awake.ask (#352 P1, Matt's
-/// O1): whether Claktory keeps its Mac awake while agents work, only on
-/// power and with the lid open. Trish's words.
+/// Needs you's question while Workspace.keep_awake.ask: whether
+/// Claktory keeps its Mac awake while agents work, only on power and
+/// with the lid open.
 const keepAwakeTitle = "Keep your agents working while you're away?";
 
 /// The Mac Claktory runs on: "this Mac" on that Mac itself, else its
@@ -62,7 +62,7 @@ class _KeepAwakeCardState extends State<KeepAwakeCard> with PublishesAnswer {
   var _busy = false;
   String? _failure;
 
-  /// [rethrowing] for focus mode's keys (#514): refused, it throws too.
+  /// [rethrowing] for focus mode's keys: refused, it throws too.
   Future<void> _answer(bool on, {bool rethrowing = false}) async {
     final backend = AppScope.of(context);
     setState(() {
@@ -99,7 +99,7 @@ class _KeepAwakeCardState extends State<KeepAwakeCard> with PublishesAnswer {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         // The rest, above the answers, with where it changes later as a
-        // link there (Lucy's Settings spec §5).
+        // link there.
         SettingsLink(
           before: 'You can change this in ',
           label: 'Settings → General',
@@ -113,8 +113,7 @@ class _KeepAwakeCardState extends State<KeepAwakeCard> with PublishesAnswer {
         Wrap(
           spacing: Space.s,
           runSpacing: Space.s,
-          // The no first, the primary filled at the end (Lucy's
-          // needs-you-cards rule 2).
+          // The no first, the primary filled at the end.
           children: [
             Button(
               label: 'Let it sleep',

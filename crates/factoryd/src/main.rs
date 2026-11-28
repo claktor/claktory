@@ -121,6 +121,13 @@ fn main() -> ExitCode {
     {
         let mut flags: Vec<String> = args[..at].to_vec();
         flags.extend_from_slice(&args[at + 1..]);
+        #[cfg(windows)]
+        return if args[at] == "install" {
+            factoryd::windows::install::install_main(&flags)
+        } else {
+            factoryd::windows::install::uninstall_main(&flags)
+        };
+        #[cfg(not(windows))]
         return if args[at] == "install" { factoryd::install::main(&flags) } else { factoryd::uninstall::main(&flags) };
     }
     // Moving isn't on Windows yet: its commands say so, and do nothing.
@@ -213,6 +220,9 @@ async fn run() -> Result<(), MainError> {
     // only a Claktory started with this, the dev one say, has it. No
     // installer, LaunchAgent or release script ever sets it.
     factoryd::browser::set_preview(std::env::var_os("FACTORY_BROWSER_PREVIEW").is_some_and(|on| on == "1"));
+    // A Dev Claktory's app socket takes the Dev app pinned by its
+    // cdhash; a real one, only the Developer ID app.
+    factoryd::authority::set_dev(dev);
     // So do agents in direct messages, until People ships: the same rule.
     factoryd::user_apps::dms::set_preview(std::env::var_os("FACTORY_DMS_PREVIEW").is_some_and(|on| on == "1"));
     match command.as_slice() {
@@ -244,14 +254,29 @@ async fn run() -> Result<(), MainError> {
         [supervise] if supervise == "supervise" => supervise_backend(instance.home, dev).await,
         [login] if login == "login" => Ok(factory_agent::login_terminal(&instance.home.auth_path(), None).await?),
         [login, provider] if login == "login" => Ok(factory_agent::login_terminal(&instance.home.auth_path(), Some(provider)).await?),
-        [pair, name @ ..] if pair == "pair" => {
-            // `--host ADDRESS`, from before the private tunnel: devices find
-            // this machine by its key now, so it's left out. Without a name,
-            // the device that uses the code gives its own.
-            let name = match name {
-                [name @ .., flag, _] if flag == "--host" => name,
-                name => name,
-            };
+        // `pair --show-code` (`cli` has every other `pair`): the installer's
+        // one code for a new install's first device, at its own terminal,
+        // before any agent could run a command.
+        [pair, words @ ..] if pair == "pair" => {
+            let mut name: Vec<&str> = Vec::new();
+            let mut words = words.iter();
+            while let Some(word) = words.next() {
+                match word.as_str() {
+                    "--show-code" | "--dev" => {}
+                    // From before the private tunnel: devices find this
+                    // machine by its key now.
+                    "--host" => drop(words.next()),
+                    word => name.push(word),
+                }
+            }
+            if std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty").is_err() {
+                eprintln!("factoryd pair --show-code shows a code only at a terminal. Without one, run factoryd account authorize --email <your email>, then approve this Claktory on one of your devices.");
+                std::process::exit(3);
+            }
+            if let Some(why) = factoryd::remote::first_code_refused(&instance.home) {
+                eprintln!("{why}");
+                std::process::exit(3);
+            }
             let (code, device) = factoryd::remote::pair_offline(&instance.home, &name.join(" "))?;
             let minutes = factoryd::remote::CODE_LIFETIME.as_secs() / 60;
             // A terminal gets the code as a QR code too, to scan from the
@@ -281,24 +306,8 @@ async fn run() -> Result<(), MainError> {
             println!("It works once, for {minutes} minutes. You'll be asked to allow the device that uses it.");
             allow_in_terminal(&instance.home, &device).await
         }
-        // `allow` goes to the running Claktory (cli), which checks the
-        // number typed (#352 P4); never allowed here, without it.
-        [allow, device @ ..] if allow == "allow" && !device.is_empty() => {
-            eprintln!("Run factoryd allow {} --number <the 4 digits on its screen> while Claktory runs.", device.join(" "));
-            std::process::exit(2);
-        }
         [command, rest @ ..] if command == "import" => import(&instance, rest),
         [command, rest @ ..] if command == "receive" => receive(&instance, rest).await,
-        [deny, device @ ..] if deny == "deny" && !device.is_empty() => {
-            let device = factoryd::remote::deny(&instance.home, &device.join(" "))?;
-            println!("Not allowed. {} can't connect. To try again, run factoryd pair.", factoryd::remote::shown_name(&device.name));
-            Ok(())
-        }
-        [unpair, device @ ..] if unpair == "unpair" && !device.is_empty() => {
-            let device = factoryd::remote::unpair(&instance.home, &device.join(" "))?;
-            println!("Removed {} ({}): it can't connect any more.", factoryd::remote::shown_name(&device.name), device.id);
-            Ok(())
-        }
         // Never a waiting device's number (#352 P4, Fugo): the person reads
         // it off the device's own screen. Names as `shown_name` shows them,
         // since a device chooses its own (no escape sequences reach the
@@ -399,14 +408,20 @@ async fn receive(instance: &Instance, args: &[String]) -> Result<(), MainError> 
     use factoryd::move_import::receive::{self, Options, Ui};
     let mut options = Options::default();
     let json = args.iter().any(|arg| arg == "--json");
-    for arg in args {
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" | "-h" => {
-                println!("usage: factoryd receive [--committed] [--json]");
+                println!("usage: factoryd receive [--email EMAIL [--service URL]] [--committed] [--json]");
                 return Ok(());
             }
             "--committed" => options.committed = true,
             "--json" => {}
+            // A move with the account: no code, no digits.
+            "--email" | "--service" if args.len() > 0 => {
+                let value = args.next().cloned();
+                if arg == "--email" { options.email = value } else { options.service = value }
+            }
             other => {
                 let refused = ImportError::Refused(format!("{other} isn't an option of receive"));
                 if json {
@@ -435,6 +450,10 @@ async fn receive(instance: &Instance, args: &[String]) -> Result<(), MainError> 
     } else {
         Ui {
             code: Arc::new(move |code| {
+                // A move with the account shows no code.
+                if code.secret.is_empty() {
+                    return;
+                }
                 let text = code.text();
                 if let Some(lines) = terminal.then(|| factoryd::terminal_qr::lines(&text)).flatten() {
                     println!("\nScan this with Claktory on your phone or iPad, or paste the code below:\n");
@@ -512,10 +531,10 @@ fn now_ms() -> i64 {
     jiff::Timestamp::now().as_millisecond()
 }
 
-/// After `factoryd pair` prints a code in a terminal: waits for the device
-/// that uses it, and asks whether to allow it, with the number it shows.
-/// Ctrl-C ends the code. With no terminal it returns at once: the device
-/// is allowed in the app, or with `factoryd allow`.
+/// After `factoryd pair --show-code` prints a code in a terminal: waits for
+/// the device that uses it, and asks whether to allow it, with the number it
+/// shows. Ctrl-C ends the code. With no terminal it returns at once: the
+/// device is allowed in the app.
 async fn allow_in_terminal(home: &Home, device: &factoryd::remote::Device) -> Result<(), MainError> {
     use factoryd::remote;
     use std::io::{BufRead, Write};
@@ -523,7 +542,7 @@ async fn allow_in_terminal(home: &Home, device: &factoryd::remote::Device) -> Re
         // Over SSH without -t, say (Matt's case): nothing here can ask for
         // the digits, so it says how to be asked.
         println!(
-            "When the device has used the code, allow it in Claktory on one of your devices, or in a terminal on this computer: run factoryd allow {} and type the 4 digits on its screen. Over SSH, connect with ssh -t, or it isn't a terminal.",
+            "This terminal can't ask for the 4 digits {} shows. Allow it in Settings → Devices on a device connected to this Claktory, or, over SSH, connect with ssh -t and run factoryd pair --show-code again.",
             device.id
         );
         return Ok(());
@@ -576,15 +595,15 @@ async fn allow_in_terminal(home: &Home, device: &factoryd::remote::Device) -> Re
 
                 match allowed {
                     Ok(true) => println!("Allowed. {name} can connect now."),
-                    Ok(false) => println!("Not allowed. To try again, run factoryd pair."),
-                    Err(_) => println!("The code expired or was cancelled. Run factoryd pair for a new one."),
+                    Ok(false) => println!("Not allowed. To try again, run factoryd pair --show-code."),
+                    Err(_) => println!("The code expired or was cancelled. Run factoryd pair --show-code for a new one."),
                 }
                 return Ok(());
             }
             Some(known) if known.code_expires.is_some_and(|expires| expires > now) => {}
             _ => {
                 let _ = remote::cancel(home, &device.id);
-                println!("The code expired or was cancelled. Run factoryd pair for a new one.");
+                println!("The code expired or was cancelled. Run factoryd pair --show-code for a new one.");
                 return Ok(());
             }
         }

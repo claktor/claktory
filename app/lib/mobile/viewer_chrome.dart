@@ -385,6 +385,7 @@ class PhoneViewerScaffold extends StatefulWidget {
     required this.body,
     this.overlay,
     this.toolbar,
+    this.notice,
     this.onClose,
   });
 
@@ -393,6 +394,9 @@ class PhoneViewerScaffold extends StatefulWidget {
   final Widget body;
   final Widget? overlay;
   final Widget? toolbar;
+
+  /// A line about the file under [header], shown and hidden with it.
+  final Widget? notice;
 
   /// Back, for pulling a picture or video down to close it.
   final VoidCallback? onClose;
@@ -521,7 +525,17 @@ class _PhoneViewerScaffoldState extends State<PhoneViewerScaffold> {
     final palette = Palette.of(context);
     final safe = _whole ? MediaQuery.paddingOf(context) : EdgeInsets.zero;
     final toolbar = widget.toolbar;
-    Widget header = widget.header;
+    final notice = widget.notice;
+    Widget header = notice == null
+        ? widget.header
+        : Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              widget.header,
+              ColoredBox(color: palette.sidebar, child: notice),
+            ],
+          );
     if (_whole) {
       header = ColoredBox(
         color: palette.sidebar,
@@ -715,7 +729,11 @@ class _PhoneViewerScaffoldState extends State<PhoneViewerScaffold> {
                   removeTop: true,
                   removeLeft: true,
                   removeRight: true,
-                  child: widget.header,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [widget.header, ?widget.notice],
+                  ),
                 ),
               ),
             ),

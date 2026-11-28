@@ -209,7 +209,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DmDeviceList dco_decode_dm_device_list(dynamic raw);
 
   @protected
+  DmForkState dco_decode_dm_fork_state(dynamic raw);
+
+  @protected
   DmGroup dco_decode_dm_group(dynamic raw);
+
+  @protected
+  DmGroupError dco_decode_dm_group_error(dynamic raw);
+
+  @protected
+  DmGroupErrorKind dco_decode_dm_group_error_kind(dynamic raw);
 
   @protected
   DmGroupKind dco_decode_dm_group_kind(dynamic raw);
@@ -228,6 +237,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   DmLeafKind dco_decode_dm_leaf_kind(dynamic raw);
+
+  @protected
+  DmListAdopted dco_decode_dm_list_adopted(dynamic raw);
+
+  @protected
+  DmListVersion dco_decode_dm_list_version(dynamic raw);
 
   @protected
   DmListed dco_decode_dm_listed(dynamic raw);
@@ -255,6 +270,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   DmRemoval dco_decode_dm_removal(dynamic raw);
+
+  @protected
+  DmResync dco_decode_dm_resync(dynamic raw);
 
   @protected
   DmRotation dco_decode_dm_rotation(dynamic raw);
@@ -309,6 +327,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<DmGroup> dco_decode_list_dm_group(dynamic raw);
+
+  @protected
+  List<DmListAdopted> dco_decode_list_dm_list_adopted(dynamic raw);
+
+  @protected
+  List<DmListVersion> dco_decode_list_dm_list_version(dynamic raw);
 
   @protected
   List<DmListed> dco_decode_list_dm_listed(dynamic raw);
@@ -598,7 +622,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DmDeviceList sse_decode_dm_device_list(SseDeserializer deserializer);
 
   @protected
+  DmForkState sse_decode_dm_fork_state(SseDeserializer deserializer);
+
+  @protected
   DmGroup sse_decode_dm_group(SseDeserializer deserializer);
+
+  @protected
+  DmGroupError sse_decode_dm_group_error(SseDeserializer deserializer);
+
+  @protected
+  DmGroupErrorKind sse_decode_dm_group_error_kind(SseDeserializer deserializer);
 
   @protected
   DmGroupKind sse_decode_dm_group_kind(SseDeserializer deserializer);
@@ -617,6 +650,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   DmLeafKind sse_decode_dm_leaf_kind(SseDeserializer deserializer);
+
+  @protected
+  DmListAdopted sse_decode_dm_list_adopted(SseDeserializer deserializer);
+
+  @protected
+  DmListVersion sse_decode_dm_list_version(SseDeserializer deserializer);
 
   @protected
   DmListed sse_decode_dm_listed(SseDeserializer deserializer);
@@ -646,6 +685,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   DmRemoval sse_decode_dm_removal(SseDeserializer deserializer);
+
+  @protected
+  DmResync sse_decode_dm_resync(SseDeserializer deserializer);
 
   @protected
   DmRotation sse_decode_dm_rotation(SseDeserializer deserializer);
@@ -702,6 +744,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<DmGroup> sse_decode_list_dm_group(SseDeserializer deserializer);
+
+  @protected
+  List<DmListAdopted> sse_decode_list_dm_list_adopted(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<DmListVersion> sse_decode_list_dm_list_version(
+    SseDeserializer deserializer,
+  );
 
   @protected
   List<DmListed> sse_decode_list_dm_listed(SseDeserializer deserializer);
@@ -1065,7 +1117,19 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_dm_device_list(DmDeviceList self, SseSerializer serializer);
 
   @protected
+  void sse_encode_dm_fork_state(DmForkState self, SseSerializer serializer);
+
+  @protected
   void sse_encode_dm_group(DmGroup self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_dm_group_error(DmGroupError self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_dm_group_error_kind(
+    DmGroupErrorKind self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_dm_group_kind(DmGroupKind self, SseSerializer serializer);
@@ -1087,6 +1151,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_dm_leaf_kind(DmLeafKind self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_dm_list_adopted(DmListAdopted self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_dm_list_version(DmListVersion self, SseSerializer serializer);
 
   @protected
   void sse_encode_dm_listed(DmListed self, SseSerializer serializer);
@@ -1117,6 +1187,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_dm_removal(DmRemoval self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_dm_resync(DmResync self, SseSerializer serializer);
 
   @protected
   void sse_encode_dm_rotation(DmRotation self, SseSerializer serializer);
@@ -1180,6 +1253,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_list_dm_group(List<DmGroup> self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_dm_list_adopted(
+    List<DmListAdopted> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_dm_list_version(
+    List<DmListVersion> self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_list_dm_listed(List<DmListed> self, SseSerializer serializer);

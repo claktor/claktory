@@ -1188,10 +1188,15 @@ on a phone, still owed for every item.
     refuses to build without it unless `--no-firebase` says so, and checks
     the APK carries Firebase's app id; the device tests use
     `src/androidTest/firebase-test-config.json`, a made-up project.
-  - **Nothing reaches Google before the person allows notifications.**
+  - **The token only while notifications are allowed.**
     `firebase_messaging_auto_init_enabled` and analytics are off in the
-    manifest; the token is asked for only once they allow (and at each
-    start after), and goes to Dart as `token` {token, platform: "fcm"}.
+    manifest; the token is asked for only while notifications are allowed
+    (at each start, and when the person allows them), and goes to Dart as
+    `token` {token, platform: "fcm"}. From Android 13 that's after the
+    person allows; before 13 notifications are on from install, so the
+    first start already asks Firebase. Once asked, Firebase's auto-init
+    stays on, and turning notifications off or forgetting a Claktory
+    doesn't delete the token.
     `unavailable` also covers a phone without Google Play services.
   - **Asking** (`ask`, Android 13+): the permission rules above
     (`PermissionState`, `Refusals`), `refusedOnce` beside `permission`.

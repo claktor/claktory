@@ -145,7 +145,7 @@ impl Task {
     /// Whether this task, which this process no longer watches (it was
     /// started before a restart), ended unwatched without recording how:
     /// the computer's restart ended it, or its process group is gone. Its
-    /// agent is told of such tasks together, once (friend bug #44).
+    /// agent is told of such tasks together, once.
     pub fn lost(&self) -> bool {
         self.recorded_exit().is_none() && (started_before_boot(self.started) || !group_alive(self.pid))
     }
@@ -692,7 +692,7 @@ pub async fn run(
         if args.run_in_background == Some(true) {
             return start_background(cwd, args, background, &injected).await;
         }
-        // macOS refusing a protected folder says so (permissions.md P2).
+        // macOS refusing a protected folder says so.
         return run_logged(cwd, args, cancel, detach, update, background, &injected).await.map(|result| super::protected::noted(result, cwd));
     }
     let began = std::time::Instant::now();
@@ -716,7 +716,7 @@ pub async fn run(
 }
 
 /// Runs a command whose whole output (stdout) is saved as a new secret
-/// (`save_as`, Fugo's save-as-secret.md): for a key made with a secret the
+/// (`save_as`): for a key made with a secret the
 /// agent holds, so the key never passes through the model, the transcript
 /// or a log. Everything that can refuse the save is checked before the
 /// command runs, so a key made at a service isn't lost to a refusal after;
@@ -958,7 +958,7 @@ async fn watch(mut child: Child, task: Task, limit: f64, finished: Arc<dyn Fn(Fi
     // Its shell ended, but the rest of its group may take a moment more (on
     // Windows, the wrapper that wrote its status; anywhere, a child on its
     // way out): up to a second for it to go, so `finished` can cut a log
-    // written past its cap (Jotaro 53341). Something left running stays so.
+    // written past its cap. Something left running stays so.
     for _ in 0..20 {
         if !group_alive(pid) {
             break;

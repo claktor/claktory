@@ -1,4 +1,4 @@
-// Names in Claktory's own sentences (Abbacchio's row 1730, Fugo 50896): a
+// Names in Claktory's own sentences: a
 // name with a right-to-left override can't turn the words after it
 // backwards; what reorders shows by its code, and a name that isn't plain
 // ASCII sits in a first-strong isolate.
@@ -42,16 +42,26 @@ void main() {
     );
     await harness.show(tester, size: const Size(390, 844));
     await pumpFrames(tester);
+    // Earlier today, as the sentence gives a time without its date.
+    final now = DateTime.now();
+    final since = DateTime(now.year, now.month, now.day, now.hour, now.minute);
+    String two(int n) => n.toString().padLeft(2, '0');
     final backend = harness.backend
       ..workspace.apply(Workspace(settings: Settings(name: _evil)))
       ..connected.value = true
-      ..connectedSince.value = DateTime(2026, 11, 27, 6, 10)
+      ..connectedSince.value = since
       ..tunnel.value = tunnelStatus(path: TunnelPath.direct);
     await pumpFrames(tester);
     expect(claktoryName(backend), isNot(contains('\u202E')));
     final details = Connection(backend).details;
     expect(details, startsWith('Connected directly to \u2068Evil'));
-    expect(details, endsWith('\u2069 since 06:10. Private and encrypted.'));
+    expect(
+      details,
+      endsWith(
+        '\u2069 since ${two(since.hour)}:${two(since.minute)}. '
+        'Private and encrypted.',
+      ),
+    );
     expect(details, isNot(contains('\u202E')));
   });
 }

@@ -54,7 +54,8 @@ impl Vault {
         transaction.execute("DELETE FROM protectors WHERE kind LIKE 'account:%' AND kind != ?1", [&kind])?;
         Self::save_protector(&transaction, &protector)?;
         let kept: bool = transaction.query_row("SELECT COUNT(*) > 0 FROM kept WHERE name = 'recovery'", [], |row| row.get(0))?;
-        if !kept {
+        // Covered by the account's recovery key, it needs none of its own.
+        if !kept && !Self::account_covered(&transaction)? {
             let (text, recovery) = Self::recovery_protector(&vault_id, &vmk);
             Self::save_protector(&transaction, &recovery)?;
             Self::keep(&transaction, &vault_id, &vmk, "recovery", text.as_bytes())?;

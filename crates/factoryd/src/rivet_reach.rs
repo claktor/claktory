@@ -47,6 +47,8 @@ const ALERTS: &str = "reading an alert is the person's: an agent never clears on
 const OFFER: &str = "what a device offers the person is theirs to dismiss, on that device";
 const PROTECTED: &str = "macOS's Files and Folders prompts and their Needs you items are the person's: an agent never brings a prompt up nor clears one (item 12, Bruno 45729)";
 const WAITING: &str = "a waiting device's own request: only that device takes it back, on its waiting connection (#603)";
+const SEALED: &str = "a sealed version's copy is the person's to delete: an agent's tools never change a seal";
+const ACTIVITY: &str = "Device activity is the person's record of what their devices did: never an agent's or a pipe's";
 const HISTORY: &str = "History is the person's own, on their devices: never an agent's or a pipe's (Fugo, #458)";
 
 /// Everything a request can change, and how Rivet does it. Only the tests
@@ -71,6 +73,8 @@ pub(crate) fn reach(body: &Body) -> Vec<Reach> {
         Body::PinAgent(_) | Body::UnpinAgent(_) => vec![Config(&["pinned_agents"])],
         Body::GetHistoryOverview(_) | Body::GetHistoryEvents(_) | Body::WatchHistory(_) => vec![Person(HISTORY)],
         Body::ReadAlerts(_) => vec![Person(ALERTS)],
+        Body::DeleteSealedCopy(_) => vec![Person(SEALED)],
+        Body::ListDeviceActivity(_) => vec![Person(ACTIVITY)],
         Body::DismissNotificationsOffer(_) => vec![Person(OFFER)],
         Body::WithdrawPairing(_) => vec![Person(WAITING)],
         Body::CheckProtectedPlaces(_) | Body::DismissProtectedPlace(_) => vec![Person(PROTECTED)],
@@ -84,7 +88,10 @@ pub(crate) fn reach(body: &Body) -> Vec<Reach> {
         | Body::DeleteAgentBrowserData(_)
         | Body::SetAgentBrowserLocale(_)
         | Body::SignOutAgentBrowserAccount(_)
-        | Body::ListTimeZones(_) => vec![Person(BROWSER)],
+        | Body::ListTimeZones(_)
+        | Body::WatchAgentTab(_)
+        | Body::AgentTabFrameAck(_)
+        | Body::AgentTabInput(_) => vec![Person(BROWSER)],
         // A site's recovery codes from an errand (#435 W8b, Fugo 42966):
         // only the person sees or keeps them.
         Body::ShowRecoveryCodes(_) | Body::KeepRecoveryCodes(_) => vec![Person(CODES)],
@@ -116,6 +123,8 @@ pub(crate) fn reach(body: &Body) -> Vec<Reach> {
         | Body::FetchApp(_)
         | Body::ListFolders(_)
         | Body::ReadFile(_)
+        | Body::GetChecklist(_)
+        | Body::ListTasks(_)
         | Body::LoadEntries(_)
         | Body::ListThreads(_)
         | Body::PreviewEnv(_)
@@ -169,9 +178,11 @@ pub(crate) fn reach(body: &Body) -> Vec<Reach> {
         Body::GrantSecret(_) => vec![Tool(&["secrets_grant"])],
         Body::RevokeSecret(_) => vec![Tool(&["secrets_revoke"])],
         Body::DeriveSecret(_) => vec![Tool(&["secrets_derive"])],
-        Body::CreatePairing(_) => vec![Tool(&["devices_add"])],
+        Body::CreatePairing(_) | Body::RequestAddDevice(_) => vec![Tool(&["devices_add"])],
         Body::UnpairDevice(_) | Body::CancelPairing(_) => vec![Tool(&["devices_remove"])],
-        Body::StartMove(_) => vec![Tool(&["move_claktory"])],
+        // A move hands over everything: with the account the person
+        // approves it on their device, and without one they type the code.
+        Body::StartMove(_) => vec![Person("only the person starts a move, which hands over everything")],
         Body::CancelMove(_) => vec![Tool(&["move_cancel"])],
         Body::CreatePipeInvite(_) => vec![Tool(&["pipes_invite"])],
         Body::AcceptPipeInvite(_) => vec![Tool(&["pipes_accept"])],
@@ -203,6 +214,8 @@ pub(crate) fn reach(body: &Body) -> Vec<Reach> {
         | Body::UseRecoveryKey(_)
         | Body::AccountSignOut(_)
         | Body::SkipAccountSignIn(_)
+        | Body::AccountAuthorize(_)
+        | Body::ProveAllowedDevice(_)
         | Body::StartConnect(_)
         | Body::FinishConnect(_)
         | Body::CancelConnect(_)
@@ -327,6 +340,8 @@ pub(crate) fn reach(body: &Body) -> Vec<Reach> {
         Body::SetAccountService(_) => vec![Person("which account service Claktory signs in at is the person's, as signing in is")],
         // Only this computer's own app signs itself in to the account (#529).
         Body::VouchDevice(_) => vec![Person("only this computer's own app signs itself in to the account through this Claktory")],
+        // Lock out's other half, from the person's device (E11-8 point 6).
+        Body::UnpairAccountKey(_) => vec![Person("Lock out is the person's, on one of their devices")],
     }
 }
 

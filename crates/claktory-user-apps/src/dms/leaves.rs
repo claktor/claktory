@@ -33,7 +33,12 @@ CREATE TABLE IF NOT EXISTS dm_identities (
     identity_key BLOB NOT NULL,
     device_list BLOB NOT NULL,
     version INTEGER NOT NULL,
-    updated INTEGER NOT NULL
+    updated INTEGER NOT NULL,
+    -- When the current identity key was set (its first upload, or a new
+    -- security key), and the device leaf that set it (#546); NULL for one
+    -- set before the worker kept them (`upgrade`).
+    since INTEGER,
+    set_by TEXT
 );
 -- Identity keys an account replaced with a new one (me/keys/rotate):
 -- never its key again (L5), so no rotation goes back to one.
@@ -305,6 +310,7 @@ fn put_keys(
     account: &str,
     removed: &[String],
     put: PutKeys,
+    by: &str,
     now_ms: i64,
 ) -> Result<Result<Value, Value>, Refusal> {
     let (list, raw) = list_for(account, &put.device_list)?;
@@ -351,9 +357,9 @@ fn put_keys(
         )?;
     }
     transaction.execute(
-        "INSERT INTO dm_identities (account_id, identity_key, device_list, version, updated) VALUES (?1, ?2, ?3, ?4, ?5)
+        "INSERT INTO dm_identities (account_id, identity_key, device_list, version, updated, since, set_by) VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6)
          ON CONFLICT (account_id) DO UPDATE SET device_list = ?3, version = ?4, updated = ?5",
-        params![account, identity.0.to_vec(), raw, list.list.version as i64, now_ms],
+        params![account, identity.0.to_vec(), raw, list.list.version as i64, now_ms, by],
     )?;
     keep_listed(transaction, account, &list)?;
     tell(transaction, account, now_ms)?;
@@ -405,6 +411,7 @@ fn rotate(
     removed: &[String],
     signed_in_at: Option<i64>,
     rotate: Rotate,
+    by: &str,
     now_ms: i64,
 ) -> Result<Value, Refusal> {
     // Every new key, with a device to hand it over or none: the service
@@ -452,8 +459,8 @@ fn rotate(
     }
     transaction.execute("DELETE FROM dm_dropped_devices WHERE account_id = ?1", [account])?;
     transaction.execute(
-        "UPDATE dm_identities SET identity_key = ?2, device_list = ?3, version = ?4, updated = ?5 WHERE account_id = ?1",
-        params![account, identity.0.to_vec(), raw, list.list.version as i64, now_ms],
+        "UPDATE dm_identities SET identity_key = ?2, device_list = ?3, version = ?4, updated = ?5, since = ?5, set_by = ?6 WHERE account_id = ?1",
+        params![account, identity.0.to_vec(), raw, list.list.version as i64, now_ms, by],
     )?;
     transaction.execute(
         "INSERT OR IGNORE INTO dm_retired_identities (account_id, identity_key, retired) VALUES (?1, ?2, ?3)",
@@ -729,15 +736,15 @@ pub fn answer(db: &mut Connection, method: &str, route: &str, caller: &Caller, b
             shown
         }
         ("PUT", "me/keys") => {
-            let Caller::Device { account_id, removed_devices, .. } = caller else { return Err(device_only()) };
-            match put_keys(&transaction, account_id, removed_devices, body(bytes)?, now_ms)? {
+            let Caller::Device { account_id, removed_devices, device_key, .. } = caller else { return Err(device_only()) };
+            match put_keys(&transaction, account_id, removed_devices, body(bytes)?, device_key, now_ms)? {
                 Ok(value) => value,
                 Err(stale) => return Ok((409, stale)),
             }
         }
         ("POST", "me/keys/rotate") => {
-            let Caller::Device { account_id, removed_devices, signed_in_at, .. } = caller else { return Err(device_only()) };
-            rotate(&transaction, account_id, removed_devices, *signed_in_at, body(bytes)?, now_ms)?
+            let Caller::Device { account_id, removed_devices, signed_in_at, device_key, .. } = caller else { return Err(device_only()) };
+            rotate(&transaction, account_id, removed_devices, *signed_in_at, body(bytes)?, device_key, now_ms)?
         }
         ("POST", "key-packages") => upload(&transaction, &leaf_of(caller)?, body(bytes)?, now_ms)?,
         ("GET", "key-packages") => supply(&transaction, &leaf_of(caller)?)?,
@@ -764,6 +771,36 @@ pub fn signed_out(db: &Connection, account: &str, leaf_id: &str, until_ms: i64) 
         "DELETE FROM dm_key_packages WHERE account_id = ?1 AND leaf_id = ?2 AND kind = 'device' AND uploaded <= ?3",
         params![account, leaf_id, until_ms],
     )
+}
+
+/// Whether `account_key` is a device leaf on `account`'s current signed
+/// device list, and since when and by which leaf its current identity key
+/// was set, for the account service: a device approving a computer must
+/// be on it, once the account's devices set that identity up before the
+/// request.
+pub fn device_listed(db: &Connection, account: &str, account_key: &str) -> Result<crate::ipc::DeviceListed, Refusal> {
+    let Some(keys) = keys_of(db, account)? else {
+        return Ok(crate::ipc::DeviceListed { identity: false, since: None, set_by: None, listed: false });
+    };
+    let (since, set_by): (Option<i64>, Option<String>) =
+        db.query_row("SELECT since, set_by FROM dm_identities WHERE account_id = ?1", [account], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    let listed = keys.list.list.leaves.iter().any(|leaf| leaf.kind == LeafKind::Device && leaf.leaf_id == account_key);
+    Ok(crate::ipc::DeviceListed { identity: true, since, set_by, listed })
+}
+
+/// Gives a database from before them the columns saying when and by whom
+/// each account's identity key was set: NULL, not known, for those there.
+pub fn upgrade(db: &Connection) -> rusqlite::Result<()> {
+    let has = |column: &str| -> rusqlite::Result<bool> {
+        db.query_row("SELECT COUNT(*) > 0 FROM pragma_table_info('dm_identities') WHERE name = ?1", [column], |row| row.get(0))
+    };
+    if !has("since")? {
+        db.execute_batch("ALTER TABLE dm_identities ADD COLUMN since INTEGER;")?;
+    }
+    if !has("set_by")? {
+        db.execute_batch("ALTER TABLE dm_identities ADD COLUMN set_by TEXT;")?;
+    }
+    Ok(())
 }
 
 /// Deleting an account: its keys and KeyPackages go.
@@ -989,6 +1026,62 @@ pub(super) mod tests {
         let (status, rotated) = call(&mut world, &ana.caller(0), "POST", "me/keys/rotate", body);
         assert_eq!(status, 200, "{rotated}");
         assert_eq!(keys_of(&world.db, "ana").ok().flatten().expect("keys").identity, ana.identity.public());
+    }
+
+    /// The service reads whether a device approving a computer is on
+    /// the account's list, and when and by which device the account's
+    /// identity key was set: its first upload or a new security key, never
+    /// a later list under the same key.
+    #[test]
+    fn the_service_reads_who_set_the_identity_and_who_is_listed() {
+        let mut world = World::new();
+        let none = device_listed(&world.db, "ana", "ana-phone").ok().expect("read");
+        assert_eq!(none, crate::ipc::DeviceListed { identity: false, since: None, set_by: None, listed: false });
+        let mut ana = set_up(&mut world, "ana");
+        let read = |world: &World, key: &str| device_listed(&world.db, "ana", key).ok().expect("read");
+        let set = crate::ipc::DeviceListed { identity: true, since: Some(NOW), set_by: Some("ana-phone".into()), listed: true };
+        assert_eq!(read(&world, "ana-phone"), set);
+        assert!(!read(&world, "ana-tablet").listed);
+
+        // A later list, sent by another device: listed, the identity as set.
+        world.now += 60_000;
+        let tablet = ana.add(device("ana", "ana-tablet"));
+        let (status, shown) = call(&mut world, &ana.caller(tablet), "PUT", "me/keys", ana.put(false));
+        assert_eq!(status, 200, "{shown}");
+        assert_eq!(read(&world, "ana-tablet"), crate::ipc::DeviceListed { listed: true, ..set.clone() });
+
+        // A new security key made on the tablet: set then, by it.
+        world.now += 60_000;
+        ana.identity = IdentityKey::generate().expect("a key");
+        ana.version = 0;
+        let list = ana.list();
+        let rotate = json!({"identity_key": b64(&ana.identity.public().0), "device_list": list, "version": 1});
+        let (status, rotated) = call(&mut world, &ana.caller(tablet), "POST", "me/keys/rotate", rotate);
+        assert_eq!(status, 200, "{rotated}");
+        let moved = crate::ipc::DeviceListed { identity: true, since: Some(world.now), set_by: Some("ana-tablet".into()), listed: true };
+        assert_eq!(read(&world, "ana-phone"), moved);
+    }
+
+    /// A worker database from before them gets the columns, empty (not
+    /// known), keeping its rows; upgrading again changes nothing.
+    #[test]
+    fn an_older_database_learns_who_set_an_identity_as_not_known() {
+        let db = Connection::open_in_memory().expect("db");
+        db.execute_batch(
+            "CREATE TABLE dm_identities (account_id TEXT PRIMARY KEY, identity_key BLOB NOT NULL, device_list BLOB NOT NULL,
+             version INTEGER NOT NULL, updated INTEGER NOT NULL);
+             INSERT INTO dm_identities VALUES ('ana', x'00', x'00', 3, 1);",
+        )
+        .expect("old schema");
+        upgrade(&db).expect("upgraded");
+        upgrade(&db).expect("upgraded again");
+        db.execute_batch(SCHEMA).expect("the schema over it");
+        let row: (i64, Option<i64>, Option<String>) = db
+            .query_row("SELECT version, since, set_by FROM dm_identities WHERE account_id = 'ana'", [], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .expect("kept");
+        assert_eq!(row, (3, None, None));
     }
 
     /// Ana with a device on her list, set up at the worker.

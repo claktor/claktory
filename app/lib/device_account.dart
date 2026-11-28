@@ -118,6 +118,7 @@ class AccountClaktory {
     this.platform = '',
     this.version = '',
     this.endpointId = '',
+    this.fingerprint = '',
     this.relays = const [],
     this.lastContact,
   });
@@ -136,6 +137,7 @@ class AccountClaktory {
       platform: text('platform'),
       version: text('version'),
       endpointId: text('endpoint_id').toLowerCase(),
+      fingerprint: text('fingerprint').toLowerCase(),
       relays: [
         for (final relay in json['relays'] as List? ?? const [])
           if (relay is String) relay,
@@ -161,6 +163,10 @@ class AccountClaktory {
   /// Its iroh endpoint id, 64 hex characters; empty when it can't be
   /// reached through the tunnel (it hasn't said where it is).
   final String endpointId;
+
+  /// `hex(sha256(backend key))[..16]`, as a request to join showed it: how
+  /// the one just approved is told from another that joined at once.
+  final String fingerprint;
   final List<String> relays;
 
   /// When it last checked in with the service, if ever.

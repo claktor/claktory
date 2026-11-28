@@ -1301,7 +1301,9 @@ pub fn restore(place: &Place) -> Result<String, Refused> {
 
 /// What `--delete-moved` deletes: everything of the old copy but the
 /// person's work (the workspace and project folders inside the home), the
-/// program, and `moved.json`, which keeps saying it moved.
+/// program, `moved.json`, which keeps saying it moved, and the app's socket
+/// and pins, so the app still hears it from the backend in moved mode (the
+/// copy was deleted).
 pub fn deleted_by(place: &Place) -> Vec<PathBuf> {
     let home = place.home.root();
     let config: serde_json::Value =
@@ -1323,7 +1325,7 @@ pub fn deleted_by(place: &Place) -> Vec<PathBuf> {
         .map(|entry| entry.path())
         .filter(|path| {
             let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
-            !matches!(name.as_str(), "bin" | "releases" | "moved.json") && !work.iter().any(|kept| kept.starts_with(path))
+            !matches!(name.as_str(), "bin" | "releases" | "moved.json" | crate::authority::APP_SOCKET | crate::authority::APP_PINS) && !work.iter().any(|kept| kept.starts_with(path))
         })
         .collect();
     gone.sort();

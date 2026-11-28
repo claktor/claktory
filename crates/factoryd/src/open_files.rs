@@ -1,4 +1,4 @@
-//! How many files factoryd may have open (#490 risk 5). launchd starts a
+//! How many files factoryd may have open. launchd starts a
 //! Mac's processes with a soft limit of 256 open files, and systemd with
 //! 1024: a Claktory with many agents, their connections, tasks and watches
 //! ran out under load, and so did agents' commands, which inherit it. So

@@ -977,6 +977,8 @@ pub(crate) fn check(factory: &Factory, action: &str) -> Result<(), String> {
         Action::Handoff { handoff } if handoff.kind == v1::ErrandHandoffKind::RecoveryCodes as i32 => Ok(()),
         Action::Handoff { handoff } => match factory.errands.get(&handoff.errand) {
             Some(errand) if errand.state == v1::ErrandState::PersonsTurn as i32 => Ok(()),
+            // A check holds only its own tab: the errand runs on meanwhile.
+            Some(errand) if handoff.kind == v1::ErrandHandoffKind::Captcha as i32 && errand.state == v1::ErrandState::Running as i32 => Ok(()),
             errand => {
                 let name = errand.and_then(|errand| factory.lock().config.agent(&errand.agent_id).map(|agent| agent.name.clone()));
                 Err(match name {

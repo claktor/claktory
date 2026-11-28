@@ -56,7 +56,7 @@ fn receive(home: &Home) -> (Receiving, There) {
     };
     let home = home.clone();
     let task = tokio::spawn(async move {
-        let options = Options { committed: false, local_only: true };
+        let options = Options { committed: false, local_only: true, ..Options::default() };
         let nowhere = std::net::SocketAddr::from(([127, 0, 0, 1], 1));
         factoryd::move_import::receive::receive(&home, nowhere, &options, &ui).await
     });
@@ -144,6 +144,18 @@ async fn a_claktory_moves_from_the_app_through_a_freeze_and_is_fenced_once_the_t
     assert!(workspace.r#move.is_some() && workspace.agents.is_empty(), "only the move: {workspace:?}");
     let refused = client.request(Request::CreateProject(v1::CreateProject { name: "x".into(), ..Default::default() })).await;
     assert!(matches!(refused.body, Body::Error(_)), "frozen mode does nothing else");
+    // An agent's command follows it with the tool token, as a tool; a
+    // token that isn't one is turned away.
+    for (token, welcomed) in [(crate::common::tool_token(frozen_addr), true), ("0123abcd".to_owned(), false)] {
+        let mut tool = Client::open(frozen_addr).await;
+        let hello = v1::Hello { protocol_version: factory_protocol::PROTOCOL_VERSION, token, ..Default::default() };
+        tool.send(v1::ClientMessage { id: 1, body: Some(Request::Hello(hello)) }).await;
+        match tool.receive().await.body {
+            Some(Body::Welcome(welcome)) if welcomed => assert_eq!(welcome.device_id, "tool"),
+            Some(Body::Error(error)) if !welcomed => assert_eq!(error.code(), v1::ErrorCode::Unauthorized),
+            other => panic!("{other:?}"),
+        }
+    }
     let done = phase(&mut client, v1::MovePhase::Done).await;
     assert!(!done.can_cancel);
     tokio::time::timeout(WAIT, serving).await.expect("frozen mode ends").unwrap();
@@ -316,4 +328,41 @@ async fn a_restart_while_copying_carries_on_once_the_target_lets_go_of_the_dropp
     let frozen = if waiting.phase() == v1::MovePhase::Frozen { waiting } else { phase(&mut client, v1::MovePhase::Frozen).await };
     assert!(frozen.bytes_total > 0 && frozen.bytes_have == frozen.bytes_total, "{frozen:?}");
     assert!(!home.root().join("move-failed.json").exists());
+}
+
+/// A move with the account: once this Claktory took the person's
+/// approval, the move starts with no code and no digits, never shows the
+/// confirm, says on every device which device approved it, and the other
+/// computer lets it in as the source it named.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_approved_move_starts_without_digits_and_says_which_device_approved_it() {
+    factoryd::move_run::hold_at_freeze();
+    let source = temp_dir();
+    let (addr, factory) = start(&source).await;
+    let home = home_of(addr);
+    let (mut client, _, _) = Client::connect(addr).await;
+
+    let target = temp_dir();
+    let there = Home::new(target.join("home"));
+    let source_key = factoryd::move_run::source_endpoint_for_test(&home);
+    let approved = there.root().join("import/receive/approved.json");
+    std::fs::create_dir_all(approved.parent().unwrap()).expect("receive folder");
+    std::fs::write(&approved, serde_json::json!({"source_key": source_key}).to_string()).expect("approved");
+    let (receiving, mut person) = receive(&there);
+    let code = person.code().await;
+    assert!(code.secret.is_empty(), "no code to show");
+    factoryd::move_run::start_approved_for_test(&factory, &code, "phone", "Matt's iPhone").expect("started");
+
+    // Past the handshake with no confirm, nobody asked anything.
+    let copying = phase(&mut client, v1::MovePhase::Copying).await;
+    assert!(copying.digits.is_empty() || !copying.confirmed_here, "{copying:?}");
+    assert_eq!(
+        (copying.approved_by_device_id.as_str(), copying.approved_by_name.as_str(), copying.approval_key.len()),
+        ("phone", "Matt's iPhone", 43)
+    );
+    assert!(person.said().contains("as you approved"), "{}", person.said());
+    let saved = factoryd::move_run::saved(&home).expect("the move's state");
+    assert!(saved.code.is_empty() && saved.approved.is_some_and(|approved| approved.approver_id == "phone"));
+    client.ok(Request::CancelMove(v1::CancelMove {})).await;
+    receiving.abort();
 }

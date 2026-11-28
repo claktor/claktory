@@ -179,7 +179,7 @@ fn tagged(dir: &Path) -> bool {
 fn tracked(dir: &Path) -> bool {
     let Some(parent) = dir.parent() else { return false };
     let Some(name) = dir.file_name() else { return false };
-    let output = std::process::Command::new("git").arg("-C").arg(parent).args(["ls-files", "-z", "--"]).arg(name).output();
+    let output = crate::trees::git_command(parent).args(["ls-files", "-z", "--"]).arg(name).output();
     // Not a repository (or no git): nothing is tracked.
     output.is_ok_and(|output| output.status.success() && !output.stdout.is_empty())
 }

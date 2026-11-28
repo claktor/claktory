@@ -40,6 +40,8 @@ fn supervise(home: &Path, port: u16) -> Supervisor {
         .arg("supervise")
         .env("FACTORY_HOME", home)
         .env("FACTORY_PORT", port.to_string())
+        // The tests' person token for this home, as its backend's.
+        .env("FACTORY_TEST_PERSON_TOKEN", factoryd::authority::person_token_for_test(home))
         .stdout(Stdio::from(log.try_clone().expect("log")))
         .stderr(Stdio::from(log))
         .spawn()

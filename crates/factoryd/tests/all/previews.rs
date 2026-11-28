@@ -131,6 +131,23 @@ async fn a_phone_gets_a_smaller_preview_that_says_so_and_the_original_stays_as_i
     let fresh = content(client.request(read(&shot, true)).await.body);
     assert_eq!((fresh.preview(), fresh.sha256 == sha(&changed)), (FilePreview::Made, true));
     assert_ne!(fresh.data, preview.data);
+
+    // The app's kept preview, named by the original's hash: still that
+    // version, nothing is sent; an older one gets the new preview.
+    let unless = |kept: String| {
+        client_message::Body::ReadFile(v1::ReadFile {
+            path: shot.display().to_string(),
+            preview_width: WIDTH,
+            preview_height: HEIGHT,
+            unless_sha256: kept,
+            ..Default::default()
+        })
+    };
+    let kept = content(client.request(unless(sha(&changed))).await.body);
+    assert_eq!((kept.unchanged, kept.data.len(), kept.preview()), (true, 0, FilePreview::None));
+    assert_eq!((kept.mime.as_str(), kept.size, kept.sha256 == sha(&changed)), ("image/png", changed.len() as u64, true));
+    let older = content(client.request(unless(sha(&original))).await.body);
+    assert_eq!((older.unchanged, older.preview(), older.data == fresh.data), (false, FilePreview::Made, true));
 }
 
 #[tokio::test]

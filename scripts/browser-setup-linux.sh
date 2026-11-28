@@ -50,7 +50,8 @@ case "$(dpkg --print-architecture)" in
 esac
 
 # Packages: Chrome from Google's own repository (its key pinned in a keyring
-# only that source trusts), Xvfb, xauth, nftables and fonts.
+# only that source trusts), Xvfb, xauth, Openbox (the screen's window manager),
+# nftables and fonts.
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -q
 apt-get install -yq ca-certificates curl gnupg
@@ -82,7 +83,7 @@ if [[ ! -f /etc/apt/sources.list.d/google-chrome.sources ]]; then
     >/etc/apt/sources.list.d/google-chrome.list
 fi
 apt-get update -q
-apt-get install -yq google-chrome-stable xvfb xauth nftables tzdata \
+apt-get install -yq google-chrome-stable xvfb xauth openbox nftables tzdata \
   fonts-liberation fonts-liberation2 fonts-dejavu-core fonts-noto-core fonts-noto-color-emoji fonts-noto-cjk
 
 # The browser's own user: no login, its home and profiles 0700.

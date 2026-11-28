@@ -5,6 +5,7 @@
 
 import 'package:factory_app/controls.dart' show Select;
 import 'package:factory_app/monitors_overview.dart';
+import 'package:factory_app/open_place.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart';
 import 'package:fixnum/fixnum.dart';
@@ -172,6 +173,40 @@ void main() {
     expect(_asked(harness).last.agentId, isEmpty);
     expect(find.text('Nightly build'), findsOneWidget);
     expect(find.text('Check production logs'), findsNothing);
+  });
+
+  testWidgets('opened at a monitor: a filter hiding it is cleared, and it '
+      'shows open, scrolled to, glowing', (tester) async {
+    final harness = Harness(_workspace()..highlights = true);
+    harness.backend.monitorList.addAll([
+      for (var id = 1; id <= 30; id++)
+        AgentMonitor(agentId: 'a1', monitor: monitor(id, 'Builder job $id')),
+      AgentMonitor(agentId: 'a2', monitor: monitor(3, 'Check production logs')),
+    ]);
+    await _open(tester, harness);
+    await _choose(tester, 'Agent', 'a1');
+    expect(find.text('Check production logs'), findsNothing);
+
+    openTarget(
+      tester.element(find.byType(MonitorsOverview)),
+      const OpenMonitor('a2', 3),
+    );
+    await pumpFrames(tester);
+    expect(_asked(harness).last.agentId, isEmpty);
+    final row = find.text('Check production logs');
+    expect(row, findsOneWidget);
+    final top = tester.getTopLeft(row).dy;
+    expect(top, inInclusiveRange(0, 900));
+    expect(find.byType(MonitorHistoryView), findsOneWidget);
+    expect(
+      harness.backend.highlights.glows.map((glow) => glow.key),
+      contains('monitor:a2#3'),
+    );
+
+    // Not again on its own, once gone to.
+    harness.backend.monitorsChanged.value++;
+    await pumpFrames(tester);
+    expect(find.byType(MonitorHistoryView), findsOneWidget);
   });
 
   testWidgets('a change anywhere asks again', (tester) async {

@@ -102,7 +102,8 @@ Every file is written whole or not at all: a copy beside it, flushed, then moved
 | `factory/sight` | state, seen; back: sight | Done (`sight_channel.cpp`, `presence.cpp`): not shown while minimized, on another desktop, locked or with the display off (Windows tells no covering); reduceMotion is Animation effects off |
 | `factory/network` | events: satisfied, interfaces, expensive (metered), constrained (over its limit), network | Done (`network_channel.cpp`) |
 | `factory/links` | listen; back: opened | Not in R1: its links (add, add-friend) carry codes, which the app never takes under authority B |
-| `factory/setup`, `factory/engine` | installer and sign-in task status, quitting | After Jotaro's and Pericolo's install contract |
+| `factory/setup` | location, install, uninstall, appOnly, setAppOnly, backgroundStatus, openLoginItems | Done (`setup_channel.cpp`): runs this PC's `factoryd.exe install` and `uninstall`, which own the sign-in task; removeApp and moveToApplications aren't Windows' (Installed apps removes Claktory) |
+| `factory/engine` | menu; back: menuChosen, quitting | Done (`engine_channel.cpp`): Stop or Start Claktory in the window's system menu, and closing the window asks quitting first |
 | `factory/secret-clipboard` | copy, clear, sweep | Later, if an allowed secret is copied |
 | `factory/recorder`, `factory/audio` | voice | Phase 5 |
 | `claktory/video`, `claktory/ink`, `claktory/replay-writer`, `factory/dm-keys`, `factory/browser`, `factory/setup-link` | | Not in R1 (windows.md section 5) |

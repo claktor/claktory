@@ -1,4 +1,4 @@
-//! Pages of big PDFs as images (#379 step 3): a phone opening a PDF over
+//! Pages of big PDFs as images: a phone opening a PDF over
 //! 5 MB asks for a page (ReadFile.preview_page) and shows it while the PDF
 //! itself loads. On a Mac, `claktory-video-preview pdf` renders it with
 //! CoreGraphics, filling the screen the way round the page is; factoryd

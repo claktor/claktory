@@ -68,8 +68,8 @@ async fn rivet_reads_the_factory_manual_and_other_agents_get_the_core() {
     assert!(names.contains(&"memory_read".to_owned()) && !names.contains(&"memory_update".to_owned()), "{names:?}");
     let searched = call(&mut client, &mut view, "rivet", "memory_read", r#"{"q": "compact_at_tokens"}"#).await;
     assert!(searched.lines().any(|line| line.starts_with("settings-file:")), "{searched}");
-    // Asked for a scheduled job in any words, it finds monitors (friend bug
-    // #10), and a match far into a line shows its own words.
+    // Asked for a scheduled job in any words, it finds monitors, and a
+    // match far into a line shows its own words.
     for q in ["every 6 hours", "scheduled jobs", "recurring", "Scheduled Jobs"] {
         let searched = call(&mut client, &mut view, "rivet", "memory_read", &serde_json::json!({"q": q}).to_string()).await;
         assert!(searched.lines().any(|line| line.starts_with("ext-monitors")), "{q}: {searched}");
@@ -124,7 +124,7 @@ async fn rivet_reads_the_factory_manual_and_other_agents_get_the_core() {
     assert!(!view.agent("rivet").extensions.iter().any(|extension| extension.id == "memory:factory" && extension.enabled));
 }
 
-/// Bruno 29528, 29755: bash's description names ripgrep and jq when
+/// Bash's description names ripgrep and jq when
 /// they're in Claktory's tools, on the agent's PATH (and only when each
 /// resolves there: see factory-agent's tools tests).
 // On Windows the tools are rg.exe and jq.exe: a test of its own to come.

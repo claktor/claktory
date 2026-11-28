@@ -1,5 +1,5 @@
 /// Text an agent or a file chose, shown so nothing in it can make it read
-/// as something else (Fugo): characters that change the text's direction
+/// as something else: characters that change the text's direction
 /// or show nothing are written out as their codes, "\u{202E}".
 library;
 
@@ -29,7 +29,7 @@ bool hiddenRune(int rune) =>
 
 /// A file's or folder's name as the app shows it (a pane's title, Files'
 /// rows, a message's files): its hidden characters written out as their
-/// codes, so `invoice\u202Efdp.exe` can't read as a PDF (Fugo's row 1026).
+/// codes, so `invoice\u202Efdp.exe` can't read as a PDF.
 /// Never for opening or sharing it: the name with them is the file's.
 String shownName(String name) => visibleCodes(name);
 
@@ -101,7 +101,7 @@ String visibleCodes(String text) {
 /// overrides and isolates (U+202A–202E, U+2066–2069), which right-to-left
 /// text never needs, and tag characters but those of the three flags made
 /// of them. Marks, joiners, selectors and the rest stay as they are, since
-/// Persian, Arabic and Indic text need them (Fugo). For what agents and
+/// Persian, Arabic and Indic text need them. For what agents and
 /// events write in a conversation, which can repeat what came from outside.
 String proseCodes(String text) {
   bool reorders(int rune) =>
@@ -184,8 +184,8 @@ Object? visibleCodesIn(Object? value, {bool prose = false}) => switch (value) {
   _ => value,
 };
 
-/// The keys in a tool call's input and details that hold words, not code
-/// (Fugo): what agents_send says, an ask's title and body, a checklist
+/// The keys in a tool call's input and details that hold words, not code:
+/// what agents_send says, an ask's title and body, a checklist
 /// item's text and note, reasons and summaries. Paths, commands, addresses
 /// and ids are under other keys.
 const proseKeys = {
@@ -202,12 +202,12 @@ const proseKeys = {
 };
 
 /// A name as text shows it, whoever chose it (a Claktory's, a device's, a
-/// pipe's other side; Fugo 50896, Abbacchio's row 1730): what reorders it
-/// shown by its code ([proseCodes]), line breaks as spaces, and anything
-/// but plain ASCII set apart in a first-strong isolate (U+2068…U+2069), so
-/// no name can turn the words around it ("since 06:10. Private and
-/// encrypted.") backwards, right-to-left names included. Marks and joiners
-/// stay, for the scripts that need them.
+/// pipe's other side): what reorders it shown by its code ([proseCodes]),
+/// line breaks as spaces, and anything but plain ASCII set apart in a
+/// first-strong isolate (U+2068…U+2069), so no name can turn the words
+/// around it ("since 06:10. Private and encrypted.") backwards,
+/// right-to-left names included. Marks and joiners stay, for the scripts
+/// that need them.
 String nameInText(String name) {
   final shown = proseCodes(
     name.replaceAll(RegExp('[\r\n\t\u0085\u2028\u2029]+'), ' '),

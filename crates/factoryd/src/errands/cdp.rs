@@ -167,6 +167,22 @@ impl Cdp {
         session: Option<&str>,
         wait: Duration,
     ) -> Result<Value, Error> {
+        self.send_within(method, params, session, wait).await?.answered().await
+    }
+
+    /// [`Cdp::call_within`] in two halves: `method` goes out now, after
+    /// every call sent before it, and [`Sent::answered`] waits for its
+    /// result, up to `wait` from now. Calls sent this way go out as fast
+    /// as they're made, rather than each a frame after the last, which is
+    /// as long as Chrome takes to answer an input event.
+    pub(crate) async fn send_within(
+        &self,
+        method: &str,
+        params: Value,
+        session: Option<&str>,
+        wait: Duration,
+    ) -> Result<Sent<'_>, Error> {
+        let by = tokio::time::Instant::now() + wait;
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         let mut message = json!({"id": id, "method": method, "params": params});
         if let Some(session) = session {
@@ -178,23 +194,18 @@ impl Cdp {
         }
         let (reply, answer) = oneshot::channel();
         crate::locking::lock(&self.waiting).insert(id, (method.to_owned(), reply));
+        let sent = Sent { cdp: self, id, method: method.to_owned(), answer, by, wait };
         // Checked after the insert: a reader that ends meanwhile either is
         // seen here or finds this call to end.
-        let sent_and_answered = async {
+        let gone_out = async {
             if self.closed.load(Ordering::SeqCst) || self.send.send(bytes).await.is_err() {
                 return Err(Error::Closed);
             }
-            answer.await.unwrap_or(Err(Error::Closed))
+            Ok(())
         };
-        let outcome = tokio::time::timeout(wait, sent_and_answered)
-            .await
-            .unwrap_or_else(|_| Err(Error::Timeout(method.to_owned(), wait.as_secs())));
-        if outcome.is_err() {
-            crate::locking::lock(&self.waiting).remove(&id);
-        }
-        outcome
+        tokio::time::timeout_at(by, gone_out).await.map_err(|_| sent.timed_out())??;
+        Ok(sent)
     }
-
     /// Chrome's events from now on. A listener that falls 256 behind
     /// loses the oldest (broadcast's Lagged).
     pub(crate) fn events(&self) -> broadcast::Receiver<Event> {
@@ -204,6 +215,37 @@ impl Cdp {
     /// Whether the browser went.
     pub(crate) fn closed(&self) -> bool {
         self.closed.load(Ordering::SeqCst)
+    }
+}
+
+/// A call that went out ([`Cdp::send_within`]), its result still to come.
+/// Dropped, it's no longer waited for.
+pub(crate) struct Sent<'a> {
+    cdp: &'a Cdp,
+    id: u64,
+    method: String,
+    answer: oneshot::Receiver<Result<Value, Error>>,
+    by: tokio::time::Instant,
+    wait: Duration,
+}
+
+impl Sent<'_> {
+    /// Its result, once Chrome gives it, or an error past its time.
+    pub(crate) async fn answered(mut self) -> Result<Value, Error> {
+        match tokio::time::timeout_at(self.by, &mut self.answer).await {
+            Ok(answer) => answer.unwrap_or(Err(Error::Closed)),
+            Err(_) => Err(self.timed_out()),
+        }
+    }
+
+    fn timed_out(&self) -> Error {
+        Error::Timeout(self.method.clone(), self.wait.as_secs())
+    }
+}
+
+impl Drop for Sent<'_> {
+    fn drop(&mut self) {
+        crate::locking::lock(&self.cdp.waiting).remove(&self.id);
     }
 }
 

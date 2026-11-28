@@ -139,19 +139,23 @@ pub(crate) fn public(address: IpAddr) -> bool {
 /// Holds the page to the fence whoever moves it (a link, a form, a
 /// redirect, the page's own script): each document the top frame is about
 /// to load is paused, checked as [`check`] and [`resolved`] do, and loaded
-/// only if it passes; otherwise it fails as blocked, and `blocked` gets its
-/// site for the agent. Frames inside the page load as the page asks. Runs
-/// until the page's connection ends.
+/// only if it passes; otherwise it's aborted, the tab staying where it
+/// was, and `blocked` gets its site for the agent. Frames inside the page
+/// load as the page asks. Runs until the page's connection ends.
 ///
 /// While `hops` is on (the agent asked for a file, R9), what the top frame
 /// gets back may be a file. While `fetching` is on (browser_download
 /// itself), a PDF counts as a file and comes as one, saved rather than
 /// shown in Chrome's viewer.
+///
+/// `held`, a site of a check handed to the person: the page never goes
+/// there meanwhile, so the check keeps its site to itself.
 pub(crate) async fn guard(
     page: Arc<Page>,
     blocked: Arc<Mutex<Option<Blocked>>>,
     hops: Arc<AtomicBool>,
     fetching: Arc<AtomicBool>,
+    held: Option<String>,
 ) -> Result<(), Error> {
     let mut events = page.cdp().events();
     // The top frame keeps its id for the page's life: asking for it while
@@ -181,6 +185,7 @@ pub(crate) async fn guard(
             let frame = event.params["frameId"].as_str().unwrap_or_default().to_owned();
             let page = page.clone();
             let blocked = blocked.clone();
+            let held = held.clone().filter(|site| frame == top && crate::browser_host::tab_view::site_of(&url) == *site);
             let params = event.params.clone();
             let paused = Paused {
                 top: frame == top,
@@ -194,7 +199,7 @@ pub(crate) async fn guard(
             };
             // Each on its own, so a slow lookup holds no other request.
             tokio::spawn(async move {
-                let allowed = decide(&url, paused).await;
+                let allowed = held.is_none() && decide(&url, paused).await;
                 // A form sent with a body (a file, say): where it went, never what.
                 if paused.top && !paused.answered && params["request"]["hasPostData"] == true {
                     let entries = params["request"]["postDataEntries"].as_array().map_or(0, Vec::len);
@@ -209,10 +214,16 @@ pub(crate) async fn guard(
                     let_through(&page, &request, &params, paused.saves_pdf()).await;
                 } else {
                     let parsed = url::Url::parse(&url);
-                    let manager = parsed.as_ref().is_ok_and(password_manager);
+                    let why = match held {
+                        Some(site) => Kept::Held(site),
+                        None if parsed.as_ref().is_ok_and(password_manager) => Kept::Manager,
+                        None => Kept::Fenced,
+                    };
                     let site = parsed.map(|url| url.origin().ascii_serialization()).unwrap_or_else(|_| short(&url));
-                    *crate::locking::lock(&blocked) = Some(Blocked { site, manager });
-                    let _ = page.call("Fetch.failRequest", json!({"requestId": request, "errorReason": "BlockedByClient"})).await;
+                    *crate::locking::lock(&blocked) = Some(Blocked { site, why });
+                    // Aborted, as a navigation the person stopped: the tab
+                    // stays on its page rather than Chrome's error page.
+                    let _ = page.call("Fetch.failRequest", json!({"requestId": request, "errorReason": "Aborted"})).await;
                 }
             });
         }
@@ -350,18 +361,32 @@ pub(crate) async fn decide(url: &str, paused: Paused) -> bool {
 pub(crate) struct Blocked {
     /// The site's origin.
     pub site: String,
+    pub why: Kept,
+}
+
+/// Why the fence kept the page from a site.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Kept {
+    /// Not a site on the internet over https.
+    Fenced,
     /// A web password manager's: a site on the internet all the same, so
     /// the line says why that one isn't.
-    pub manager: bool,
+    Manager,
+    /// The site of a check handed to the person, held for them.
+    Held(String),
 }
 
 impl Blocked {
     /// The line the agent reads.
     pub(crate) fn said(&self) -> String {
-        if self.manager {
-            return format!("Claktory kept the page from going to {}: {PASSWORD_MANAGERS}", self.site);
+        match &self.why {
+            Kept::Manager => format!("Claktory kept the page from going to {}: {PASSWORD_MANAGERS}", self.site),
+            Kept::Held(site) => format!(
+                "Claktory kept the page from going to {}: a check on {site} waits for the person in its own tab, so go there once they answer.",
+                self.site
+            ),
+            Kept::Fenced => format!("Claktory kept the page from going to {}: it isn't a site on the internet over https.", self.site),
         }
-        format!("Claktory kept the page from going to {}: it isn't a site on the internet over https.", self.site)
     }
 }
 
@@ -421,6 +446,14 @@ pub(crate) async fn fetch(page: &Page, address: &str) -> Result<(), (String, Str
 /// by whether the fence stopped anything.
 pub(crate) const BLOCKED: &str = "blocked";
 
+/// What `go` answers when the navigation was aborted: by the fence, which
+/// aborts what it stops so the tab stays on its page, or by something else
+/// (a download, another navigation); the step tells them apart.
+pub(crate) const ABORTED: &str = "aborted";
+
+/// Why `go` didn't get there, when the fence stopped it.
+pub(crate) const WENT_FENCED: &str = "it went to an address Claktory's browser doesn't go to, so Claktory stopped it";
+
 /// Why a page Safe Browsing flags doesn't open.
 pub(crate) const DANGEROUS: &str =
     "Chrome warns that this site is dangerous, so Claktory's browser won't open it. Don't look for another way to it.";
@@ -446,7 +479,10 @@ pub(crate) async fn go(page: &Page, address: &str) -> Result<Answer, (String, St
     page.forget();
     if let Some(error) = went["errorText"].as_str().filter(|error| !error.is_empty()) {
         if error.contains("BLOCKED_BY_CLIENT") {
-            return Err((BLOCKED.to_owned(), "it went to an address Claktory's browser doesn't go to, so Claktory stopped it".to_owned()));
+            return Err((BLOCKED.to_owned(), WENT_FENCED.to_owned()));
+        }
+        if error.contains("ERR_ABORTED") {
+            return Err((ABORTED.to_owned(), format!("the page didn't load ({})", schema::one_line(error, 100))));
         }
         return Err(("outcome_unknown".to_owned(), format!("the page didn't load ({})", schema::one_line(error, 100))));
     }
@@ -582,7 +618,7 @@ mod tests {
         let html = r#"<a href="https://localhost/steal">Continue</a>"#;
         let Some((_local, page, profile)) = crate::errands::reader::tests::page_with(html).await else { return };
         let blocked = Arc::new(Mutex::new(None));
-        guard(page.clone(), blocked.clone(), Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false))).await.unwrap();
+        guard(page.clone(), blocked.clone(), Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)), None).await.unwrap();
         let Ok(Answer::Page(read)) = page.read(4096).await else { panic!("a page") };
         let link = read.elements.iter().find(|element| element.name == "Continue").unwrap().reference.clone();
         // The reader says the link leaves; the browser's own click is stopped all the same.

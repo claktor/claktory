@@ -193,6 +193,7 @@ class MonitorRow extends StatefulWidget {
     required this.store,
     this.held = MonitorHeld.MONITOR_HELD_UNSPECIFIED,
     this.more,
+    this.opened = false,
   });
 
   final Monitor monitor;
@@ -206,12 +207,16 @@ class MonitorRow extends StatefulWidget {
   /// More under the prompt once it's open: the Monitors page's history.
   final WidgetBuilder? more;
 
+  /// Something opened its place at this monitor: it opens, as a click on
+  /// it would.
+  final bool opened;
+
   @override
   State<MonitorRow> createState() => _MonitorRowState();
 }
 
 class _MonitorRowState extends State<MonitorRow> {
-  var _open = false;
+  late var _open = widget.opened;
   var _busy = false;
 
   /// Why the last change was refused, until the monitor changes.
@@ -220,6 +225,7 @@ class _MonitorRowState extends State<MonitorRow> {
   @override
   void didUpdateWidget(MonitorRow old) {
     super.didUpdateWidget(old);
+    if (widget.opened && !old.opened) _open = true;
     if (old.monitor != widget.monitor) {
       _error = null;
       _busy = false;

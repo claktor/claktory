@@ -539,6 +539,11 @@ pub struct ProjectConfig {
     /// Map leaves it out, until it's unarchived.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub archived: bool,
+    /// The project's shared outcome, team and rules, in the system prompt
+    /// of every agent in it, above each one's own instructions. Empty adds
+    /// nothing.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub brief: String,
     /// Settings this version doesn't know, kept and written back as they
     /// were (`Unknown`).
     #[serde(flatten)]

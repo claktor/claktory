@@ -69,11 +69,11 @@ List<Pipe> pipesIn(Workspace workspace, String projectId) => [
 /// Claktory's; "the other side" before they've said.
 String pipePeerName(Pipe pipe, {bool start = false}) {
   final peer = pipe.peer;
-  // Their own words: what reorders text shows by its code (Fugo).
+  // Their own words: what reorders text shows by its code.
   if (peer.ownerName.isNotEmpty) return nameInText(peer.ownerName);
   if (peer.claktoryName.isNotEmpty) return nameInText(peer.claktoryName);
-  // At the start of a sentence, capitalized (Zucchero's row 175: a pipe
-  // whose invite isn't used yet has no name for them).
+  // At the start of a sentence, capitalized (a pipe whose invite isn't
+  // used yet has no name for them).
   return start ? 'The other side' : 'the other side';
 }
 
@@ -172,12 +172,12 @@ const pipeChooseLead =
 
 /// Where [pipe] stands, in a few words, for its sidebar row and header.
 /// With its [lead] ([pipeLead]), open and online: the lead's usage wait in
-/// place of "Online" (#343 U18), since nothing is answered meanwhile. Only
+/// place of "Online", since nothing is answered meanwhile. Only
 /// ever on this side: the wait's words never go to the other.
 String pipeStatus(Pipe pipe, {Agent? lead, DateTime? now}) {
   final who = pipePeerName(pipe);
   // Past its daily spending limit, the lead answers nothing from the other
-  // side until midnight (#357 L1).
+  // side until midnight.
   if (pipe.state == PipeState.PIPE_STATE_OPEN && pipeLeadOverLimit(lead)) {
     return pipeOverLimitLine;
   }
@@ -187,7 +187,7 @@ String pipeStatus(Pipe pipe, {Agent? lead, DateTime? now}) {
       lead.usageWait.isNotEmpty) {
     return liaisonWaitLine(lead, now: now ?? DateTime.now());
   }
-  // The other side's liaison waits (#343 U18): in our words, with this
+  // The other side's liaison waits: in our words, with this
   // side's own name for the pipe, never anything they wrote.
   if (pipe.state == PipeState.PIPE_STATE_OPEN &&
       pipe.online &&
@@ -236,7 +236,7 @@ Agent? pipeLead(Workspace workspace, Pipe pipe) {
   return null;
 }
 
-/// A pipe's lead [liaison] held up by its provider's usage (#343 U18): "Kai
+/// A pipe's lead [liaison] held up by its provider's usage: "Kai
 /// is waiting until Fri 18:00", or "Kai is waiting" when it waits for the
 /// person (out of credit, a sign-in).
 String liaisonWaitLine(Agent liaison, {required DateTime now}) {
@@ -517,7 +517,7 @@ class _PipeHeader extends StatelessWidget {
                     child: AgentCharacter(agent: liaison, size: 24, live: true),
                   ),
                 ],
-                // Always: Move to group… (#359), and the liaison's own.
+                // Always: Move to group…, and the liaison's own.
                 SizedBox(width: liaison == null ? Space.m : Space.xs),
                 GlyphButton(
                   label: 'More',
@@ -631,7 +631,7 @@ extension on _PipeHeader {
 }
 
 /// What can be done from the pipe's "…": on a phone, search the pipe;
-/// move it to a group (#359), or out of its own; with its liaison, its
+/// move it to a group, or out of its own; with its liaison, its
 /// settings, and clearing its conversation.
 Future<void> _pipeActions(
   BuildContext context,
@@ -790,7 +790,7 @@ String canRunCommandsText(int count) =>
 
 /// What a member that can run commands could do if the other side misled
 /// it, under its switch.
-/// [choice]: under the three-way choice of the pipe's settings (#414),
+/// [choice]: under the three-way choice of the pipe's settings,
 /// rather than a switch.
 String canRunCommandsWarning(String agent, Pipe pipe, {bool choice = false}) =>
     '$agent can run commands on this computer. If a message from '
@@ -1009,8 +1009,8 @@ class _ExplainedMark extends StatelessWidget {
 }
 
 /// Whether [pipe]'s other side is now confirmed as another account's, or
-/// no longer as its own, and waits for the person to trust it again
-/// (#471 G7); never for a closed pipe.
+/// no longer as its own, and waits for the person to trust it again;
+/// never for a closed pipe.
 bool pipeAccountChanged(Pipe pipe) =>
     pipe.state != PipeState.PIPE_STATE_CLOSED &&
     pipe.peer.identityChange ==
@@ -1043,7 +1043,7 @@ class _PipeIdentityNoticeState extends State<PipeIdentityNotice>
   var _busy = false;
   String? _error;
 
-  /// [rethrowing] for focus mode's keys (#514): refused, it throws too.
+  /// [rethrowing] for focus mode's keys: refused, it throws too.
   Future<void> _accept({bool rethrowing = false}) async {
     setState(() {
       _busy = true;
@@ -1059,7 +1059,7 @@ class _PipeIdentityNoticeState extends State<PipeIdentityNotice>
     }
   }
 
-  /// For focus mode's keys (#514): OK, or Trust this Claktory…, which asks
+  /// For focus mode's keys: OK, or Trust this Claktory…, which asks
   /// first, as its button does (never one key, FS14).
   @override
   CardAnswer? answerNow() {
@@ -1129,7 +1129,7 @@ class _PipeIdentityNoticeState extends State<PipeIdentityNotice>
     final (title, body, danger) = pipeIdentityNoticeText(pipe);
     if (title.isEmpty) return const SizedBox.shrink();
     // Accepting an outside Claktory's new key is the boundary itself: done
-    // on a phone or Mac (Fugo 51978; approve_elsewhere.dart).
+    // on a phone or Mac (approve_elsewhere.dart).
     final Widget action = approvesElsewhere
         ? const ApproveElsewhere()
         : danger
@@ -1179,8 +1179,8 @@ class _PipeIdentityNoticeState extends State<PipeIdentityNotice>
   }
 }
 
-/// Under a pipe's header while its lead is past its daily spending limit
-/// (#357 L1): that the other side's messages wait until midnight, and the
+/// Under a pipe's header while its lead is past its daily spending limit:
+/// that the other side's messages wait until midnight, and the
 /// limit, to raise it now. Nothing otherwise.
 class PipeSpendNotice extends StatefulWidget {
   const PipeSpendNotice({super.key, required this.pipe});
@@ -1278,7 +1278,7 @@ class _PipeSpendNoticeState extends State<PipeSpendNotice> {
               'midnight. Raise the limit to have $name answer now.',
               style: type.body.copyWith(color: palette.textMuted),
             ),
-            // Its limit is the person's (Fugo 52432).
+            // Its limit is the person's.
             if (approvesElsewhere)
               const ApproveElsewhere(text: pipeChangeElsewhereText),
             if (_error case final error?)
@@ -1425,7 +1425,7 @@ class _Waiting extends StatelessWidget {
                 PairingDigits(pipe.digits),
               ],
               const SizedBox(height: Space.xl),
-              // Closing it is the person's (Fugo 52432).
+              // Closing it is the person's.
               if (approvesElsewhere)
                 const ApproveElsewhere(text: pipeChangeElsewhereText)
               else
@@ -1463,8 +1463,8 @@ class _StateButton extends StatefulWidget {
   final String label;
   final bool primary;
 
-  /// The Needs you item it answers, as its yes for focus mode's keys
-  /// (#514): a paused pipe's Continue.
+  /// The Needs you item it answers, as its yes for focus mode's keys:
+  /// a paused pipe's Continue.
   final String? answers;
 
   @override
@@ -1475,7 +1475,7 @@ class _StateButtonState extends State<_StateButton> with PublishesAnswer {
   var _busy = false;
   String? _error;
 
-  /// [rethrowing] for focus mode's keys (#514): refused, it throws too.
+  /// [rethrowing] for focus mode's keys: refused, it throws too.
   Future<void> _run({bool rethrowing = false}) async {
     setState(() {
       _busy = true;
@@ -1509,7 +1509,7 @@ class _StateButtonState extends State<_StateButton> with PublishesAnswer {
   @override
   Widget build(BuildContext context) {
     publishAnswer();
-    // A pipe's state is the person's: never from Windows (Fugo 52432).
+    // A pipe's state is the person's: never from Windows.
     if (approvesElsewhere) return const SizedBox.shrink();
     final palette = Palette.of(context);
     return Row(
@@ -1551,7 +1551,7 @@ class PipeApprovalCard extends StatefulWidget {
   /// centred in the pipe's view.
   final bool inline;
 
-  /// An agent's card asking the person to approve [pipe] (#471 G1): the
+  /// An agent's card asking the person to approve [pipe]: the
   /// card starts from what the agent proposes, not the pipe's settings,
   /// and approves through that card. Null: the pipe's own approval.
   final PipeApprovalAsk? ask;
@@ -1560,14 +1560,14 @@ class PipeApprovalCard extends StatefulWidget {
   State<PipeApprovalCard> createState() => _PipeApprovalCardState();
 }
 
-/// An agent's card asking the person to approve a pipe (AskPerson's
-/// pipe_approval, #471 G1), as [PipeApprovalCard] shows it: what the
-/// agent proposes, each choice the person's to change, and the ask card's
-/// own answers, Dismiss and a reply (its comment field, [comment]).
 /// How wide an approval card's action line must be for its words to sit
 /// beside its buttons; narrower, they go above them.
 const _approvalBesideAt = 440.0;
 
+/// An agent's card asking the person to approve a pipe (AskPerson's
+/// pipe_approval), as [PipeApprovalCard] shows it: what the agent
+/// proposes, each choice the person's to change, and the ask card's own
+/// answers, Dismiss and a reply (its comment field, [comment]).
 class PipeApprovalAsk {
   const PipeApprovalAsk({
     required this.cardId,
@@ -1606,7 +1606,7 @@ class PipeApprovalAsk {
   final String? error;
 }
 
-/// An agent's card asking to approve a pipe (#471 G1), where the card's
+/// An agent's card asking to approve a pipe, where the card's
 /// answers go: the pipe's approval card started from what the agent
 /// proposes, while the pipe waits for approval; else why it can't be
 /// approved, with only Dismiss (Claktory also takes the card back).
@@ -1667,7 +1667,7 @@ class PipeApprovalAskView extends StatelessWidget {
 }
 
 /// An agent's card asking the person to accept a change in who's at a
-/// pipe's other end (AskPerson's pipe_trust, #471 G7), as
+/// pipe's other end (AskPerson's pipe_trust), as
 /// [PipeTrustAskView] shows it, with the ask card's own Dismiss and reply.
 class PipeTrustAsk {
   const PipeTrustAsk({
@@ -1699,7 +1699,7 @@ class PipeTrustAsk {
   final VoidCallback onReply;
 
   /// The agent's reason, as the ask card shows it: under Claktory's
-  /// warning, never above it (Fugo).
+  /// warning, never above it.
   final Widget? reason;
 
   /// The ask card is sending a Dismiss or a reply, or why it couldn't.
@@ -1708,7 +1708,7 @@ class PipeTrustAsk {
 }
 
 /// Where an agent's card asking to accept a change at a pipe's other end
-/// (#471 G7) is answered: who it was and who it is now, from the pipe as
+/// is answered: who it was and who it is now, from the pipe as
 /// Claktory has it (never from the card), Claktory's warning to check
 /// with them yourself, the agent's reason under it, then Dismiss and Trust
 /// (or OK, for a lapse or a new email). A pipe gone, or whose change
@@ -1839,7 +1839,7 @@ class _PipeTrustAskViewState extends State<PipeTrustAskView> {
                   'Their Claktory now signs in with a different account.',
                   style: type.body.copyWith(color: palette.text),
                 ),
-              // Claktory's warning, never the agent's word (Fugo).
+              // Claktory's warning, never the agent's word.
               Text(
                 'Check with $name yourself that this change is theirs.',
                 style: type.body.copyWith(
@@ -1864,14 +1864,13 @@ class _PipeTrustAskViewState extends State<PipeTrustAskView> {
             ],
           ),
         ),
-        // The agent's reason, under Claktory's warning (Fugo).
+        // The agent's reason, under Claktory's warning.
         if (ask.reason case final reason?) ...[
           const SizedBox(height: Space.s),
           reason,
         ],
         const SizedBox(height: Space.m),
-        // The field, open from the start, above the row (Lucy's rules 2
-        // and 4).
+        // The field, open from the start, above the row.
         CardAnswerBlock(
           field: (focus) => DecisionComment(
             controller: ask.comment,
@@ -1927,7 +1926,7 @@ class _PipeApprovalCardState extends State<PipeApprovalCard>
   /// turned it; else [_canRunByDefault].
   final _canRun = <String, bool>{};
 
-  /// The members that only send to it (#414): kept as the pipe (or the
+  /// The members that only send to it: kept as the pipe (or the
   /// agent's card) has them, shown as such, never the lead.
   final _sendOnly = <String>{};
 
@@ -1955,8 +1954,8 @@ class _PipeApprovalCardState extends State<PipeApprovalCard>
   String? _error;
 
   /// Whether the person changed the card: until then it shows the pipe's
-  /// settings as they are, set before approval (Rivet's settings card,
-  /// #470) or none yet, and follows them as they change.
+  /// settings as they are, set before approval (Rivet's settings card)
+  /// or none yet, and follows them as they change.
   var _touched = false;
 
   @override
@@ -1980,10 +1979,10 @@ class _PipeApprovalCardState extends State<PipeApprovalCard>
     if (typed != _typed && mounted) setState(() => _typed = typed);
   }
 
-  /// For focus mode's keys (#514), the pipe's own approval (an agent's card
+  /// For focus mode's keys, the pipe's own approval (an agent's card
   /// asking for it answers as that card): Decline, Submit once a comment's
   /// typed, and Approve, never from a key while there are digits to
-  /// compare (FS14, Fugo's rule C): then only the card's own button.
+  /// compare: then only the card's own button.
   @override
   CardAnswer? answerNow() {
     final pipe = widget.pipe;
@@ -2030,7 +2029,7 @@ class _PipeApprovalCardState extends State<PipeApprovalCard>
       return;
     }
     if (_settingsOf(widget.pipe) == _readFrom) return;
-    // Changed under the person's own changes (Fugo): read again, never
+    // Changed under the person's own changes: read again, never
     // approved over, and said, so they check it again.
     if (_touched) _changed = true;
     _touched = false;
@@ -2077,7 +2076,7 @@ class _PipeApprovalCardState extends State<PipeApprovalCard>
     _reviewOutgoing = pipe.reviewOutgoing;
   }
 
-  /// The card as an agent proposes it (#471 G1): its members, who of them
+  /// The card as an agent proposes it: its members, who of them
   /// can run commands (the others limited to the pipe), its lead or a new
   /// liaison of the name it gives, the reviews and who only sends.
   void _readProposal(PipeApprovalProposal proposal) {
@@ -2103,7 +2102,7 @@ class _PipeApprovalCardState extends State<PipeApprovalCard>
   }
 
   /// An agent's card: the choices wider than the pipe is now where the
-  /// pipe narrowed since the card was asked (Fugo): a member taken out,
+  /// pipe narrowed since the card was asked: a member taken out,
   /// limited to the pipe or made to only send, a review turned on.
   Set<String> _wider() {
     final then = _askedFrom;
@@ -2137,7 +2136,7 @@ class _PipeApprovalCardState extends State<PipeApprovalCard>
     change();
   });
 
-  /// Who the last reply went to (#370), said until the next decision.
+  /// Who the last reply went to, said until the next decision.
   String? _sentTo;
 
   /// The person's comment, for this side's lead with either answer; never
@@ -2207,7 +2206,7 @@ class _PipeApprovalCardState extends State<PipeApprovalCard>
           reviewIncoming: approve ? _reviewIncoming : null,
           reviewOutgoing: approve ? _reviewOutgoing : null,
           comment: noComment(reason, _commentField.text),
-          // From an agent's card (#471 G1): approved through it.
+          // From an agent's card: approved through it.
           cardId: widget.ask?.cardId,
         ),
       );
@@ -2220,7 +2219,7 @@ class _PipeApprovalCardState extends State<PipeApprovalCard>
   }
 
   /// The comment to [agent] (Pipe.reply_agent_id), as a reply: nothing
-  /// approved or declined, the pipe still waiting (#370).
+  /// approved or declined, the pipe still waiting.
   Future<void> _reply(String agent, {bool rethrowing = false}) async {
     setState(() {
       _busy = true;
@@ -2273,7 +2272,7 @@ class _PipeApprovalCardState extends State<PipeApprovalCard>
         ? null
         : store.agent(pipe.replyAgentId)?.name ?? 'Your agent';
     // An agent's card: the pipe changed since it asked, and what of the
-    // card is wider than the pipe now (Fugo).
+    // card is wider than the pipe now.
     final askedFrom = _askedFrom;
     final pipeChanged =
         ask != null &&
@@ -2289,7 +2288,7 @@ class _PipeApprovalCardState extends State<PipeApprovalCard>
         if (!inProject.contains(id)) ?store.agent(id),
     ];
     // Their words, on a card to decide on: what reorders text shows by
-    // its code (proseCodes, Fugo).
+    // its code (proseCodes).
     final who = [
       if (peer.ownerName.isNotEmpty) proseCodes(peer.ownerName),
       if (peer.ownerEmail.isNotEmpty) proseCodes(peer.ownerEmail),
@@ -2308,7 +2307,7 @@ class _PipeApprovalCardState extends State<PipeApprovalCard>
         children: [
           // Who, and the Verified mark beside it while both fit; on a
           // narrow card (a phone's Needs you) the mark goes under, so the
-          // words keep their line (Zucchero's row 535).
+          // words keep their line.
           Wrap(
             crossAxisAlignment: WrapCrossAlignment.center,
             spacing: Space.s,
@@ -2369,7 +2368,7 @@ class _PipeApprovalCardState extends State<PipeApprovalCard>
             const SizedBox(height: Space.xs),
             Text(
               ask != null
-                  // Never on an agent's word (Fugo, #471).
+                  // Never on an agent's word.
                   ? 'Compare these with ${pipePeerName(pipe)} yourself, by '
                         "voice or in person. Don't approve because an agent "
                         'says they match.'
@@ -2492,7 +2491,7 @@ class _PipeApprovalCardState extends State<PipeApprovalCard>
                 style: TextStyles.body.copyWith(color: palette.textMuted),
               ),
             ),
-          // The field first, open from the start (Lucy's rule 4).
+          // The field first, open from the start.
           // Approved, the lead chosen here hears it; declined, the agent
           // that set the pipe up (or Rivet): only this side's agents.
           DecisionComment(
@@ -2508,7 +2507,7 @@ class _PipeApprovalCardState extends State<PipeApprovalCard>
           ),
           const SizedBox(height: Space.s),
           // A comment typed, with someone to hear it: one Submit, the
-          // pipe still waiting (#370).
+          // pipe still waiting.
           CommentTyped(
             controller: _commentField,
             builder: (context, typed) {
@@ -2580,7 +2579,7 @@ class _PipeApprovalCardState extends State<PipeApprovalCard>
                 ],
               );
               // Words beside the buttons while they keep a line's worth of
-              // room; narrower, above them, whole (Zucchero's row 535).
+              // room; narrower, above them, whole.
               return LayoutBuilder(
                 builder: (context, box) {
                   // The note in place of the buttons goes under the words
@@ -2876,8 +2875,7 @@ class _PipeChatViewState extends State<_PipeChatView> {
                 widget.pipe.state != PipeState.PIPE_STATE_OPEN
                     ? ''
                     : widget.pipe.leadId.isEmpty
-                    // No lead: no agent hears what comes in (Abbacchio's
-                    // row 638).
+                    // No lead: no agent hears what comes in.
                     ? 'Nothing here yet. No agent hears what comes in until '
                           'you choose a lead in the pipe’s settings. You can '
                           'write here too.'
@@ -2982,7 +2980,7 @@ class _PipeMessageViewState extends State<PipeMessageView>
     if (typed != _typed && mounted) setState(() => _typed = typed);
   }
 
-  /// For focus mode's keys (#514), a held message: Send (Let in), Discard,
+  /// For focus mode's keys, a held message: Send (Let in), Discard,
   /// and Submit once a comment's typed on an agent's, as its buttons.
   @override
   CardAnswer? answerNow() {
@@ -3027,7 +3025,7 @@ class _PipeMessageViewState extends State<PipeMessageView>
   }
 
   /// Sends it (lets it in), or discards it; [reply], on one of this
-  /// side's agents' (#370), sends it back unsent to its writer with the
+  /// side's agents', sends it back unsent to its writer with the
   /// comment, to write again. [reason]: the no's, from focus mode's dock,
   /// with the comment; [rethrowing] for its keys: refused, it throws too.
   Future<void> _decide(
@@ -3063,7 +3061,7 @@ class _PipeMessageViewState extends State<PipeMessageView>
     final message = widget.message;
     final author = message.author;
     // The other side's words, and what an agent wrote: what reorders text
-    // shows by its code (proseCodes, Fugo).
+    // shows by its code (proseCodes).
     final text = proseCodes(message.text);
     final name = proseCodes(author.name);
     final role = proseCodes(author.role);
@@ -3342,7 +3340,7 @@ class _PipeMessageViewState extends State<PipeMessageView>
     if (decide != null) {
       final held = message.state == PipeMessageState.PIPE_MESSAGE_STATE_HELD;
       // Sending, letting in or discarding it is the person's, from a phone
-      // or Mac (DecidePipeMessage, Fugo 52031; approve_elsewhere.dart).
+      // or Mac (DecidePipeMessage; approve_elsewhere.dart).
       if (approvesElsewhere) {
         return Column(
           crossAxisAlignment: held && !start
@@ -3379,7 +3377,7 @@ class _PipeMessageViewState extends State<PipeMessageView>
         ],
       );
       // An agent's held message with a comment typed: one Submit, which
-      // sends it back unsent (#370). The other side's keeps Discard and
+      // sends it back unsent. The other side's keeps Discard and
       // Let in: its lead reads it once it's in.
       final replies = held && hearer != null;
       return Column(
@@ -3399,7 +3397,7 @@ class _PipeMessageViewState extends State<PipeMessageView>
           ),
           if (_error case final error?) line(error, color: palette.danger),
           const SizedBox(height: Space.xs),
-          // The field first, open from the start (Lucy's rule 4).
+          // The field first, open from the start.
           if (hearer != null)
             DecisionComment(
               controller: _comment,
@@ -3444,7 +3442,7 @@ class _PipeMessageViewState extends State<PipeMessageView>
         note.isEmpty ? 'Not sent · $time' : 'Not sent: $note · $time',
         color: palette.danger,
       ),
-      // Sent back to its writer with the person's comment (#370).
+      // Sent back to its writer with the person's comment.
       PipeMessageState.PIPE_MESSAGE_STATE_DISCARDED when message.replied =>
         line(
           note.isEmpty
@@ -3475,7 +3473,7 @@ class _PipeFoot extends StatelessWidget {
   Widget build(BuildContext context) {
     final foot = pipe.state != PipeState.PIPE_STATE_OPEN
         ? pipeStateBar(context, pipe) ?? const SizedBox.shrink()
-        // What the person writes in it is theirs (Fugo 52432).
+        // What the person writes in it is theirs.
         : approvesElsewhere
         ? _ReadOnlyFoot()
         : _PipeComposer(pipe: pipe);
@@ -3510,8 +3508,8 @@ class _ReadOnlyFoot extends StatelessWidget {
 Widget? pipeStateBar(BuildContext context, Pipe pipe) {
   final palette = Palette.of(context);
   final who = pipePeerName(pipe, start: true);
-  // On Windows its Continue, Resume and Delete… are the person's (Fugo
-  // 52432): the bar says where they're done instead.
+  // On Windows its Continue, Resume and Delete… are the person's: the
+  // bar says where they're done instead.
   Widget bar(String text, List<Widget> actions) => Container(
     padding: const EdgeInsets.fromLTRB(Space.xl, Space.m, Space.xl, Space.m),
     decoration: BoxDecoration(
@@ -3805,7 +3803,7 @@ class _PipeSettingsFormState extends State<PipeSettingsForm> {
   /// has them.
   late final _limited = {..._start.quarantinedIds};
 
-  /// The members that only send to it (Pipe.send_only_ids, #414), as the
+  /// The members that only send to it (Pipe.send_only_ids), as the
   /// form has them.
   late final _sendOnly = {..._start.sendOnlyIds};
 
@@ -4005,8 +4003,7 @@ class _PipeSettingsFormState extends State<PipeSettingsForm> {
       }
     }
     // An ask over the settings keeps them as they were beneath it (where
-    // they're scrolled to, what's typed), for Cancel to come back to
-    // (Sale's row 77).
+    // they're scrolled to, what's typed), for Cancel to come back to.
     Widget? over;
     if (_confirmingClose) {
       over = FormFrame(
@@ -4076,7 +4073,7 @@ class _PipeSettingsFormState extends State<PipeSettingsForm> {
 
   Widget _settings(Pipe pipe) {
     final agents = AppScope.of(context).workspace.agentsIn(pipe.projectId);
-    // From outside its project, only to send (#414): the workspace's own
+    // From outside its project, only to send: the workspace's own
     // agents (Rivet among them), and any such member already.
     final outside = [
       for (final agent in AppScope.of(context).workspace.workspace.agents)
@@ -4331,14 +4328,14 @@ class _PipeSettingsFormState extends State<PipeSettingsForm> {
           ),
         ),
     ];
-    // On Windows a pipe's settings are the person's (Fugo 52432): shown as
+    // On Windows a pipe's settings are the person's: shown as
     // they are, for reading, with nothing to change, save, pause or close.
     if (approvesElsewhere) {
       return FormFrame(
         title: 'Pipe settings',
         body: pipeChangeElsewhereText,
         error: null,
-        // As every read-only form (Polnareff 52638): Close would read as
+        // As every read-only form: Close would read as
         // Close pipe…, the very act it can't do.
         submitLabel: 'Done',
         onSubmit: widget.close,
@@ -4438,8 +4435,8 @@ class _CommandsLine extends StatelessWidget {
   }
 }
 
-/// Under a member's line on the approval card: it only sends to the pipe
-/// (#414), kept as it's set, with what that leaves out.
+/// Under a member's line on the approval card: it only sends to the pipe,
+/// kept as it's set, with what that leaves out.
 class _SendOnlyLine extends StatelessWidget {
   const _SendOnlyLine({required this.agent, required this.pipe});
 
@@ -4473,7 +4470,7 @@ class _SendOnlyLine extends StatelessWidget {
 }
 
 /// A choice on an agent's approval card that's wider than the pipe now,
-/// where the pipe narrowed since the agent asked (Fugo, #471): in the
+/// where the pipe narrowed since the agent asked: in the
 /// consent cards' warning box, with what changed under it. [note] null:
 /// just [child].
 class _Narrowed extends StatelessWidget {
@@ -4514,7 +4511,7 @@ class _Narrowed extends StatelessWidget {
 }
 
 /// Why [agentId] can't use [pipe] in any role, as Claktory says it: it's
-/// another pipe's liaison (#414, Pipe.held_agents). Null when it can.
+/// another pipe's liaison (Pipe.held_agents). Null when it can.
 String? pipeHeldReason(Pipe pipe, String agentId) {
   for (final held in pipe.heldAgents) {
     if (held.agentId == agentId) return proseCodes(held.reason);
@@ -4522,7 +4519,7 @@ String? pipeHeldReason(Pipe pipe, String agentId) {
   return null;
 }
 
-/// What a member of a pipe may do (#414): read it and run commands on this
+/// What a member of a pipe may do: read it and run commands on this
 /// computer, read it limited to the pipe, or only send to it.
 enum PipeAccess { commands, limited, sendOnly }
 
@@ -4618,7 +4615,7 @@ class _MemberLine extends StatelessWidget {
   final bool value;
   final ValueChanged<bool> onChanged;
 
-  /// Why it can't use the pipe (#414, [pipeHeldReason]): its switch is off
+  /// Why it can't use the pipe ([pipeHeldReason]): its switch is off
   /// and can't be turned on, with why under its name.
   final String? held;
 
@@ -4807,7 +4804,7 @@ class _ConnectPipeFormState extends State<ConnectPipeForm> {
   /// The invite's code shows as a QR too, to scan in person.
   var _qr = false;
 
-  /// A code can be scanned here, with the camera (friend bug #2).
+  /// A code can be scanned here, with the camera.
   var _canScan = false;
   var _busy = false;
   String? _error;
@@ -4979,7 +4976,7 @@ class _ConnectPipeFormState extends State<ConnectPipeForm> {
           // Copy code where Make invite was, and Done (which opens the
           // pipe) at the other end: a second tap on Make invite, as the
           // invite was being made, copies the code rather than closing it
-          // unseen (Zucchero's row 157). It shows only this once.
+          // unseen. It shows only this once.
           submitLabel: _copied ? 'Copied' : 'Copy code',
           onSubmit: () async {
             final pipe = AppScope.of(context).workspace.workspace.pipes
@@ -5151,7 +5148,7 @@ class _SecretApprovalCardState extends State<SecretApprovalCard>
     super.dispose();
   }
 
-  /// Allow once and Don't allow for focus mode's keys (#514), and Submit
+  /// Allow once and Don't allow for focus mode's keys, and Submit
   /// once a comment's typed, as the card's buttons.
   @override
   CardAnswer? answerNow() {
@@ -5184,7 +5181,7 @@ class _SecretApprovalCardState extends State<SecretApprovalCard>
 
   /// The web pages [name] read ("a page on https://example.com", "3 web
   /// pages"); empty when it read none. A pipe or direct messages, on a card
-  /// from before #346, no longer count.
+  /// from an older version, no longer count.
   String _read() {
     final pages = taintPages(widget.approval.taint);
     if (pages.isEmpty) return '';
@@ -5211,7 +5208,7 @@ class _SecretApprovalCardState extends State<SecretApprovalCard>
         : '${set[0].toUpperCase()}${set.substring(1)}. $expect';
   }
 
-  /// Allows it once or doesn't; [reply] (#370) doesn't, sending the
+  /// Allows it once or doesn't; [reply] doesn't, sending the
   /// comment as the answer. [reason]: the no's, from focus mode's dock,
   /// with the comment; [rethrowing] for its keys: refused, it throws too.
   Future<void> _decide(
@@ -5297,7 +5294,7 @@ class _SecretApprovalCardState extends State<SecretApprovalCard>
               borderRadius: BorderRadius.circular(Radii.control),
             ),
             // The command to approve, as tool calls show it: every hidden
-            // character by its code (Fugo).
+            // character by its code.
             child: Text(
               visibleCodes(approval.command),
               style: TextStyles.caption.copyWith(
@@ -5317,9 +5314,8 @@ class _SecretApprovalCardState extends State<SecretApprovalCard>
           ],
           const SizedBox(height: Space.m),
           if (pending) ...[
-            // The field, open from the start, above the row (Lucy's rules
-            // 2 and 4); a comment typed: one Submit, which doesn't allow it
-            // (#370).
+            // The field, open from the start, above the row; a comment
+            // typed: one Submit, which doesn't allow it.
             CardAnswerBlock(
               field: (focus) => DecisionComment(
                 controller: _comment,
@@ -5389,7 +5385,7 @@ class _SecretApprovalCardState extends State<SecretApprovalCard>
                             fontWeight: FontWeight.w500,
                           ),
                         ),
-                        // Not allowed with a comment (#370): the comment.
+                        // Not allowed with a comment: the comment.
                         if (approval.replied && approval.comment.isNotEmpty)
                           TextSpan(
                             text: ' · “${approval.comment}”',

@@ -35,6 +35,50 @@ pub fn b64(bytes: &[u8]) -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
+/// The test account service's signing key: every DM test's service signs
+/// with it, so a device can show the assertion its app shows (E11-8 point
+/// 6: its DM requests go only under the account key it was let in with).
+pub const SERVICE_KEY: [u8; 32] = [0x5e; 32];
+
+/// What the service gives an app signed in to `account` with
+/// `account_key`, for tunnel key `device_key`.
+pub fn assertion(account: &str, account_key: &str, device_key: &str) -> String {
+    let now = jiff::Timestamp::now().as_second();
+    let said = claktory_account::protocol::DeviceAssertion {
+        v: 1,
+        account_id: account.to_owned(),
+        account_key: account_key.to_owned(),
+        device_key: device_key.to_owned(),
+        iat: now,
+        exp: now + 3600,
+    };
+    claktory_account::protocol::sign_device_assertion(&ed25519_dalek::SigningKey::from_bytes(&SERVICE_KEY), &said)
+}
+
+/// An app connected to the Claktory at `addr` as the person, signed in to
+/// `account` with `account_key`: its DM requests go under that leaf.
+pub async fn link_as(addr: std::net::SocketAddr, account: &str, account_key: &str) -> Client {
+    let mut client = Client::open(addr).await;
+    let hello = v1::Hello {
+        protocol_version: factory_protocol::PROTOCOL_VERSION,
+        client_version: "test".into(),
+        token: super::common::local_token(addr),
+        assertion: assertion(account, account_key, ""),
+        ..Default::default()
+    };
+    client.send(v1::ClientMessage { id: 1, body: Some(Request::Hello(hello)) }).await;
+    client.welcomed().await;
+    client
+}
+
+/// Secrets for a test account service signing with [SERVICE_KEY].
+pub fn service_secrets() -> claktory_account::server::Secrets {
+    claktory_account::server::Secrets {
+        signing_key: ed25519_dalek::SigningKey::from_bytes(&SERVICE_KEY),
+        ..claktory_account::server::Secrets::generate()
+    }
+}
+
 /// One of the person's devices.
 pub struct Device {
     /// Where the worker's socket is.
@@ -480,10 +524,22 @@ impl Device {
         (bytes, id)
     }
 
+    /// What the service gives this device's app, signed in to its account
+    /// with its account key (its leaf id), for tunnel key `device_key`.
+    pub fn assertion(&self, device_key: &str) -> String {
+        assertion(&self.account, &self.device_key, device_key)
+    }
+
+    /// This device's app connected to the Claktory at `addr`, as the
+    /// person, with its assertion: its DM requests go under its own leaf.
+    pub async fn link(&self, addr: std::net::SocketAddr) -> Client {
+        link_as(addr, &self.account, &self.device_key).await
+    }
+
     /// One DmSend to the person's home, whatever it answers: its receipt.
     pub async fn send_once(&self, group_id: &str, bytes: Vec<u8>, client_message_id: &str) -> v1::DmReceipt {
         let addr = self.home_addr().expect("a home to send through");
-        let (mut client, _, _) = Client::connect(addr).await;
+        let mut client = self.link(addr).await;
         let request = v1::DmSend {
             group_id: URL_SAFE_NO_PAD.decode(group_id).expect("an id"),
             envelope: bytes,
@@ -519,12 +575,16 @@ impl Device {
     }
 
     /// DmSend to the person's home: its seq there. Waits while the home
-    /// isn't it yet, holds it, or limits it; `wait: false` gives up then.
+    /// isn't it yet, holds it, or limits it, or holds a group whose device
+    /// is off the list the home has (one just added, before the home reads
+    /// the newest list; a device with something to take out takes it out
+    /// first), or doesn't list this device yet (just added); `wait: false`
+    /// gives up then.
     async fn to_home(&self, group_id: &str, bytes: Vec<u8>, client_message_id: &str, wait: bool) -> i64 {
         let addr = self.home_addr().expect("a home to send through");
         let group = URL_SAFE_NO_PAD.decode(group_id).expect("an id");
         let deadline = std::time::Instant::now() + PATIENCE;
-        let (mut client, _, _) = Client::connect(addr).await;
+        let mut client = self.link(addr).await;
         loop {
             let request = v1::DmSend {
                 group_id: group.clone(),
@@ -539,7 +599,12 @@ impl Device {
             let result = v1::DmSendResult::try_from(receipt.result).expect("a result");
             match result {
                 v1::DmSendResult::Stored | v1::DmSendResult::Duplicate => return receipt.seq as i64,
-                v1::DmSendResult::NotHome | v1::DmSendResult::Held | v1::DmSendResult::WaitingForFriend | v1::DmSendResult::RateLimited
+                v1::DmSendResult::NotHome
+                | v1::DmSendResult::Held
+                | v1::DmSendResult::WaitingForFriend
+                | v1::DmSendResult::RateLimited
+                | v1::DmSendResult::RemovedDeviceInGroup
+                | v1::DmSendResult::NotListed
                     if wait =>
                 {
                     assert!(std::time::Instant::now() < deadline, "the home never took it: {result:?}");
@@ -557,7 +622,7 @@ impl Device {
     pub async fn home_epoch(&self, group_id: &str) -> Option<u64> {
         let addr = self.home_addr()?;
         let group = URL_SAFE_NO_PAD.decode(group_id).expect("an id");
-        let (mut client, _, _) = Client::connect(addr).await;
+        let mut client = self.link(addr).await;
         let after = self.positions.get(group_id).copied().unwrap_or(0).max(0) as u64;
         let request =
             v1::DmFollow { leaf_id: self.device_key.clone(), cursors: vec![v1::DmCursor { group_id: group.clone(), seq: after }] };
@@ -573,7 +638,7 @@ impl Device {
         let addr = self.home_addr().expect("a home");
         let group = URL_SAFE_NO_PAD.decode(group_id).expect("an id");
         let through = self.positions.get(group_id).copied().unwrap_or(0).max(0) as u64;
-        let (mut client, _, _) = Client::connect(addr).await;
+        let mut client = self.link(addr).await;
         let request = v1::DmAck { leaf_id: self.device_key.clone(), through: vec![v1::DmCursor { group_id: group, seq: through }] };
         client.ok(Request::DmAck(request)).await;
     }
@@ -604,7 +669,7 @@ impl Device {
         self.routes.retain(|route| route.account_id != friend.account);
         self.routes.push(v1::DmRoute { account_id: friend.account.clone(), home_endpoint: endpoint.to_vec(), group_ids });
         let addr = self.home_addr().expect("a home");
-        let (mut client, _, _) = Client::connect(addr).await;
+        let mut client = self.link(addr).await;
         match client.request(Request::DmRoutes(v1::DmRoutes { routes: self.routes.clone() })).await.body {
             Body::DmHome(_) => {}
             other => panic!("the routes weren't taken: {other:?}"),
@@ -613,11 +678,24 @@ impl Device {
 
     /// Tells the channel's Claktory what this device pinned.
     pub async fn share_pins(&self, channel: &str, n: u32) -> i64 {
+        self.say(channel, &self.pins_content(n)).await
+    }
+
+    /// What `share_pins` says, sealed and not sent: its bytes and id.
+    pub fn seal_pins(&self, channel: &str, n: u32) -> (Vec<u8>, String) {
+        let pins = self.pins_content(n);
+        let bytes = self.with(|provider, me| {
+            self.load(provider, channel).send(provider, me, &self.pins, &pins.encode().expect("encoded")).expect("sent")
+        });
+        (bytes, pins.client_message_id)
+    }
+
+    fn pins_content(&self, n: u32) -> Content {
         let mut pins = Content::text(&format!("pins-{n:020}"), "");
         pins.kind = content::kind::PINS.to_owned();
         pins.text = None;
         pins.extra.insert("pins".to_owned(), serde_json::to_value(&self.pins).expect("pins"));
-        self.say(channel, &pins).await
+        pins
     }
 
     /// Joins the groups waiting for this device: their ids.
@@ -742,7 +820,7 @@ impl Device {
     /// the first answer, then the pages it pushes until none are left.
     async fn follow(&self, addr: std::net::SocketAddr, group_id: &str, after: i64) -> Vec<v1::DmEntry> {
         let group = URL_SAFE_NO_PAD.decode(group_id).expect("an id");
-        let (mut client, _, _) = Client::connect(addr).await;
+        let mut client = self.link(addr).await;
         let cursors = vec![v1::DmCursor { group_id: group.clone(), seq: after.max(0) as u64 }];
         let request = v1::DmFollow { leaf_id: self.device_key.clone(), cursors };
         let mut feed = match client.request(Request::DmFollow(request)).await.body {

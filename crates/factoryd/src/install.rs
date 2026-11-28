@@ -74,7 +74,7 @@ pub(crate) enum Outcome {
 }
 
 impl Outcome {
-    fn exit_code(self) -> u8 {
+    pub(crate) fn exit_code(self) -> u8 {
         match self {
             Outcome::Installed => 0,
             Outcome::Failed => 1,
@@ -106,11 +106,23 @@ pub(crate) struct Report {
     /// it stopped; false when the app quitting did.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) held: Option<bool>,
+    /// (Windows) Whether it starts when the person signs in to Windows, as
+    /// they last chose, whatever `held` says now.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) starts_at_sign_in: Option<bool>,
 }
 
 impl Report {
-    fn new(result: Outcome, reason: &str, detail: impl Into<String>) -> Report {
-        Report { result, reason: reason.to_owned(), detail: detail.into(), version: crate::update::VERSION, running: None, held: None }
+    pub(crate) fn new(result: Outcome, reason: &str, detail: impl Into<String>) -> Report {
+        Report {
+            result,
+            reason: reason.to_owned(),
+            detail: detail.into(),
+            version: crate::update::VERSION,
+            running: None,
+            held: None,
+            starts_at_sign_in: None,
+        }
     }
 }
 
@@ -1051,6 +1063,11 @@ mod tests {
         let label = format!("dev.factory.stoptest-{}", std::process::id());
         let home = Home::new(dir.join("home"));
         let port = 7435;
+        let person: String = {
+            let mut bytes = [0_u8; 32];
+            getrandom::fill(&mut bytes).expect("random numbers");
+            bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+        };
         let domain = format!("gui/{}", unsafe { libc::getuid() });
         let service = format!("{domain}/{label}");
         let agents = std::env::home_dir().expect("home").join("Library/LaunchAgents");
@@ -1070,6 +1087,9 @@ mod tests {
                 ("FACTORY_HOME".into(), home.root().to_string_lossy().into_owned()),
                 ("FACTORY_PORT".into(), port.to_string()),
                 ("FACTORY_SERVICE_LABEL".into(), label.clone()),
+                // The app's authority on the loopback port, which a
+                // backend built for the tests takes.
+                ("FACTORY_TEST_PERSON_TOKEN".into(), person.clone()),
             ],
         };
         let disabled = || {
@@ -1077,19 +1097,11 @@ mod tests {
             String::from_utf8_lossy(&out).lines().any(|line| line.contains(&format!("\"{label}\" => disabled")))
         };
         let loaded = || Command::new("/bin/launchctl").args(["print", &service]).output().is_ok_and(|out| out.status.success());
-        // The app's request, over the loopback port with this home's token.
+        // The app's request, over the loopback port with the person's token
+        // the backend was given.
         let ask = |request: Request| {
-            let home = home.clone();
+            let token = person.clone();
             async move {
-                let pairing = home.root().join("remote/local-pairing");
-                for _ in 0..100 {
-                    if pairing.exists() {
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-                let code = std::fs::read_to_string(&pairing).expect("pairing");
-                let token = code.trim().split(['?', '&']).find_map(|part| part.strip_prefix("t=")).expect("token").to_owned();
                 let stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.expect("connect");
                 let (mut socket, _) = tokio_tungstenite::client_async(format!("ws://127.0.0.1:{port}"), stream).await.expect("ws");
                 let hello = v1::Hello { protocol_version: factory_protocol::PROTOCOL_VERSION, token, ..Default::default() };

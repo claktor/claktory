@@ -1,4 +1,4 @@
-//! The Settings extension (#422): an admin agent reads and changes the
+//! The Settings extension: an admin agent reads and changes the
 //! settings kept in factory.db through the app's own paths; an agent that
 //! isn't an admin has no such tool, even with the extension on.
 
@@ -142,7 +142,7 @@ async fn an_admin_agent_reads_and_changes_the_settings_kept_in_the_database_as_t
     assert!(matches!(refused.body, Body::Error(_)), "{:?}", refused.body);
 
     // After reading a web page it still reads them, but changes nothing
-    // (Fugo, as for agents_stop).
+    // (as for agents_stop).
     factoryd::pipes::taint_for_test(&factory, "rivet", "browser:https://example.com");
     let refused = call(&mut client, &mut view, "rivet", "settings", serde_json::json!({"diagnostics": true})).await;
     assert_eq!(

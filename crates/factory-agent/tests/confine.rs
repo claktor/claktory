@@ -1,6 +1,6 @@
-//! Agents' commands run under what the embedder says (`tools::confine`,
-//! #435 (d)): the shell's in the foreground and the background alike. A
-//! file of its own, since the rule is the whole process's.
+//! Agents' commands run under what the embedder says
+//! (`tools::confine`): the shell's in the foreground and the background
+//! alike. A file of its own, since the rule is the whole process's.
 
 #![cfg(target_os = "macos")]
 

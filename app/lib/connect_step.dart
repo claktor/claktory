@@ -13,6 +13,7 @@ import 'name_step.dart' show StepCard;
 import 'pasted_code.dart';
 import 'rail.dart' show ClaktoriesScope;
 import 'scope.dart';
+import 'setup.dart' show thisComputer;
 import 'your_claktories.dart' show YourClaktories;
 
 /// Whether the window asks to connect to a Claktory: this Mac has none of
@@ -173,7 +174,7 @@ class _ConnectStepState extends State<ConnectStep> {
                   ),
                   if (claktories != null && claktories.canChooseLocal)
                     Button(
-                      label: 'Set up Claktory on this Mac',
+                      label: 'Set up Claktory on $thisComputer',
                       onPressed: () => claktories.setLocalBackend(true),
                     ),
                   Button(

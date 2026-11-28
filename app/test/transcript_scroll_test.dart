@@ -244,6 +244,86 @@ void main() {
     await _stream(tester, store, 1039, 20);
   });
 
+  testWidgets('earlier pages loaded while scrolled up count as nothing '
+      'new: only replies that arrive after are counted', (tester) async {
+    final store = _store(1000, 1050, hasEarlier: true);
+    var next = 1000;
+    await _show(
+      tester,
+      store,
+      loadEarlier: () async {
+        final from = next - 50;
+        store.prepend('a', [
+          for (var i = from; i < next; i++) _reply(i),
+        ], hasEarlier: from > 0);
+        next = from;
+      },
+    );
+    for (var i = 0; i < 30 && next == 1000; i++) {
+      await tester.drag(find.byType(CustomScrollView), const Offset(0, 800));
+      await tester.pump();
+      await tester.pump();
+    }
+    await tester.pumpAndSettle();
+    expect(next, lessThan(1000), reason: 'pages came in');
+    expect(find.textContaining('new'), findsNothing);
+    expect(find.bySemanticsLabel('Go to the latest message'), findsOneWidget);
+
+    for (var seq = 1050; seq < 1052; seq++) {
+      store.update(EntryUpdate(agentId: 'a', entry: _reply(seq)));
+      await tester.pump(const Duration(milliseconds: 16));
+    }
+    await tester.pumpAndSettle();
+    expect(find.text('2 new'), findsOneWidget);
+  });
+
+  testWidgets('a first page shorter than the window: earlier pages load '
+      'only until the view has its margin above, and it opens at the latest, '
+      'following', (tester) async {
+    final store = TranscriptStore()
+      ..load(
+        Transcript(
+          agentId: 'a',
+          entries: [_reply(1000), _reply(1001)],
+          hasEarlier: true,
+        ),
+      );
+    var next = 1000;
+    var pages = 0;
+    await _show(
+      tester,
+      store,
+      loadEarlier: () async {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+        pages++;
+        final from = next - 2;
+        store.prepend('a', [
+          for (var i = from; i < next; i++) _reply(i),
+        ], hasEarlier: from > 0);
+        next = from;
+      },
+    );
+    for (var frame = 0; frame < 300; frame++) {
+      await tester.pump(const Duration(milliseconds: 16));
+    }
+    expect(pages, greaterThan(0), reason: 'earlier pages came in');
+    // Some 2,000 pixels of replies, not all 500 pages.
+    expect(pages, lessThan(40));
+    expect(_bottomOf(tester, 1001), lessThanOrEqualTo(_height));
+    expect(_bottomOf(tester, 1001), greaterThan(_height - 60));
+    expect(find.textContaining('new'), findsNothing);
+    final latest = tester.widget<IgnorePointer>(
+      find
+          .ancestor(
+            of: find.byKey(const ValueKey('latest')),
+            matching: find.byType(IgnorePointer),
+          )
+          .first,
+    );
+    expect(latest.ignoring, isTrue, reason: 'following, no Latest');
+    await _stream(tester, store, 1001, 5);
+  });
+
   testWidgets('a resized window keeps the bottom while following', (
     tester,
   ) async {

@@ -8,6 +8,8 @@ import 'avatar.dart';
 import 'backend.dart';
 import 'card_answer.dart' show CardAnswer, PublishesAnswer;
 import 'characters/character.dart';
+import 'claktory_identity.dart' show claktoryName;
+import 'connections.dart' show thisMacName;
 import 'controls.dart';
 import 'devices.dart' show PairingInstructions, PairingWay, pairingWayOf;
 import 'extensions.dart' show logTime;
@@ -237,6 +239,8 @@ class _DevicePairingCardState extends State<DevicePairingCard>
     final palette = Palette.of(context);
     final color = agentColor(agent?.color ?? 'slate');
     final name = agent?.name ?? pairing.agentId;
+    final claktory = claktoryName(AppScope.of(context));
+    final machine = claktory == thisMacName ? 'this computer' : claktory;
     final device = pairing.name.isEmpty ? 'the device' : pairing.name;
     final open =
         _waiting ||
@@ -253,13 +257,15 @@ class _DevicePairingCardState extends State<DevicePairingCard>
         children: [
           Row(
             children: [
-              if (agent != null) ...[
+              if (agent != null && !pairing.fromCommandLine) ...[
                 AgentCharacter(agent: agent, size: 20),
                 const SizedBox(width: Space.xs + 2),
               ],
               Flexible(
                 child: Text(
-                  '$name adds a device: ${pairing.name}',
+                  pairing.fromCommandLine
+                      ? 'A command on $machine adds a device: ${pairing.name}'
+                      : '$name adds a device: ${pairing.name}',
                   style: TextStyles.caption.copyWith(
                     color: color,
                     fontWeight: FontWeight.w600,
@@ -268,6 +274,15 @@ class _DevicePairingCardState extends State<DevicePairingCard>
               ),
             ],
           ),
+          // Its agent only shows it: no one should take it for their own.
+          if (pairing.fromCommandLine && open) ...[
+            const SizedBox(height: Space.xs),
+            Text(
+              'An agent or a script on $machine asked for this, not you. '
+              "Use this code only on a device you're adding yourself.",
+              style: TextStyles.caption.copyWith(color: palette.text),
+            ),
+          ],
           const SizedBox(height: Space.m),
           // Neither the code nor Allow on Windows: a phone or Mac adds it
           // (approve_elsewhere.dart).

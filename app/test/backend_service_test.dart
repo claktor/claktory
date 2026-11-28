@@ -1,4 +1,4 @@
-// Friend bug #24: a Mac's backend started by hand, without its background
+// A Mac's backend started by hand, without its background
 // service (Workspace.backend_service BY_HAND), says so in Needs you and in
 // Settings → General beside Move, with Restore (RestoreBackendService)
 // where it can; "Restarting…" until the app reconnects.

@@ -1,0 +1,3 @@
+#!/bin/bash
+# xcodebuild with Swift packages' own sandbox off (use.sh says when and why).
+exec /usr/bin/xcodebuild -IDEPackageSupportDisableManifestSandbox=YES -IDEPackageSupportDisablePluginExecutionSandbox=YES "$@"

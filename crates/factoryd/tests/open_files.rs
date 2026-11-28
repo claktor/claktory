@@ -1,4 +1,4 @@
-//! #490 risk 5: factoryd raises its soft limit on open files at start,
+//! factoryd raises its soft limit on open files at start,
 //! from launchd's 256 or systemd's 1024 to the hard limit (at most 65,536),
 //! and agents' commands inherit it. A file of its own: the limit is the
 //! process's.

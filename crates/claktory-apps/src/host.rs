@@ -12,7 +12,7 @@ use tokio::task::JoinHandle;
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Config, Engine};
 
-use crate::app::{Deadlines, Owner, Request, Spec, State};
+use crate::app::{Caller, Deadlines, Owner, Request, Spec, State};
 use crate::frames::{self, Outbox};
 use crate::net::Rule;
 
@@ -110,7 +110,15 @@ impl Host {
         let queued = match body {
             Body::Start(start) => self.enqueue(&start.app_id, Request::Start),
             Body::Stop(stop) => self.enqueue(&stop.app_id, Request::Stop),
-            Body::Call(Call { app_id, tool, args, caller }) => self.enqueue(&app_id, |answer| Request::Call { tool, args, caller, answer }),
+            Body::Call(Call { app_id, tool, args, caller, caller_project, caller_admin, caller_tainted }) => {
+                let caller = Caller {
+                    id: caller,
+                    project: (!caller_project.is_empty()).then_some(caller_project),
+                    admin: caller_admin,
+                    tainted: caller_tainted,
+                };
+                self.enqueue(&app_id, |answer| Request::Call { tool, args, caller, answer })
+            }
             Body::ViewOpen(ViewOpen { app_id, view, params, surface }) => {
                 self.enqueue(&app_id, |answer| Request::ViewOpen { view, params, surface, answer })
             }

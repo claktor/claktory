@@ -373,7 +373,7 @@ fn sorted(value: serde_json::Value) -> serde_json::Value {
 /// Canonical `params` whose `"device"` (when they have one) is `device`,
 /// the connection's: what a device says it is never counts, so it can't
 /// take another's surface, or get past its own limit with a new name each
-/// time (Fugo 28393).
+/// time.
 fn as_device(params: &str, device: &str) -> String {
     match serde_json::from_str::<serde_json::Value>(params) {
         Ok(serde_json::Value::Object(mut fields)) if fields.contains_key("device") => {
@@ -726,7 +726,7 @@ mod tests {
         assert_eq!(as_device(r#"{"range":"7d"}"#, "phone"), r#"{"range":"7d"}"#, "only when it asks for its own");
     }
 
-    /// Bruno 28347: an app never gets a device's id, only a stand-in, the
+    /// An app never gets a device's id, only a stand-in, the
     /// same for one device and app every time, different across apps.
     #[test]
     fn an_app_sees_a_device_only_as_its_own_opaque_stand_in() {

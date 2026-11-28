@@ -13,6 +13,7 @@ import 'package:flutter/widgets.dart';
 import 'agent_name.dart';
 import 'app_access_card.dart' show AppAccessCard;
 import 'app_grant_card.dart';
+import 'approve_elsewhere.dart';
 import 'attachments.dart';
 import 'backend.dart' show Backend, RequestFailure;
 import 'device_kind.dart' show thisDeviceKindForHello, thisDeviceNameForHello;
@@ -262,6 +263,9 @@ set debugOwnDevice(({DeviceKind kind, String name})? device) =>
 class _TranscriptViewState extends State<TranscriptView>
     with SingleTickerProviderStateMixin {
   final _liveKey = GlobalKey();
+
+  /// The list above the center line, the earlier entries.
+  final _earlierKey = GlobalKey();
   late final _controller = _FollowController(_liveExtent);
 
   /// Every item's height once laid out, for the scrollbar
@@ -1230,6 +1234,10 @@ class _TranscriptViewState extends State<TranscriptView>
       _earlier = transcript.earlier;
       _split += earlier;
       _known += earlier;
+      // Laid out again, though the entries it shows stay the same: how far
+      // up it reaches counts the new ones, else the view would take itself
+      // for near the top and load page after page.
+      _earlierKey.currentContext?.findRenderObject()?.markNeedsLayout();
     }
     if (length <= _known) {
       _known = length;
@@ -1994,6 +2002,7 @@ class _TranscriptViewState extends State<TranscriptView>
                             : ScrollViewKeyboardDismissBehavior.manual,
                         slivers: [
                           SliverList(
+                            key: _earlierKey,
                             delegate: SliverChildBuilderDelegate(
                               (context, index) => index == split
                                   ? MeasuredItem(
@@ -2119,8 +2128,13 @@ class _WithLatest extends StatefulWidget {
 }
 
 class _WithLatestState extends State<_WithLatest> with WidgetsBindingObserver {
-  /// The transcript's length when the view left its end.
+  /// The seq of the newest entry held when the view left its end: entries
+  /// after it are new, while earlier pages paged in before it aren't.
   int? _from;
+
+  int get _newest => widget.transcript.length == 0
+      ? -1
+      : widget.transcript[widget.transcript.length - 1].seq;
 
   /// On a phone, whether something in the conversation has focus (a card's
   /// comment being typed): Latest steps aside meanwhile, rather than sit on
@@ -2133,7 +2147,7 @@ class _WithLatestState extends State<_WithLatest> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     widget.away.addListener(_changed);
     widget.transcript.addListener(_changed);
-    if (widget.away.value) _from = widget.transcript.length;
+    if (widget.away.value) _from = _newest;
   }
 
   @override
@@ -2220,7 +2234,7 @@ class _WithLatestState extends State<_WithLatest> with WidgetsBindingObserver {
       if (!away) {
         _from = null;
       } else {
-        _from ??= widget.transcript.length;
+        _from ??= _newest;
       }
     });
   }
@@ -2230,8 +2244,9 @@ class _WithLatestState extends State<_WithLatest> with WidgetsBindingObserver {
     final from = _from;
     if (from == null) return 0;
     var count = 0;
-    for (var i = from; i < widget.transcript.length; i++) {
+    for (var i = widget.transcript.length - 1; i >= 0; i--) {
       final entry = widget.transcript[i].entry;
+      if (entry.seq.toInt() <= from) break;
       if ((entry.hasAssistant() && entry.assistant.text.isNotEmpty) ||
           (entry.hasEvent() &&
               entry.event.source == EventSource.EVENT_SOURCE_AGENT)) {
@@ -3527,6 +3542,11 @@ class ProposalCard extends StatefulWidget {
   State<ProposalCard> createState() => _ProposalCardState();
 }
 
+/// Whether approving [proposal] would let a pipe do more (its grants say
+/// so: ProposalGrant.widens_pipe).
+bool _widensAPipe(Proposal proposal) =>
+    proposal.grants.any((grant) => grant.widensPipe);
+
 class _ProposalCardState extends State<ProposalCard> {
   final _comment = TextEditingController();
   var _deciding = false;
@@ -3712,6 +3732,28 @@ class _ProposalCardState extends State<ProposalCard> {
               name: proposer?.name ?? 'the agent',
               reason: proposal.withdrawReason,
               decidedMs: decided,
+            )
+          else if (pending && approvesElsewhere && _widensAPipe(proposal))
+            // Widening a pipe is the person's, never Windows'
+            // (authority::local_may refuses Approve and a reply): only
+            // Dismiss here, and where to approve it.
+            Row(
+              children: [
+                Expanded(
+                  child: _error == null
+                      ? const ApproveElsewhere()
+                      : Text(
+                          _error!,
+                          style: TypeScale.of(context).caption
+                              .copyWith(color: palette.danger),
+                        ),
+                ),
+                const SizedBox(width: Space.s),
+                Button(
+                  label: 'Dismiss',
+                  onPressed: _deciding ? null : () => _decide(approve: false),
+                ),
+              ],
             )
           else if (pending) ...[
             // The field first, open from the start.

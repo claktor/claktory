@@ -2470,7 +2470,7 @@ class _WavePainter extends CustomPainter {
 }
 
 /// A 28px square button holding a 16px glyph, tinted on hover and while
-/// what it opens is showing; with [showLabel], 28px tall with its label
+/// what it opens is showing; with [showLabel], at least 28px tall with its label
 /// after the glyph.
 class GlyphButton extends StatelessWidget {
   const GlyphButton({
@@ -2485,7 +2485,8 @@ class GlyphButton extends StatelessWidget {
   /// What it opens, for assistive technology and tests.
   final String label;
 
-  /// [label] shows after the glyph, cut at the end where there's no room.
+  /// [label] shows after the glyph, made smaller where there's no room for
+  /// it whole.
   final bool showLabel;
   final bool active;
   final VoidCallback onTap;
@@ -2511,8 +2512,11 @@ class GlyphButton extends StatelessWidget {
           AnimatedContainer(
             duration: Motion.fast,
             width: showLabel ? null : 28,
-            height: 28,
-            alignment: Alignment.center,
+            // With its label, taller as the text grows rather than cutting
+            // it through.
+            height: showLabel ? null : 28,
+            constraints: showLabel ? const BoxConstraints(minHeight: 28) : null,
+            alignment: showLabel ? null : Alignment.center,
             padding: showLabel
                 ? const EdgeInsets.symmetric(horizontal: Space.s)
                 : null,
@@ -2525,29 +2529,36 @@ class GlyphButton extends StatelessWidget {
               borderRadius: BorderRadius.circular(Radii.control),
             ),
             child: showLabel
-                ? Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      glyph(
-                        active || hovered ? palette.text : palette.textMuted,
-                      ),
-                      const SizedBox(width: Space.xs + 2),
-                      Flexible(
-                        child: ExcludeSemantics(
-                          child: Text(
-                            label,
-                            maxLines: 1,
-                            softWrap: false,
-                            overflow: TextOverflow.ellipsis,
-                            style: TypeScale.of(context).body.copyWith(
-                              color: active || hovered
-                                  ? palette.text
-                                  : palette.textMuted,
+                ? Align(
+                    widthFactor: 1,
+                    heightFactor: 1,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        glyph(
+                          active || hovered ? palette.text : palette.textMuted,
+                        ),
+                        const SizedBox(width: Space.xs + 2),
+                        Flexible(
+                          child: ExcludeSemantics(
+                            child: FittedBox(
+                              fit: BoxFit.scaleDown,
+                              alignment: AlignmentDirectional.centerStart,
+                              child: Text(
+                                label,
+                                maxLines: 1,
+                                softWrap: false,
+                                style: TypeScale.of(context).body.copyWith(
+                                  color: active || hovered
+                                      ? palette.text
+                                      : palette.textMuted,
+                                ),
+                              ),
                             ),
                           ),
                         ),
-                      ),
-                    ],
+                      ],
+                    ),
                   )
                 : glyph(active || hovered ? palette.text : palette.textMuted),
           ),
@@ -2917,6 +2928,7 @@ final _lucide = <String, void Function(Canvas, Paint)>{
   'key-round': _drawKeyRound,
   'folder-lock': _drawFolderLock,
   'monitor': _drawMonitor,
+  'server': _drawServer,
   'laptop-minimal': _drawLaptopMinimal,
   'smartphone': _drawSmartphone,
   'tablet': _drawTablet,
@@ -2946,8 +2958,17 @@ final _lucide = <String, void Function(Canvas, Paint)>{
   'layers': _drawLayers,
   'home': _drawHouse,
   'clock': _drawClock,
+  'calendar': _drawCalendar,
   'puzzle': _drawPuzzle,
+  'stamp': _drawStamp,
 };
+
+final _drawStamp = _paths(const [
+  'M14 13V8.5C14 7 15 7 15 5a3 3 0 0 0-6 0c0 2 1 2 1 3.5V13',
+  'M20 15.5a2.5 2.5 0 0 0-2.5-2.5h-11A2.5 2.5 0 0 0 4 15.5V17a1 1 0 0 0 1 1h14'
+      'a1 1 0 0 0 1-1z',
+  'M5 22h14',
+]);
 
 /// Whether the app draws the Lucide icon [name] (an app's menu leaves out
 /// an icon it doesn't).
@@ -2989,6 +3010,13 @@ final _drawLayers = _paths(const [
 final _drawClock = _paths(const [
   'M2 12a10 10 0 1 0 20 0a10 10 0 1 0-20 0',
   'M12 6v6l4 2',
+]);
+
+final _drawCalendar = _paths(const [
+  'M8 2v4',
+  'M16 2v4',
+  'M5 4h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z',
+  'M3 10h18',
 ]);
 
 final _drawCopy = _paths(const [
@@ -3109,6 +3137,14 @@ final _drawMonitor = _paths(const [
   'M4 3h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z',
   'M8 21h8',
   'M12 17v4',
+]);
+
+// Lucide's server: a computer asking to join the account.
+final _drawServer = _paths(const [
+  'M4 2h16a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z',
+  'M4 14h16a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-4a2 2 0 0 1 2-2z',
+  'M6 6h.01',
+  'M6 18h.01',
 ]);
 
 final _drawMessageSquare = _paths(const [

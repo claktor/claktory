@@ -1,4 +1,4 @@
-//! Phone-sized previews of files (#379, Polpo's file-previews.md): an app
+//! Phone-sized previews of files: an app
 //! on a small screen asks ReadFile for a preview sized to it
 //! (`preview_width`/`preview_height`), and gets one when it's worth it,
 //! never in place of the original without saying so (FileContent.preview).
@@ -149,9 +149,43 @@ impl Kept {
     }
 }
 
-/// ReadFile: with a screen (`preview_width`/`preview_height`), a preview
-/// when one is worth it; otherwise `viewer::read_requested` as before.
+/// ReadFile: nothing but `unchanged` when the file is still the version
+/// `unless_sha256` names; otherwise `read_as_asked`, with the whole file's
+/// hash whenever `unless_sha256` is set.
 pub(crate) fn read_requested(data: &Path, request: &v1::ReadFile) -> v1::FileContent {
+    let kept = request.unless_sha256.trim();
+    if kept.is_empty() {
+        return read_as_asked(data, request);
+    }
+    let start = viewer::read_file(&request.path, 0, 1);
+    if !start.error.is_empty() {
+        return read_as_asked(data, request);
+    }
+    // Hashed before reading: if the file changes in between, the app holds
+    // the new bytes under the old hash and reads them again next time,
+    // never the old bytes under the new one.
+    let Ok(sha) = viewer::whole_sha256(Path::new(&start.path)) else { return read_as_asked(data, request) };
+    if sha.eq_ignore_ascii_case(kept) {
+        return v1::FileContent {
+            path: start.path,
+            mime: start.mime,
+            size: start.size,
+            modified_ms: start.modified_ms,
+            sha256: sha,
+            unchanged: true,
+            ..v1::FileContent::default()
+        };
+    }
+    let mut content = read_as_asked(data, request);
+    if content.error.is_empty() && content.sha256.is_empty() {
+        content.sha256 = sha;
+    }
+    content
+}
+
+/// With a screen (`preview_width`/`preview_height`), a preview when one is
+/// worth it; otherwise `viewer::read_requested` as before.
+fn read_as_asked(data: &Path, request: &v1::ReadFile) -> v1::FileContent {
     let Some(screen) = Screen::of(request.preview_width, request.preview_height) else {
         return viewer::read_requested(request);
     };
@@ -704,7 +738,7 @@ mod tests {
         out
     }
 
-    /// Fugo's #379 review: while it parses a file, the real helper reads
+    /// While it parses a file, the real helper reads
     /// only that file and writes only in its own folder: not Claktory's
     /// data, not the home folder, not beside its folder, not the network.
     /// And it still makes PDF pages and videos' previews.

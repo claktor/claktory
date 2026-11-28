@@ -143,6 +143,50 @@ pub fn unlock_mail(domain: &str, to: &str, name: &str, unusual: Unusual, when: i
     Mail { from: format!("Claktory <notices@{domain}>"), to: to.to_owned(), subject, text, html }
 }
 
+/// To the account: a computer asked to join it, for the person to approve
+/// on one of their devices. A heads-up only: no code, and no link that
+/// approves anything, since an agent may read the mailbox. `seen` is
+/// where the service saw it ask from, its name what it calls itself.
+pub fn authorize_mail(domain: &str, to: &str, name: &str, when: i64, seen: &str) -> Mail {
+    let when = format_time(when);
+    let text = format!(
+        "A computer calling itself \"{name}\" asked to join your Claktory account.\n\n\
+         When: {when}\nFrom: {seen}\n\n\
+         To let it in, approve it in the Claktory app on one of your devices within 10 minutes. Nothing in this email lets it in.\n\n\
+         If you didn't set up a computer, don't approve it. It can't join without you.\n"
+    );
+    let subject = "A computer asked to join your Claktory account".to_owned();
+    let (name, seen) = (escape(name), escape(seen));
+    let html = page(&format!(
+        "<p>A computer calling itself “{name}” asked to join your Claktory account.</p>\
+         <p>When: {when}<br>From: {seen}</p>\
+         <p>To let it in, approve it in the Claktory app on one of your devices within 10 minutes. Nothing in this email lets it in.</p>\
+         <p>If you didn't set up a computer, don't approve it. It can't join without you.</p>"
+    ));
+    Mail { from: format!("Claktory <notices@{domain}>"), to: to.to_owned(), subject, text, html }
+}
+
+/// To the account: a computer asked to receive one of its Claktories. It
+/// says "move" plainly, and that approving happens only in the app.
+pub fn move_mail(domain: &str, to: &str, name: &str, when: i64, seen: &str) -> Mail {
+    let when = format_time(when);
+    let text = format!(
+        "A computer calling itself \"{name}\" asked to receive one of your Claktories: everything in it would move there.\n\n\
+         When: {when}\nFrom: {seen}\n\n\
+         To move it, approve it in Settings → Move in the Claktory app, on one of your devices connected to the Claktory you're moving, within 10 minutes. Nothing in this email moves it.\n\n\
+         If you aren't moving a Claktory, don't approve it. Nothing moves without you.\n"
+    );
+    let subject = "A computer asked to receive one of your Claktories".to_owned();
+    let (name, seen) = (escape(name), escape(seen));
+    let html = page(&format!(
+        "<p>A computer calling itself “{name}” asked to receive one of your Claktories: everything in it would move there.</p>\
+         <p>When: {when}<br>From: {seen}</p>\
+         <p>To move it, approve it in Settings → Move in the Claktory app, on one of your devices connected to the Claktory you're moving, within 10 minutes. Nothing in this email moves it.</p>\
+         <p>If you aren't moving a Claktory, don't approve it. Nothing moves without you.</p>"
+    ));
+    Mail { from: format!("Claktory <notices@{domain}>"), to: to.to_owned(), subject, text, html }
+}
+
 /// To the account: one of its Claktories moved to another computer.
 pub fn moved_mail(domain: &str, to: &str, from: &str, name: &str, when: i64, ip: &str, account_page: &str) -> Mail {
     let when = format_time(when);

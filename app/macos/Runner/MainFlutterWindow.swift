@@ -1,5 +1,6 @@
 import AuthenticationServices
 import Cocoa
+import LocalAuthentication
 import CoreImage
 import CoreText
 import FlutterMacOS
@@ -47,8 +48,15 @@ class MainFlutterWindow: NSWindow {
     Setup.register(with: flutterViewController.engine.binaryMessenger)
     // Links the app opens, such as claktory://add?code=… (AppDelegate.swift).
     Links.register(with: flutterViewController.engine.binaryMessenger)
-    // A Claktory to connect to, from an agent setting it up (SetupLink.swift).
-    SetupLink.register(with: flutterViewController.engine.binaryMessenger)
+    // An agent no longer connects this Mac by a pairing code it hands the
+    // app (#245, gone with #546 A): what an earlier version left of it, a
+    // code or a device's digits, goes.
+    if let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
+      let folder = support.appendingPathComponent(Bundle.main.bundleIdentifier ?? "dev.factory.app", isDirectory: true)
+      for name in ["connect-request.json", "connect-status.json"] {
+        try? FileManager.default.removeItem(at: folder.appendingPathComponent(name))
+      }
+    }
     // Voice messages' microphone (Recorder.swift).
     Recorder.register(with: flutterViewController.engine.binaryMessenger)
     // And playing them back (AudioPlayer.swift).
@@ -214,6 +222,27 @@ class MainFlutterWindow: NSWindow {
         } catch {
           result(FlutterError(code: "credentials_reset_failed", message: "\(error)", details: nil))
         }
+      case "userHome":
+        // Where Claktory's own socket is looked for, from the user
+        // database, never $HOME (BackendPeer.userHome); nil: unknown.
+        result(BackendPeer.userHome())
+      case "userTemp":
+        // For a socket whose path would be too long, as factoryd's.
+        result(BackendPeer.userTemp())
+      case "checkBackendPeer":
+        // Who listens at app.sock, before a word goes to it (BackendPeer):
+        // nil to go on, else why not. Claktory Dev's backend is ad hoc, so
+        // only its user is checked; Claktory's must be its own team's.
+        let args = call.arguments as? [String: Any] ?? [:]
+        let credentials = (args["credentials"] as? FlutterStandardTypedData)?.data ?? Data()
+        let token = (args["token"] as? FlutterStandardTypedData)?.data ?? Data()
+        let dev = args["dev"] as? Bool ?? false
+        let team = dev ? nil : BackendPeer.ownTeam()
+        if !dev && team == nil {
+          result("this app isn't signed by a team, so it can't tell its backend")
+        } else {
+          result(BackendPeer.check(credentials: credentials, token: token, team: team))
+        }
       case "defaultBrowser":
         // The bundle id of the app that opens web pages (lib/pipe_shares.dart:
         // Safari can't open a shared website's *.localhost address).
@@ -227,6 +256,33 @@ class MainFlutterWindow: NSWindow {
       case "cancelWebAuth":
         WebAuth.shared.cancel()
         result(nil)
+      case "authenticateOwner":
+        // The device owner's own act before an approval (Fugo's
+        // server-authorize.md item 5): Touch ID or the login password.
+        OwnerAuth.authenticate(
+          reason: (call.arguments as? [String: Any])?["reason"] as? String ?? "",
+          result)
+      case "useOlderApp":
+        // The version this Mac's Claktory went back to, its own app in
+        // place of this one (OlderApp): answered once it's in place and
+        // checked there, to open when this app has quit, which it then does.
+        let arguments = call.arguments as? [String: Any] ?? [:]
+        let home = arguments["home"] as? String ?? ""
+        let version = arguments["version"] as? String ?? ""
+        DispatchQueue.global(qos: .userInitiated).async {
+          do {
+            try OlderApp.use(home: home, version: version)
+          } catch {
+            DispatchQueue.main.async {
+              result(FlutterError(code: "failed", message: "\(error)", details: nil))
+            }
+            return
+          }
+          DispatchQueue.main.async {
+            result(nil)
+            NSApp.terminate(nil)
+          }
+        }
       case "saveText":
         // The recovery key as a file (lib/recovery_key.dart): the person
         // chooses its name and place; nothing is written anywhere else.
@@ -1068,4 +1124,35 @@ final class SightPointer: NSResponder {
 
   override func mouseEntered(with event: NSEvent) { pointed() }
   override func mouseMoved(with event: NSEvent) { pointed() }
+}
+
+/// The device owner's authentication for an approval (`authenticateOwner` on
+/// factory/device; Fugo 51234, as the iPhone's in AppDelegate.swift): a
+/// fresh LAContext each time, never reused, Touch ID or the login password
+/// (.deviceOwnerAuthentication). Answers "ok", "cancelled", "failed" or
+/// "unavailable" on the main queue; an empty reason fails without asking.
+enum OwnerAuth {
+  static func authenticate(reason: String, _ result: @escaping FlutterResult) {
+    guard !reason.isEmpty else { return result("failed") }
+    let context = LAContext()
+    context.touchIDAuthenticationAllowableReuseDuration = 0
+    var unavailable: NSError?
+    guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &unavailable) else {
+      return result("unavailable")
+    }
+    context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason) { ok, error in
+      let answer = Self.answer(ok: ok, error: error)
+      DispatchQueue.main.async { result(answer) }
+    }
+  }
+
+  /// What an evaluation's outcome answers.
+  static func answer(ok: Bool, error: Error?) -> String {
+    if ok { return "ok" }
+    switch (error as? LAError)?.code {
+    case .userCancel, .appCancel, .systemCancel, .userFallback: return "cancelled"
+    case .passcodeNotSet: return "unavailable"
+    default: return "failed"
+    }
+  }
 }

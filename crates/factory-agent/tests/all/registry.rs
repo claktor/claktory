@@ -158,7 +158,7 @@ async fn the_registry_lists_the_five_providers_and_their_models() {
     let anthropic = registry.provider("anthropic").unwrap();
     assert_eq!(anthropic.oauth.as_ref().map(|oauth| oauth.name()), Some("Anthropic (Claude Pro/Max)"));
     let grok = registry.provider("grok").unwrap();
-    assert_eq!(grok.oauth.as_ref().map(|oauth| oauth.name()), Some("Grok (SuperGrok or X Premium+)"));
+    assert_eq!(grok.oauth.as_ref().map(|oauth| oauth.name()), Some("Grok (your Grok subscription)"));
     assert!(grok.api_key.is_none(), "a subscription only");
     assert_eq!(anthropic.api_key.as_ref().map(|key| key.name().to_owned()).as_deref(), Some("Anthropic API key"));
     assert!(registry.providers().iter().all(|provider| provider.api.is_some()));

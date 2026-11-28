@@ -1,4 +1,4 @@
-// A phone's navigation (#198, phase 1A): the conversation in front, the
+// A phone's navigation: the conversation in front, the
 // drawer from the Menu or the leading edge, pages pushed over the
 // conversation with Back, and what the drawer finds.
 import 'package:factory_app/agent_view.dart';
@@ -231,9 +231,47 @@ void main() {
     expect(find.byType(Sidebar), findsOneWidget);
   });
 
+  testWidgets('the keyboard put away, Search lets go: a sheet closing '
+      "later doesn't bring the keyboard back", (tester) async {
+    addTearDown(tester.view.resetViewInsets);
+    await _show(tester, workspace());
+    await tester.tap(menuButton());
+    await pumpFrames(tester);
+    final search = find.descendant(
+      of: find.byWidgetPredicate(
+        (widget) => widget is TextField && widget.placeholder == 'Search',
+      ),
+      matching: find.byType(EditableText),
+    );
+    FocusNode searchFocus() =>
+        tester.widget<EditableText>(search.first).focusNode;
+    await tester.tap(search.first);
+    tester.view.viewInsets = const FakeViewPadding(bottom: 336);
+    await tester.enterText(search.first, 'coord');
+    await pumpFrames(tester);
+    await tester.tap(
+      find.byWidgetPredicate(
+        (widget) => widget is GlyphButton && widget.label == 'Clear search',
+      ),
+    );
+    await pumpFrames(tester);
+    expect(searchFocus().hasFocus, isTrue, reason: 'Clear keeps typing on');
+
+    tester.view.viewInsets = FakeViewPadding.zero;
+    await pumpFrames(tester);
+    expect(searchFocus().hasFocus, isFalse);
+
+    await tester.tap(find.bySemanticsLabel(RegExp(r' options$')).first);
+    await pumpFrames(tester);
+    await tester.tap(find.text('Cancel').last);
+    await pumpFrames(tester);
+    expect(find.text('Cancel'), findsNothing);
+    expect(searchFocus().hasFocus, isFalse);
+  });
+
   testWidgets('Needs you leads the drawer as on a Mac: one row with the '
       'count, which pushes the Needs you page', (tester) async {
-    // An iPhone's: the list of what waits first (#599).
+    // An iPhone's: the list of what waits first.
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
     addTearDown(() => debugDefaultTargetPlatformOverride = null);
     final snapshot = workspace();

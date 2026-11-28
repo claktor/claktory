@@ -105,6 +105,16 @@ app() {
   # The browser helper, in Contents/Helpers where the app looks for it.
   add_browser_host "$APP" dev debug
   make_dev_app "$APP" DebugProfile.entitlements
+  # The dev backend lets this build act as the person on its socket
+  # (#546 A): its cdhash, pinned beside the last few builds'.
+  local cdhash
+  cdhash="$(codesign -dv --verbose=4 "$APP" 2>&1 | sed -n 's/^CDHash=//p' | head -n 1)"
+  if [[ -n "$cdhash" ]]; then
+    mkdir -p "$DEV_HOME"
+    { [[ -f "$DEV_HOME/app-pins" ]] && grep -v -x "$cdhash" "$DEV_HOME/app-pins" | tail -n 7; echo "$cdhash"; } >"$DEV_HOME/app-pins.new" || true
+    chmod 600 "$DEV_HOME/app-pins.new"
+    mv "$DEV_HOME/app-pins.new" "$DEV_HOME/app-pins"
+  fi
   # -g: open in the background, never take focus from whoever is working.
   open -g "$APP"
   echo "Claktory Dev launched: $APP"

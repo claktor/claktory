@@ -15,6 +15,7 @@
 #include <variant>
 
 #include "app_messages.h"
+#include "app_paths.h"
 #include "flavor.h"
 #include "toast_activator.h"
 #include "utils.h"
@@ -134,9 +135,9 @@ void SetUserString(const std::wstring& key, const wchar_t* name,
 // Registers the app's AppUserModelID for this account, so Windows shows its
 // toasts without a Start menu shortcut: its name, its picture beside the
 // app, and the COM class that takes their clicks (toast_activator.h), which
-// Windows starts this exe for when the app isn't running. Written only where
-// it isn't already so; a moved install fixes itself at its next start. The
-// uninstaller removes both keys (README.md).
+// Windows starts (through the launcher, installed) when the app isn't
+// running. Written only where it isn't already so; a moved install fixes
+// itself at its next start. The uninstaller removes both keys (README.md).
 void RegisterAppId() {
   wchar_t module[MAX_PATH * 4];
   DWORD length = ::GetModuleFileNameW(nullptr, module,
@@ -151,9 +152,12 @@ void RegisterAppId() {
       std::wstring(L"Software\\Classes\\AppUserModelId\\") + flavor::kAppId;
   SetUserString(app_key, L"DisplayName", flavor::kAppName);
   SetUserString(app_key, L"IconUri", icon);
+  // Installed, the launcher: it starts the current version, which a click
+  // with the app closed still finds after an update deleted this one.
+  std::wstring launcher = InstalledLauncher();
   SetUserString(std::wstring(L"Software\\Classes\\CLSID\\") +
                     flavor::kToastActivator + L"\\LocalServer32",
-                nullptr, L"\"" + exe + L"\"");
+                nullptr, L"\"" + (launcher.empty() ? exe : launcher) + L"\"");
   SetUserString(app_key, L"CustomActivator", flavor::kToastActivator);
 }
 

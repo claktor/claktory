@@ -918,7 +918,7 @@ async fn an_admin_or_the_person_cancels_an_archived_agents_monitors_and_nothing_
     let rivet = v1::UpdateAgent { agent_id: "rivet".into(), model: Some(crate::common::MODEL.into()), effort: Some("off".into()), ..Default::default() };
     apply_request(&mut client, &mut view, client_message::Body::UpdateAgent(rivet)).await;
     apply_request(&mut client, &mut view, create_agent("", "Ana", "")).await;
-    let archive = v1::UpdateProject { project_id: "site".into(), name: None, archived: Some(true), before_id: None };
+    let archive = v1::UpdateProject { project_id: "site".into(), name: None, archived: Some(true), before_id: None, brief: None };
     apply_request(&mut client, &mut view, client_message::Body::UpdateProject(archive)).await;
 
     // Rivet lists and cancels them; firing one is refused.

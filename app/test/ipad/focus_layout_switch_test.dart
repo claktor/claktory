@@ -1,5 +1,5 @@
-// Focus mode through the window crossing into the phone's layout and back
-// (Sale's rows 182 and 183), with the window built as main.dart builds it:
+// Focus mode through the window crossing into the phone's layout and back,
+// with the window built as main.dart builds it:
 // the phone's layout puts the Shell under PhoneClaktories, a wider one
 // gives it the rail, so the Shell is a new one each time the window
 // crosses. The sitting and its card must live through that, and in the
@@ -134,7 +134,7 @@ void main() {
       );
       await settle(tester);
       expect(find.byType(FocusContext), findsOneWidget);
-      // Wide enough to read (Gelato 48354): over the card, a strip left.
+      // Wide enough to read: over the card, a strip left.
       final panel = tester.getRect(find.byType(FocusContext));
       expect(panel.width, greaterThan(200));
       expect(panel.left, greaterThan(0));

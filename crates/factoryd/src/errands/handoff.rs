@@ -1,10 +1,11 @@
 //! Handoffs: what only the person may do on a page, handed to them in a
 //! request through Ask: a payment (this module: they open the page's address
-//! in their own browser, so the agent's never holds a card), a code, an agreement, recovery codes or two-step sign-in (`code`).
-//! While the request waits the agent's browser tools wait; however the
-//! person answers, the browser is the agent's again and it's told how it
-//! went. A check that the visitor is a person isn't handed over: Claktory
-//! tries the page again later (`checks`).
+//! in their own browser, so the agent's never holds a card), a check that
+//! the visitor is a person the agent couldn't get past (this module: they
+//! get past it in a live view of that one tab), a code, an agreement,
+//! recovery codes or two-step sign-in (`code`). While the request waits the
+//! agent's browser tools wait; however the person answers, the browser is
+//! the agent's again and it's told how it went.
 
 use std::sync::Arc;
 
@@ -29,13 +30,14 @@ pub(crate) const TOOLS: [&str; 6] = [TOOL, "browser_read", "browser_act", "brows
 /// The most characters of what the agent says the person should do.
 pub(crate) const WHAT_MAX: usize = 300;
 
-/// A kind, from the agent's word: payment here; code and agreement in
-/// `code`. The kinds that handed the person the browser itself (sign_in,
-/// captcha, identity, other) went with browser-simple: their values stay in
-/// the protocol for requests made before.
+/// A kind, from the agent's word: payment and check here; code and
+/// agreement in `code`. The kinds that handed the person the whole browser
+/// (sign_in, identity, other) went with browser-simple: their values stay
+/// in the protocol for requests made before.
 pub(crate) fn kind_of(word: &str) -> Option<v1::ErrandHandoffKind> {
     Some(match word {
         "payment" => v1::ErrandHandoffKind::Payment,
+        "check" => v1::ErrandHandoffKind::Captcha,
         "code" | "sms_code" => v1::ErrandHandoffKind::Code,
         "agreement" => v1::ErrandHandoffKind::Agreement,
         _ => return None,
@@ -70,18 +72,19 @@ pub(super) fn plain_line(text: &str, max: usize) -> String {
 pub(crate) const URL_MAX: usize = 2048;
 
 /// The page's top-level address as Chrome reports it now, and its title:
-/// what a payment request opens, or why it can't be one.
-async fn payment_page(factory: &Factory, agent: &str) -> Result<(String, String), String> {
-    let seat = factory.errands.seat_of(agent).ok_or("open the payment page with browser_open first")?;
+/// what a payment or check request is about, or why it can't be one
+/// (`doing`: what the person would be asked to do there).
+async fn shown_page(factory: &Factory, agent: &str, doing: &str) -> Result<(String, String), String> {
+    let seat = factory.errands.seat_of(agent).ok_or("open the page with browser_open first")?;
     let live = seat.live.lock().await;
-    let page = live.as_ref().map(|live| live.page.clone()).ok_or("open the payment page with browser_open first")?;
+    let page = live.as_ref().map(|live| live.page.clone()).ok_or("open the page with browser_open first")?;
     drop(live);
     let frame = page.frame().await.map_err(|error| crate::browser::schema::one_line(&error.to_string(), 200))?;
     if frame.url.starts_with("chrome-error:") {
-        return Err(super::on_error_page("ask the person to pay there"));
+        return Err(super::on_error_page(&format!("ask the person to {doing}")));
     }
     if !frame.url.starts_with("https://") || super::fence::check(&frame.url).is_err() {
-        return Err("a payment is asked for only on an https page of a site on the internet: go to the payment page first".to_owned());
+        return Err(format!("the person is asked to {doing} only on an https page of a site on the internet: go to the page first"));
     }
     if frame.url.chars().count() > URL_MAX {
         return Err(format!("this page's address is longer than {URL_MAX} characters, too long to hand over"));
@@ -106,7 +109,7 @@ pub(crate) fn domain(url: &url::Url) -> String {
 /// request, and pauses the agent's driving until they answer it.
 pub(crate) async fn hand(factory: &Arc<Factory>, agent: &str, kind: &str, what: &str) -> Result<ToolResult, String> {
     let kind = kind_of(kind).ok_or(
-        "kind is payment, code, agreement, recovery_codes or two_step. A puzzle or a check that you're a person, a passkey, a sign-in link sent by email or a request to prove who the person is can't be handed over: say in your reply that you couldn't get past it.",
+        "kind is payment, check, code, agreement, recovery_codes or two_step. A passkey, a sign-in link sent by email or a request to prove who the person is can't be handed over: say in your reply that you couldn't get past it.",
     )?;
     let what = plain_line(what, WHAT_MAX + 1);
     if what.is_empty() || what.chars().count() > WHAT_MAX {
@@ -114,6 +117,7 @@ pub(crate) async fn hand(factory: &Arc<Factory>, agent: &str, kind: &str, what: 
     }
     match kind {
         v1::ErrandHandoffKind::Payment => hand_payment(factory, agent, what).await,
+        v1::ErrandHandoffKind::Captcha => hand_check(factory, agent, what).await,
         _ => Err("kinds code and agreement need document and target: the field, or the box to tick.".to_owned()),
     }
 }
@@ -135,7 +139,7 @@ async fn hand_payment(factory: &Arc<Factory>, agent: &str, what: String) -> Resu
     if payment_waiting(factory, agent) {
         return Err("A payment request of yours already waits for the person: wait for their answer.".to_owned());
     }
-    let (address, title) = payment_page(factory, agent).await.map_err(|why| super::said(("unsupported_target".to_owned(), why)))?;
+    let (address, title) = shown_page(factory, agent, "pay there").await.map_err(|why| super::said(("unsupported_target".to_owned(), why)))?;
     let parsed = url::Url::parse(&address).map_err(|_| super::said(("unsupported_target".to_owned(), "this page's address can't be read".to_owned())))?;
     let domain = domain(&parsed);
     let origin = parsed.origin().ascii_serialization();
@@ -177,14 +181,166 @@ async fn hand_payment(factory: &Arc<Factory>, agent: &str, what: String) -> Resu
     Ok(ToolResult::text(said, details))
 }
 
-/// Whether a payment request of `agent`'s waits for the person.
-fn payment_waiting(factory: &Factory, agent: &str) -> bool {
+/// A check request: the person gets past the check that the visitor is a
+/// person on the page the agent's browser shows now, in a live view of that
+/// tab alone, while the agent's browser tools wait. The browser stays
+/// driven by Claktory, and no download starts meanwhile.
+async fn hand_check(factory: &Arc<Factory>, agent: &str, what: String) -> Result<ToolResult, String> {
+    let (person, name) = {
+        let inner = factory.lock();
+        let name = inner.config.agent(agent).map_or_else(|| agent.to_owned(), |found| found.name.clone());
+        (inner.config.person().to_owned(), name)
+    };
+    let errand = factory.driving(agent).map_err(super::said)?;
+    if waiting_of(factory, agent, v1::ErrandHandoffKind::Captcha) {
+        return Err("A check request of yours already waits for the person: wait for their answer.".to_owned());
+    }
+    if !check_shown(factory, agent).await {
+        return Err(super::said(("unsupported_target".to_owned(), "there's no check that you're a person on this page to hand over".to_owned())));
+    }
+    let (address, title) = shown_page(factory, agent, "hand it over").await.map_err(|why| super::said(("unsupported_target".to_owned(), why)))?;
+    let parsed = url::Url::parse(&address).map_err(|_| super::said(("unsupported_target".to_owned(), "this page's address can't be read".to_owned())))?;
+    let domain = crate::browser_host::tab_view::site_of(&address);
+    let origin = parsed.origin().ascii_serialization();
+    let card_title = format!("{name} needs you to get past a check on {domain}");
+    let body = format!(
+        "\"{what}\"\n\n{name} couldn't get past a check that it's a person on {domain}. Get past it in the live view of {name}'s browser, then tap Done, and {name} carries on from there. If you can't, tap Can't do this."
+    );
+    let handoff = HandoffRow {
+        kind: v1::ErrandHandoffKind::Captcha as i32,
+        what: what.clone(),
+        origin: origin.clone(),
+        title,
+        errand: errand.id.clone(),
+        domain: domain.clone(),
+        ..Default::default()
+    };
+    let action = serde_json::to_string(&crate::card_actions::Action::Handoff { handoff: Box::new(handoff.clone()) })
+        .map_err(|error| format!("Couldn't ask: {error}"))?;
+    let id = {
+        let db = factory.store.db();
+        db.execute(
+            "INSERT INTO asks (agent, title, body, wants_text, created, state, answer, action) VALUES (?1, ?2, ?3, 0, ?4, 'pending', '', ?5)",
+            params![agent, card_title, body, now_ms(), action],
+        )
+        .map_err(|error| format!("Couldn't ask: {error}"))?;
+        db.last_insert_rowid()
+    };
+    let target = match factory.hold_check(agent, &errand, id, &domain).await {
+        Ok(target) => target,
+        Err(why) => {
+            crate::extensions::ask::withdraw_for(factory, id, "The check's tab couldn't be handed over.");
+            return Err(super::said(why));
+        }
+    };
+    tokio::spawn(open_check_view(factory.clone(), agent.to_owned(), errand.id.clone(), id, target, domain.clone()));
+    let mut record = errand.clone();
+    record.handoff = Some(handoff.clone().wire());
+    factory.save_errand(record, None);
+    factory.downloads_while_checked(agent, true).await;
+    log::write(
+        &factory.store,
+        &log::Entry { errand: errand.id.clone(), agent: agent.to_owned(), origin, action: format!("Asked you to get past a check on {domain}"), ..Default::default() },
+    );
+    let said = format!(
+        "Asked {person} to get past the check on {domain}, in a live view of its tab. Meanwhile your browser tools work in a new tab of your own, anywhere but {domain}. When they answer, you're back on the check's tab and told how it went, with the page as it is then."
+    );
+    let details = json!({"ask": id.to_string(), "title": card_title, "body": body, "wants_text": false, "handoff": handoff});
+    Ok(ToolResult::text(said, details))
+}
+
+/// The check request `ask`'s live view may open once its card is in the
+/// conversation (its seq is the view's key): on tab `target`, of `site`.
+/// If the tab leaves the site, the request is taken back and the agent
+/// drives that tab again.
+async fn open_check_view(factory: Arc<Factory>, agent: String, errand: String, ask: i64, target: String, site: String) {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let seq = loop {
+        if factory.held_check(&agent).map(|(held, _)| held) != Some(ask) {
+            return;
+        }
+        if let Some(seq) = check_card(&factory, &agent, &errand) {
+            break seq;
+        }
+        if std::time::Instant::now() >= until {
+            tracing::warn!(%agent, "a check request's card didn't come: its live view can't open");
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    };
+    let (weak, runtime, whose) = (Arc::downgrade(&factory), tokio::runtime::Handle::current(), agent.clone());
+    // Where it went is the page's say: the agent hears the site it left.
+    let left = Box::new(move |_went: String| {
+        if let Some(factory) = weak.upgrade() {
+            runtime.spawn(check_left(factory, whose, ask));
+        }
+    });
+    if factory.held_check_seq(&agent, ask, seq) {
+        crate::browser_host::tab_view::check_opened(&factory, &agent, seq, &target, &site, left);
+    }
+}
+
+/// The seq of `agent`'s check card for `errand` waiting in its
+/// conversation, if it's there.
+fn check_card(factory: &Factory, agent: &str, errand: &str) -> Option<u64> {
+    let inner = factory.lock();
+    let transcript = inner.agents.get(agent)?.transcript.as_ref()?;
+    transcript.waiting_seqs().into_iter().rev().find(|seq| {
+        matches!(
+            transcript.entry(*seq).and_then(|entry| entry.kind.as_ref()),
+            Some(v1::entry::Kind::AskPerson(asked)) if asked.handoff.as_ref().is_some_and(|shown| {
+                shown.errand_id == errand && shown.kind == v1::ErrandHandoffKind::Captcha as i32
+            })
+        )
+    })
+}
+
+/// The check's tab left its site (it let the person through, or went
+/// elsewhere): the request is taken back and the agent drives that tab
+/// again, told where it is.
+pub(super) async fn check_left(factory: Arc<Factory>, agent: String, ask: i64) {
+    if factory.held_check(&agent).map(|(held, _)| held) != Some(ask) {
+        return;
+    }
+    let Some((_, site)) = factory.end_held_check(&agent).await else { return };
+    crate::extensions::ask::withdraw_for(&factory, ask, &format!("The page left {site}."));
+    let Some(errand) = factory.errands.open_of(&agent) else { return };
+    let mut record = errand.clone();
+    record.handoff = None;
+    factory.save_errand(record, None);
+    log::write(&factory.store, &log::Entry { errand: errand.id.clone(), agent: agent.clone(), action: format!("The check's tab left {site}"), ..Default::default() });
+    let page = match factory.errand_step(&agent, super::Step::Read { limit: 4096 }).await {
+        Ok((page, _)) => format!("The page is now:\n{page}"),
+        Err(why) => format!("Reading the page didn't work ({why}): read it with browser_read."),
+    };
+    let text = format!("The check's tab left {site}, so its request was taken back: you're on that tab again and your browser is yours. {page}");
+    factory.deliver_event(&agent, text, host_event("Your browser is yours again".to_owned()));
+}
+
+/// Whether `agent`'s tab shows a check that the visitor is a person now,
+/// as Claktory's reader sees it: never on the agent's or the page's say.
+async fn check_shown(factory: &Factory, agent: &str) -> bool {
+    let Some(seat) = factory.errands.seat_of(agent) else { return false };
+    let page = seat.live.lock().await.as_ref().map(|live| live.page.clone());
+    match page {
+        Some(page) => page.check().await.is_some(),
+        None => false,
+    }
+}
+
+/// Whether a request of `kind` of `agent`'s waits for the person.
+fn waiting_of(factory: &Factory, agent: &str, kind: v1::ErrandHandoffKind) -> bool {
     let pending: Vec<String> =
         crate::store::query(&factory.store.db(), "SELECT action FROM asks WHERE agent = ?1 AND state = 'pending' AND action != ''", [agent], |row| row.get(0))
             .unwrap_or_default();
     pending.iter().any(|action| {
-        matches!(serde_json::from_str(action), Ok(crate::card_actions::Action::Handoff { handoff }) if handoff.kind == v1::ErrandHandoffKind::Payment as i32)
+        matches!(serde_json::from_str(action), Ok(crate::card_actions::Action::Handoff { handoff }) if handoff.kind == kind as i32)
     })
+}
+
+/// Whether a payment request of `agent`'s waits for the person.
+fn payment_waiting(factory: &Factory, agent: &str) -> bool {
+    waiting_of(factory, agent, v1::ErrandHandoffKind::Payment)
 }
 
 /// PaymentOpened: the person opened the payment request at `seq` of
@@ -259,25 +415,29 @@ pub(crate) async fn answered(factory: &Arc<Factory>, agent: &str, handoff: &Hand
     }
     let person = factory.lock().config.person_capitalized().to_owned();
     let Some(errand) = factory.errands.get(&handoff.errand) else { return };
-    if State::from_wire(errand.state) != State::PersonsTurn {
-        return;
-    }
     let kind = v1::ErrandHandoffKind::try_from(handoff.kind).unwrap_or_default();
     let paid = kind == v1::ErrandHandoffKind::Payment;
+    let checked = kind == v1::ErrandHandoffKind::Captcha;
+    // A check holds only its own tab: the errand ran on meanwhile.
+    let held = if checked { factory.end_held_check(agent).await.is_some() } else { State::from_wire(errand.state) == State::PersonsTurn };
+    if !held || !State::from_wire(errand.state).open() {
+        return;
+    }
     let mut record = errand.clone();
     record.state = v1::ErrandState::Running as i32;
     record.handoff = None;
     factory.save_errand(record, None);
     let why = plain_line(reason, 500);
-    let logged = match (done, paid) {
-        (true, true) => format!("You paid on {}", handoff.domain),
-        (true, false) => "You finished your turn".to_owned(),
-        (false, _) => "You couldn't do it".to_owned(),
+    let logged = match (done, paid, checked) {
+        (true, true, _) => format!("You paid on {}", handoff.domain),
+        (true, _, true) => format!("You got past a check on {}", handoff.domain),
+        (true, false, false) => "You finished your turn".to_owned(),
+        (false, _, _) => "You couldn't do it".to_owned(),
     };
     log::write(&factory.store, &log::Entry { errand: errand.id.clone(), origin: handoff.origin.clone(), action: logged, outcome: if done { String::new() } else { why.clone() }, ..Default::default() });
     // Requests made before browser-simple handed the person the browser
     // itself: it's driven again. A payment never left the agent's hands.
-    let resumed = if paid { Ok(()) } else { factory.errands.seat_of(agent).map_or(Ok(()), |seat| seat.browser.resume()) };
+    let resumed = if paid || checked { Ok(()) } else { factory.errands.seat_of(agent).map_or(Ok(()), |seat| seat.browser.resume()) };
     let now = match resumed {
         Ok(()) => factory.errand_step(agent, super::Step::Read { limit: 4096 }).await,
         Err(why) => Err(why),
@@ -288,6 +448,7 @@ pub(crate) async fn answered(factory: &Arc<Factory>, agent: &str, handoff: &Hand
     };
     let text = match (done, paid) {
         (true, true) => format!("{person} says they've paid on {}: check the page before you go on. {page}", handoff.domain),
+        (true, false) if checked => format!("{person} got past the check on {}: your browser is yours again. {page}", handoff.domain),
         (true, false) => format!("{person} finished your handoff: {} {page}", sentence(&handoff.what)),
         (false, _) => {
             let because = if why.is_empty() { String::new() } else { format!(": \"{why}\"") };
@@ -323,6 +484,7 @@ mod tests {
         assert_eq!(kind_of("sms_code"), Some(v1::ErrandHandoffKind::Code));
         assert_eq!(kind_of("payment"), Some(v1::ErrandHandoffKind::Payment));
         assert_eq!(kind_of("Payment"), None);
+        assert_eq!(kind_of("check"), Some(v1::ErrandHandoffKind::Captcha));
         for gone in ["sign_in", "captcha", "identity", "other"] {
             assert_eq!(kind_of(gone), None, "{gone}");
         }

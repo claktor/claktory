@@ -1,6 +1,7 @@
 import AVFoundation
 import CoreImage
 import Flutter
+import LocalAuthentication
 import Network
 import Security
 import Testing
@@ -796,6 +797,28 @@ struct ReplayWriterTests {
     #expect(again != path)
     #expect(await messenger.call(channel, "cancel") == nil)
     #expect(!FileManager.default.fileExists(atPath: (again as NSString).deletingLastPathComponent))
+  }
+}
+
+struct OwnerAuthTests {
+  /// The owner's answer before an approval is signed (#546, Fugo 51234):
+  /// only a confirmed owner signs; a cancel is quiet, no passcode can never
+  /// approve, and anything else failed.
+  @Test func theOwnersAnswerSaysWhetherToSign() {
+    #expect(OwnerAuth.answer(ok: true, error: nil) == "ok")
+    #expect(OwnerAuth.answer(ok: false, error: LAError(.userCancel)) == "cancelled")
+    #expect(OwnerAuth.answer(ok: false, error: LAError(.systemCancel)) == "cancelled")
+    #expect(OwnerAuth.answer(ok: false, error: LAError(.passcodeNotSet)) == "unavailable")
+    #expect(OwnerAuth.answer(ok: false, error: LAError(.authenticationFailed)) == "failed")
+    #expect(OwnerAuth.answer(ok: false, error: nil) == "failed")
+  }
+
+  /// No reason, no prompt: nothing is asked or signed.
+  @Test func anApprovalWithoutWordsIsntAsked() async {
+    let answer = await withCheckedContinuation { done in
+      OwnerAuth.evaluate(reason: "") { done.resume(returning: $0) }
+    }
+    #expect(answer == "failed")
   }
 }
 

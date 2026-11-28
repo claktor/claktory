@@ -39,13 +39,29 @@
 #                              is refused: an ad hoc app is another app to
 #                              macOS, which then hides what the person's app
 #                              kept in the Keychain (its connections, say).
+#
+# On a Mac with the build service (claktory-ops mac/build-user), the
+# Developer ID key is the service's alone, so a real release goes in two
+# steps instead: scripts/build-request.sh release builds and signs main's
+# commit there, and then
+#   scripts/release.sh --from-service NAME [--out DIR]
+#                              takes that signed build (the service's
+#                              out/NAME), checks it against what the service
+#                              recorded (SHA256SUMS, signed.log, the
+#                              signatures), notarizes and staples it here and
+#                              publishes it into ~/.factory/releases (or DIR)
+#                              as above. The service itself runs
+#   scripts/release.sh --build-service
+#                              (only from scripts/build-service.sh): the same
+#                              build, unsigned, into CLAKTORY_BUILD_OUT.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/scripts/lib.sh"
 
-usage() { echo "usage: scripts/release.sh [--dev | [--out DIR] [--adhoc] [--rebuild] [--no-channel]]" >&2; exit 2; }
+usage() { echo "usage: scripts/release.sh [--dev | [--out DIR] [--adhoc] [--rebuild] [--no-channel] | --from-service NAME [--out DIR]]" >&2; exit 2; }
 RELEASES="$HOME/.factory/releases"; APP_NAME="Factory.app"; DEFINES=(); ADHOC=false; REBUILD=false; NO_CHANNEL=false
+SERVICE_BUILD=false FROM_SERVICE=""
 while (($#)); do
   case "$1" in
     --dev) RELEASES="$HOME/.factory-dev/releases"; APP_NAME="Factory Dev.app"; DEFINES=(--dart-define=FACTORY_PORT=7421 --dart-define=FACTORY_DEV=true); shift ;;
@@ -60,18 +76,38 @@ while (($#)); do
     --adhoc) ADHOC=true; shift ;;
     --rebuild) REBUILD=true; shift ;;
     --no-channel) NO_CHANNEL=true; shift ;;
+    --build-service) SERVICE_BUILD=true; shift ;;
+    --from-service) [[ -n "${2:-}" ]] || usage; FROM_SERVICE="$2"; shift 2 ;;
     *) usage ;;
   esac
 done
+if [[ -n "$FROM_SERVICE" ]]; then
+  { [[ "$APP_NAME" == Factory.app ]] && ! $ADHOC && ! $REBUILD && ! $NO_CHANNEL && ! $SERVICE_BUILD; } || usage
+  exec "$ROOT/scripts/release-from-service.sh" "$FROM_SERVICE" "$RELEASES"
+fi
+if $SERVICE_BUILD; then
+  # Only inside the build service, as its build user (scripts/build-service.sh).
+  { [[ "$APP_NAME" == Factory.app && "$RELEASES" == "$HOME/.factory/releases" ]] && ! $ADHOC && ! $REBUILD && ! $NO_CHANNEL; } || usage
+  [[ "${CLAKTORY_BUILD_SERVICE:-}" == 1 && -d "${CLAKTORY_BUILD_OUT:-}" && "${CLAKTORY_BUILD_SHA:-}" =~ ^[0-9a-f]{40}$ && -n "${FACTORY_UPDATE_URL:-}" ]] || {
+    echo "--build-service is for scripts/build-service.sh, inside the build service" >&2; exit 2; }
+  [[ -z "$(ls -A "$CLAKTORY_BUILD_OUT")" ]] || { echo "$CLAKTORY_BUILD_OUT isn't empty" >&2; exit 1; }
+  # Built into a folder of its own, then handed over as CLAKTORY_BUILD_OUT's
+  # contents: the release folder the service's signer signs.
+  RELEASES="$(mktemp -d)"
+fi
 if [[ "$APP_NAME" == "Factory Dev.app" ]] && { [[ "$RELEASES" != "$HOME/.factory-dev/releases" ]] || $ADHOC || $REBUILD || $NO_CHANNEL; }; then usage; fi
-if [[ "$APP_NAME" == "Factory.app" ]] && ! $ADHOC && [[ "$(signing_mode)" == adhoc ]]; then
+if [[ "$APP_NAME" == "Factory.app" ]] && ! $ADHOC && ! $SERVICE_BUILD && [[ "$(signing_mode)" == adhoc ]]; then
+  if [[ -d /Library/Claktory/build/requests ]]; then
+    echo "this Mac signs releases through the build service: scripts/build-request.sh release, then scripts/release.sh --from-service NAME" >&2
+    exit 1
+  fi
   echo "a real release is signed with the Developer ID and notarized, and this Mac can't now: it needs the \"Developer ID Application\" identity and the App Store Connect key (scripts/sign-release.sh says where). An ad hoc app is another app to macOS, and can't read what the person's app keeps in the Keychain. Build it ad hoc anyway only on purpose, with --adhoc." >&2
   exit 1
 fi
 # Direct messages keep their keys in the data-protection keychain, in the
 # group only the app's Developer ID provisioning profile grants: a release
 # signed without it would leave every Mac unable to keep them (Fugo, E6).
-if [[ "$APP_NAME" == "Factory.app" ]] && ! $ADHOC; then
+if [[ "$APP_NAME" == "Factory.app" ]] && ! $ADHOC && ! $SERVICE_BUILD; then
   MAC_PROFILE="${CLAKTORY_MAC_PROFILE:-$HOME/.appstoreconnect/claktory-mac.provisionprofile}"
   [[ -f "$MAC_PROFILE" ]] || {
     echo "a real release carries the Mac app's Developer ID provisioning profile, and there's none at $MAC_PROFILE (CLAKTORY_MAC_PROFILE names another): without it the app can't keep direct-message keys. scripts/sign-release.sh says what it must be." >&2
@@ -84,7 +120,22 @@ if [[ "${CLAKTORY_BROWSER_HOST:-}" == 1 && "$RELEASES" == "$HOME/.factory/releas
   echo "CLAKTORY_BROWSER_HOST=1 is for rehearsals (--out DIR) until browser control passes B6b" >&2
   exit 1
 fi
-if [[ "$APP_NAME" == "Factory.app" ]]; then
+if $SERVICE_BUILD; then
+  # The service's checkout is already exactly the commit: an export of it,
+  # out of a bundle git checked (scripts/build-service.sh), with no target/.
+  # Its secrets were checked when it was asked for (scripts/build-request.sh)
+  # and are again when it's published.
+  SOURCE="$CLAKTORY_BUILD_SHA"
+  [[ ! -e "$ROOT/target" && ! -e "$ROOT/.git" ]] || { echo "$ROOT isn't a fresh export" >&2; exit 1; }
+  SRC_ROOT="$ROOT"
+  export SRC_ROOT
+  release_rustflags
+  release_inputs
+  release_pub_get "$SRC_ROOT/app"
+  QA_LIES_TARGET="$(mktemp -d)"
+  CARGO_TARGET_DIR="$QA_LIES_TARGET" "$SRC_ROOT/scripts/check-qa-lies.sh" || { rm -rf "$QA_LIES_TARGET"; echo "a QA-only lying feature isn't refused in release builds; not releasing" >&2; exit 1; }
+  rm -rf "$QA_LIES_TARGET"
+elif [[ "$APP_NAME" == "Factory.app" ]]; then
   # Built only from what's committed: a release is never someone's work in
   # progress. The real one only from main's commit (on main, or a checkout
   # whose branch is exactly main).
@@ -162,7 +213,9 @@ if [[ "$APP_NAME" == "Factory.app" ]]; then
   # Signing with a Developer ID makes a different backend: the first signed
   # release ships one even when the source didn't change.
   SIGNING="$(signing_mode)"
-  if [[ "$SIGNING" != adhoc ]]; then
+  # The build service's build is signed after it's built, by its signer:
+  # scripts/release-from-service.sh adds the signing line then.
+  if [[ "$SIGNING" != adhoc ]] && ! $SERVICE_BUILD; then
     FINGERPRINT="$(printf '%s\nsigning: %s\n' "$FINGERPRINT" "$SIGNING" | shasum -a 256 | cut -d' ' -f1)"
   fi
 fi
@@ -242,6 +295,9 @@ fi
 # Finder's version too (Info.plist takes numbers only: v0.1.3 is 0.1.3).
 BUNDLE_VERSION="$(sed -n 's/^v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' <<<"$FACTORY_VERSION")"
 BUNDLE_VERSION="${BUNDLE_VERSION:-0.0.0}"
+# Built in an agent's shell under Claktory's browser sandbox, Swift packages'
+# own sandbox is off (xcode-shim/use.sh); the build service's user isn't
+# under it, so a release it builds keeps that sandbox on.
 (cd "$SRC_ROOT/app" && flutter build macos --release --build-name "$BUNDLE_VERSION" --build-number "$BUNDLE_VERSION" --dart-define=FACTORY_VERSION="$FACTORY_VERSION" ${DEFINES[@]+"${DEFINES[@]}"})
 
 partial="$RELEASES/$FACTORY_VERSION.partial"
@@ -258,7 +314,7 @@ echo "$BACKEND_VERSION" >"$partial/backend-version"
 echo "$FINGERPRINT" >"$partial/backend-fingerprint"
 # What it was built from, for scripts/publish.sh --built: the commit, and the
 # channel stamped into its backend (none unless FACTORY_UPDATE_URL was set).
-git -C "$ROOT" rev-parse "${SOURCE:-HEAD}" >"$partial/source"
+if $SERVICE_BUILD; then echo "$SOURCE"; else git -C "$ROOT" rev-parse "${SOURCE:-HEAD}"; fi >"$partial/source"
 echo "${FACTORY_UPDATE_URL:-}" >"$partial/update-url"
 if [[ "$APP_NAME" == "Factory.app" ]]; then
   # What's unreleased stays out of a real release.
@@ -295,7 +351,17 @@ else
   python3 "$ROOT/scripts/check-macho.py" "$partial/$APP_NAME/Contents/Frameworks" ||
     { echo "the app's libraries wouldn't load (above); not releasing it" >&2; exit 1; }
   # Developer ID and notarized when this Mac has what that takes; ad hoc
-  # otherwise, as dev releases always are.
+  # otherwise, as dev releases always are. In the build service, its signer
+  # signs it once it's handed over, and the person's account notarizes it
+  # (scripts/release-from-service.sh).
+  if $SERVICE_BUILD; then
+    echo "$FACTORY_VERSION" >"$partial/version"
+    mv "$partial"/* "$CLAKTORY_BUILD_OUT/"
+    rmdir "$partial"
+    rm -rf "$RELEASES"
+    echo "built Claktory $FACTORY_VERSION from $SOURCE, unsigned, into $CLAKTORY_BUILD_OUT for the service's signer"
+    exit 0
+  fi
   "$ROOT/scripts/sign-release.sh" "$partial"
   if ! $ADHOC; then
     spctl --assess --type execute "$partial/$APP_NAME" || { echo "$partial/$APP_NAME isn't notarized after signing; not releasing it" >&2; exit 1; }

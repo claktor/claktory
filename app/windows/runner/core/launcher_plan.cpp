@@ -73,4 +73,34 @@ unsigned long TakeAfter(std::wstring* arguments) {
   return static_cast<unsigned long>(pid);
 }
 
+std::wstring LauncherFor(const std::wstring& exe) {
+  std::wstring path = exe;
+  auto up = [&path]() {
+    std::size_t slash = path.find_last_of(L'\\');
+    if (slash == std::wstring::npos) {
+      path.clear();
+      return std::wstring();
+    }
+    std::wstring name = path.substr(slash + 1);
+    path.resize(slash);
+    return name;
+  };
+  up();
+  std::wstring version = up();
+  std::wstring app = up();
+  if (path.empty() || app.size() != 3) return std::wstring();
+  for (std::size_t i = 0; i < 3; ++i) {
+    wchar_t c = app[i];
+    if (c >= L'A' && c <= L'Z') c = static_cast<wchar_t>(c - L'A' + L'a');
+    if (c != L"app"[i]) return std::wstring();
+  }
+  std::string ascii;
+  for (wchar_t c : version) {
+    if (c > 0x7F) return std::wstring();
+    ascii.push_back(static_cast<char>(c));
+  }
+  if (!IsAppVersion(ascii)) return std::wstring();
+  return path + L"\\Claktory.exe";
+}
+
 }  // namespace claktory

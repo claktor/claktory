@@ -52,6 +52,11 @@ std::vector<std::string> StaleVersions(const std::vector<std::string>& folders,
 // [arguments] unchanged, when they don't start so.
 unsigned long TakeAfter(std::wstring* arguments);
 
+// Where the launcher would be for the app at [exe]: <root>\Claktory.exe for
+// an exe in <root>\app\<version>\, "" for an exe anywhere else (a build, an
+// unzipped bundle). Whether it's there is the caller's to check.
+std::wstring LauncherFor(const std::wstring& exe);
+
 }  // namespace claktory
 
 #endif  // RUNNER_CORE_LAUNCHER_PLAN_H_

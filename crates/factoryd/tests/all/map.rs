@@ -40,6 +40,7 @@ fn config(dir: &std::path::Path) -> Config {
             path: dir.join("factory"),
             folders: vec![folder("app", "App"), folder("research", "Research")],
             archived: false,
+            brief: String::new(),
             other: Default::default(),
         },
         ProjectConfig {
@@ -48,6 +49,7 @@ fn config(dir: &std::path::Path) -> Config {
             path: dir.join("site"),
             folders: Vec::new(),
             archived: false,
+            brief: String::new(),
             other: Default::default(),
         },
     ];

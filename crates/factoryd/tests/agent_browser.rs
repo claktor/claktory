@@ -21,6 +21,11 @@ use common::{Client, MODEL, View, apply_request, start, temp_dir};
 
 /// A page with a text field, served on this computer.
 async fn page() -> String {
+    page_of("<!doctype html><title>Form</title><body style='background:#36c'><input autofocus id=f>").await
+}
+
+/// A page of `body`, served on this computer.
+async fn page_of(body: &'static str) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let address = listener.local_addr().expect("address");
     tokio::spawn(async move {
@@ -29,7 +34,6 @@ async fn page() -> String {
             tokio::spawn(async move {
                 let mut request = [0u8; 4096];
                 let _ = stream.read(&mut request).await;
-                let body = "<!doctype html><title>Form</title><body style='background:#36c'><input autofocus id=f>";
                 let reply = format!(
                     "HTTP/1.1 200 OK\r\ncontent-type: text/html\r\nset-cookie: sid=1; Max-Age=3600\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                     body.len()
@@ -774,4 +778,193 @@ async fn a_browser_left_unused_closes_without_waiting_warm() {
         driven && state(view) == Some(State::Off)
     })
     .await;
+}
+
+/// The next frame of a live view on `client`, from `events` first.
+async fn tab_frame(client: &mut Client, events: Vec<v1::ServerMessage>) -> v1::AgentTabFrame {
+    let early = events.into_iter().find_map(|message| match message.body {
+        Some(Body::AgentTabFrame(frame)) => Some(frame),
+        _ => None,
+    });
+    match early {
+        Some(frame) => frame,
+        None => {
+            client
+                .wait_for(|body| match body {
+                    Body::AgentTabFrame(frame) => Some(frame.clone()),
+                    _ => None,
+                })
+                .await
+        }
+    }
+}
+
+async fn tab_ended(client: &mut Client) -> v1::AgentTabViewEnded {
+    client
+        .wait_for(|body| match body {
+            Body::AgentTabViewEnded(ended) => Some(ended.clone()),
+            _ => None,
+        })
+        .await
+}
+
+fn watch_tab(agent: &str, seq: u64, on: bool) -> Request {
+    Request::WatchAgentTab(v1::WatchAgentTab { agent_id: agent.into(), request_seq: seq, on, max_width: 640 })
+}
+
+fn tab_ack(frame: &v1::AgentTabFrame) -> Request {
+    Request::AgentTabFrameAck(v1::AgentTabFrameAck { agent_id: frame.agent_id.clone(), request_seq: frame.request_seq, frame_seq: frame.frame_seq })
+}
+
+fn tab_input(agent: &str, seq: u64, events: Vec<v1::agent_browser_event::Event>) -> Request {
+    let events = events.into_iter().map(|event| v1::AgentBrowserEvent { event: Some(event) }).collect();
+    Request::AgentTabInput(v1::AgentTabInput { agent_id: agent.into(), request_seq: seq, events })
+}
+
+/// A new tab of the driven browser at `url`: its target id, and the
+/// session the drive has on it.
+async fn tab_at(drive: &mut factoryd::browser_host::DriveForTest, url: &str) -> (String, String) {
+    let created = drive.call("Target.createTarget", serde_json::json!({ "url": url })).await;
+    let target = created["result"]["targetId"].as_str().unwrap_or_else(|| panic!("no tab: {created}")).to_owned();
+    let attached = drive.call("Target.attachToTarget", serde_json::json!({"targetId": target, "flatten": true})).await;
+    let session = attached["result"]["sessionId"].as_str().unwrap_or_else(|| panic!("not attached: {attached}")).to_owned();
+    // Laid out on a desktop's screen, as an errand's page is.
+    let metrics = serde_json::json!({"width": 1280, "height": 800, "deviceScaleFactor": 1, "mobile": false});
+    drive.call_in(&session, "Emulation.setDeviceMetricsOverride", metrics).await;
+    let ready = serde_json::json!({"expression": "location.href + ' ' + document.readyState", "returnByValue": true});
+    for _ in 0..50 {
+        let state = drive.call_in(&session, "Runtime.evaluate", ready.clone()).await;
+        if state["result"]["result"]["value"] == format!("{url} complete") {
+            return (target, session);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("the tab never went to {url}");
+}
+
+/// Watching an agent's browser: its page's pixels, to the one connection
+/// that watches, with Claktory's site for it; no input; the same view
+/// opened from another device moves there.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_person_watches_an_agents_browser_from_one_device_at_a_time() {
+    if !chrome_here() {
+        return;
+    }
+    factoryd::browser_host::enable_for_test();
+    factoryd::browser_host::standin_for_test();
+    let dir = temp_dir();
+    std::fs::create_dir_all(dir.join("home")).expect("home");
+    let config = serde_json::json!({"agents": [{"id": "yukako", "name": "Yukako", "model": MODEL, "effort": "off"}]});
+    std::fs::write(dir.join("home/config.json"), config.to_string()).expect("config");
+    let (addr, factory) = start(&dir).await;
+    let (mut mac, workspace, _) = Client::connect(addr).await;
+    browser_on(&mut mac, &mut View { workspace, ..View::default() }, "yukako").await;
+    assert!(refused(mac.request(watch_tab("yukako", 0, true)).await.body).contains("isn't open"));
+
+    let url = page().await;
+    let mut drive = factoryd::browser_host::drive_agent_for_test(&factory, "yukako", "errand-w", None).await.expect("yukako drives");
+    tab_at(&mut drive, &url).await;
+    let events = mac.ok(watch_tab("yukako", 0, true)).await;
+    let frame = tab_frame(&mut mac, events).await;
+    assert_eq!((frame.agent_id.as_str(), frame.request_seq, frame.site.as_str()), ("yukako", 0, "127.0.0.1"));
+    assert!(frame.width > 0 && frame.width <= 640 && !frame.jpeg.is_empty(), "{}x{}", frame.width, frame.height);
+    mac.ok(tab_ack(&frame)).await;
+    let typed = tab_input("yukako", 0, vec![v1::agent_browser_event::Event::Text("x".into())]);
+    assert!(refused(mac.request(typed).await.body).contains("no input"));
+    // No check is open at 9.
+    assert!(refused(mac.request(watch_tab("yukako", 9, true)).await.body).contains("isn't waiting"));
+
+    let (mut phone, _, _) = Client::connect(addr).await;
+    phone.ok(watch_tab("yukako", 0, true)).await;
+    let moved = tab_ended(&mut mac).await;
+    assert_eq!(moved.reason(), v1::AgentTabViewEnd::Moved, "{moved:?}");
+    phone.ok(watch_tab("", 0, false)).await;
+    drive.end("errand-w");
+}
+
+/// A check handed to the person: only its tab, their typing reaches its
+/// page alone and only from the device watching, paste never; once its
+/// page leaves the check's site, the view ends before showing it, and the
+/// agent's side is told where it went.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_checks_tab_takes_the_persons_input_until_it_leaves_its_site() {
+    use v1::agent_browser_event::Event;
+    if !chrome_here() {
+        return;
+    }
+    factoryd::browser_host::enable_for_test();
+    factoryd::browser_host::standin_for_test();
+    let dir = temp_dir();
+    std::fs::create_dir_all(dir.join("home")).expect("home");
+    let config = serde_json::json!({"agents": [{"id": "yukako", "name": "Yukako", "model": MODEL, "effort": "off"}]});
+    std::fs::write(dir.join("home/config.json"), config.to_string()).expect("config");
+    let (addr, factory) = start(&dir).await;
+    let (mut mac, workspace, _) = Client::connect(addr).await;
+    browser_on(&mut mac, &mut View { workspace, ..View::default() }, "yukako").await;
+    // A check the page draws itself, HUMAN's press-and-hold box by its
+    // name, beside a password field, counting every press it gets.
+    let url = page_of(concat!(
+        "<!doctype html><title>Verify</title><body style='margin:0;background:#36c'>",
+        "<div id=px-captcha style='width:300px;height:80px;background:#eee'>Press &amp; Hold</div>",
+        "<input type=password autofocus id=f>",
+        "<script>window.presses = 0; addEventListener('mousedown', () => window.presses++);</script>"
+    ))
+    .await;
+    let mut drive = factoryd::browser_host::drive_agent_for_test(&factory, "yukako", "errand-c", None).await.expect("yukako drives");
+    let (target, session) = tab_at(&mut drive, &url).await;
+    let left = factoryd::browser_host::check_opened_for_test(&factory, "yukako", 7, &target, "127.0.0.1");
+
+    let events = mac.ok(watch_tab("yukako", 7, true)).await;
+    let frame = tab_frame(&mut mac, events).await;
+    assert_eq!((frame.request_seq, frame.site.as_str()), (7, "127.0.0.1"));
+    mac.ok(tab_ack(&frame)).await;
+
+    // A page of no check, faking one: its own password field, focused,
+    // and its own box take none of it, and the view says why. Only the
+    // Mac's input is taken at all.
+    let key = |key: &str, down: bool| Event::Key(v1::AgentBrowserKey { down, key: key.into(), modifiers: 0 });
+    mac.ok(tab_input("yukako", 7, vec![key("h", true), key("h", false), Event::Text("ello".into())])).await;
+    let note = mac
+        .wait_for(|body| match body {
+            Body::AgentTabNote(note) => Some(note.clone()),
+            _ => None,
+        })
+        .await;
+    assert_eq!(note.request_seq, 7);
+    assert!(note.message.contains("only it takes your typing"), "{}", note.message);
+    let (mut phone, _, _) = Client::connect(addr).await;
+    assert!(refused(phone.request(tab_input("yukako", 7, vec![Event::Text("!".into())])).await.body).contains("Open the check here"));
+    assert!(refused(mac.request(tab_input("yukako", 7, vec![Event::Paste("secret".into())])).await.body).contains("Paste"));
+    let click = |kind: v1::AgentBrowserPointerKind| {
+        Event::Pointer(v1::AgentBrowserPointer { kind: kind.into(), x: 0.05, y: 0.02, button: 1, frame_seq: frame.frame_seq })
+    };
+    mac.ok(tab_input("yukako", 7, vec![click(v1::AgentBrowserPointerKind::Down), click(v1::AgentBrowserPointerKind::Up), Event::Text("x".into())])).await;
+    let value = || serde_json::json!({"expression": "document.getElementById('f').value", "returnByValue": true});
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let typed = drive.call_in(&session, "Runtime.evaluate", value()).await;
+    assert_eq!(typed["result"]["result"]["value"], "", "{typed}");
+    let presses = drive.call_in(&session, "Runtime.evaluate", serde_json::json!({"expression": "window.presses", "returnByValue": true})).await;
+    assert_eq!(presses["result"]["result"]["value"], 0, "the page's own box: {presses}");
+
+    // Another site: the view ends, and the agent's side hears where.
+    let elsewhere = url.replace("127.0.0.1", "localhost");
+    drive.call_in(&session, "Page.navigate", serde_json::json!({ "url": elsewhere })).await;
+    let ended = mac
+        .wait_for(|body| match body {
+            Body::AgentTabViewEnded(ended) => Some(ended.clone()),
+            Body::AgentTabFrame(frame) => {
+                assert_eq!(frame.site, "127.0.0.1", "no frame of another site");
+                None
+            }
+            _ => None,
+        })
+        .await;
+    assert_eq!(ended.reason(), v1::AgentTabViewEnd::LeftSite, "{ended:?}");
+    assert!(ended.message.contains("127.0.0.1"), "{}", ended.message);
+    assert_eq!(left.lock().unwrap().as_deref(), Some("127.0.0.1"), "the site it left");
+    assert!(refused(mac.request(watch_tab("yukako", 7, true)).await.body).contains("isn't waiting"));
+    assert_eq!(factoryd::browser_host::end_check_for_test(&factory, "yukako", 7), None, "gone once it left");
+    drive.end("errand-c");
 }

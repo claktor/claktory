@@ -8,6 +8,7 @@
 //! What it answers is read as strictly as the extension's
 //! (`browser::schema`): the page is hostile.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -18,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use unicode_segmentation::UnicodeSegmentation;
 
-use super::cdp::{Cdp, Error};
+use super::cdp::{Cdp, Error, Sent, WAIT};
 use super::keys;
 use super::pace::{self, Point};
 use crate::browser::schema::{self, Answer, Op};
@@ -101,6 +102,9 @@ const CHECK: &str = r#"(() => {
   if (any('iframe[src*="challenges.cloudflare.com"]')) return 'cloudflare';
   if (any('iframe[src*="captcha-delivery.com"]')) return 'datadome';
   if (document.querySelector('#px-captcha,[id^="px-captcha"]')) return 'human';
+  if (any('iframe[src*="arkoselabs.com"],iframe[src*="funcaptcha.com"],iframe[src*="arkoselabs.cn"]')) return 'arkose';
+  if (any('iframe[src*="/recaptcha/"][src*="bframe"]')) return 'recaptcha';
+  if (any('iframe[src*="hcaptcha.com"][src*="frame=challenge"]')) return 'hcaptcha';
   return '';
 })()"#;
 
@@ -162,6 +166,9 @@ pub(crate) struct Page {
     /// The reader's worlds in frames in the page's process, by frame and
     /// document.
     frame_worlds: Mutex<std::collections::HashMap<(String, String), i64>>,
+    /// The fields Claktory typed a login into, as the reader's world holds
+    /// them: blacked out of every screenshot, whatever they show.
+    filled: std::sync::Mutex<Vec<String>>,
 }
 
 impl Page {
@@ -176,7 +183,22 @@ impl Page {
             frame_refs: Mutex::default(),
             frame_sessions: Mutex::default(),
             frame_worlds: Mutex::default(),
+            filled: std::sync::Mutex::default(),
         }
+    }
+
+    /// Claktory typed a login into `object`.
+    pub(crate) fn remember_filled(&self, object: &str) {
+        let mut filled = crate::locking::lock(&self.filled);
+        if filled.len() >= 64 {
+            filled.remove(0);
+        }
+        filled.push(object.to_owned());
+    }
+
+    /// The fields Claktory typed a login into on this page.
+    pub(crate) fn filled(&self) -> Vec<String> {
+        crate::locking::lock(&self.filled).clone()
     }
 
     /// Where the errand may turn on two-step sign-in now.
@@ -381,7 +403,24 @@ impl Page {
     pub(crate) async fn check(&self) -> Option<String> {
         let (context, _, _) = self.world().await.ok()?;
         let found = self.call("Runtime.evaluate", json!({"expression": CHECK, "contextId": context, "returnByValue": true})).await.ok()?;
-        found["result"]["value"].as_str().filter(|who| matches!(*who, "cloudflare" | "google" | "datadome" | "human")).map(str::to_owned)
+        let found = found["result"]["value"]
+            .as_str()
+            .filter(|who| matches!(*who, "cloudflare" | "google" | "datadome" | "human" | "arkose" | "recaptcha" | "hcaptcha"))
+            .map(str::to_owned);
+        // One inside a frame of the page's, at any depth (a site's own
+        // challenge frame holding Google's box), as Chrome lists them.
+        match found {
+            Some(found) => Some(found),
+            None => super::screenshot::check_in_frames(self).await.map(str::to_owned),
+        }
+    }
+
+    /// `expression`'s value in the reader's world, which the page's own
+    /// scripts can't reach; None if the page didn't answer.
+    pub(crate) async fn in_world(&self, expression: &str) -> Option<Value> {
+        let (context, _, _) = self.world().await.ok()?;
+        let found = self.call("Runtime.evaluate", json!({"expression": expression, "contextId": context, "returnByValue": true})).await.ok()?;
+        found.get("exceptionDetails").is_none().then(|| found["result"]["value"].clone())
     }
 
     /// Forgets the reader's world: the page went elsewhere.
@@ -476,10 +515,10 @@ impl Page {
                 break;
             }
             let mut next = Instant::now();
-            for (delta, gap) in bout {
+            for gap in bout {
                 next += gap;
                 hand.wait_until(next).await?;
-                let wheel = json!({"type": "mouseWheel", "x": at.0, "y": at.1, "deltaX": 0, "deltaY": sign * delta, "pointerType": "mouse"});
+                let wheel = json!({"type": "mouseWheel", "x": at.0, "y": at.1, "deltaX": 0, "deltaY": sign * pace::NOTCH, "pointerType": "mouse"});
                 self.call("Input.dispatchMouseEvent", wheel).await.map_err(gone)?;
             }
         }
@@ -488,6 +527,36 @@ impl Page {
         let spot = self.errand_op(json!({"op": "wheel_spot", "x": at.0, "y": at.1})).await?;
         let scrolled = json!({"scroll_y": number(&spot, "scroll_y")?});
         schema::answer(&op, &scrolled.to_string()).map_err(|_| unreadable())
+    }
+
+    /// Brings `target` of the page out from under what covers it (a sticky
+    /// ad, a bar) or onto the screen, as a person does: the wheel turns
+    /// until it's near the screen's middle. At most twice; whatever covers
+    /// it then is the caller's to refuse.
+    pub(crate) async fn bring_clear(&self, hand: &mut Hand<'_>, target: &str) -> Result<(), (String, String)> {
+        for _ in 0..2 {
+            let by = number(&self.errand_op(json!({"op": "clear_spot", "target": target})).await?, "by")?;
+            let notches = (by.abs() / pace::NOTCH).round() as u32;
+            if notches == 0 {
+                return Ok(());
+            }
+            let spot = self.errand_op(json!({"op": "wheel_spot"})).await?;
+            let view = (number(&spot, "view_width")?, number(&spot, "view_height")?);
+            let at = (number(&spot, "x")?, number(&spot, "y")?);
+            self.move_to(hand, at, view, 200.0).await?;
+            let mut next = Instant::now();
+            for n in 0..notches.min(64) {
+                if n > 0 {
+                    next += std::time::Duration::from_millis(u64::from(hand.rng.whole(25, 90)));
+                }
+                hand.wait_until(next).await?;
+                let wheel = json!({"type": "mouseWheel", "x": at.0, "y": at.1, "deltaX": 0, "deltaY": by.signum() * pace::NOTCH, "pointerType": "mouse"});
+                self.call("Input.dispatchMouseEvent", wheel).await.map_err(gone)?;
+            }
+            let pause = pace::between_bouts(hand.rng);
+            hand.wait_until(Instant::now() + pause).await?;
+        }
+        Ok(())
     }
 
     /// Whether `target` is an element of one of the page's frames, as the last read named it.
@@ -564,6 +633,24 @@ impl Page {
         Ok(place)
     }
 
+    /// Why a click on `target` is refused before anything else: it leaves,
+    /// by its link or its form, for an address the fence never lets the
+    /// page go to. None when it doesn't, or the reader can't say.
+    pub(crate) async fn fenced_click(&self, document: &str, target: &str) -> Option<(String, String)> {
+        let place = self.place_of(document, target).await.ok()?;
+        let described = self
+            .ask_on(place.session.as_deref(), place.context, json!({"op": "describe", "kind": "click", "target": target, "text": ""}))
+            .await
+            .ok()?;
+        let described: Value = serde_json::from_str(&described).ok()?;
+        // Another origin's destination is a whole address; this page's, a path.
+        let destination = url::Url::parse(described["action"]["destination"].as_str()?).ok()?;
+        let why = super::fence::check(destination.as_str()).err()?;
+        let site = destination.origin().ascii_serialization();
+        let site = if site == "null" { format!("{}:", destination.scheme()) } else { site };
+        Some(("sensitive_action".to_owned(), format!("it goes to {site}: {why}")))
+    }
+
     /// Clicks or fills an element the agent read, as a person does
     /// (R11.4): the mouse travels to it, rests, and presses where the
     /// element is checked to be right then; a fill types each character
@@ -572,6 +659,9 @@ impl Page {
     pub(crate) async fn act(&self, hand: &mut Hand<'_>, op: &Op) -> Result<Answer, (String, String)> {
         match op {
             Op::Click { document, target, .. } => {
+                if !self.in_a_frame(target) {
+                    let _ = self.bring_clear(hand, target).await;
+                }
                 let place = self.validated(document, target, "click", "").await?;
                 self.click(hand, &place, target).await?;
                 schema::answer(op, r#"{"done":true}"#).map_err(|_| unreadable())
@@ -749,11 +839,13 @@ impl Page {
         if text.contains('\t') {
             return Err(("unsupported_target".to_owned(), "a tab moves the keyboard to another field: fill this one without tabs".to_owned()));
         }
-        if text.contains(['\n', '\r']) {
-            return Err((
-                "unsupported_target".to_owned(),
-                "Enter can send what's typed: fill it without line breaks, and send it with the page's own button".to_owned(),
-            ));
+        // A line break is Shift+Enter, which writes a new line in a text
+        // area or an editor (a post, a message) without sending it; in a
+        // one-line field Enter would send the form, so none there.
+        let text = &text.replace("\r\n", "\n").replace('\r', "\n");
+        let lines = text.contains('\n');
+        if !self.in_a_frame(target) {
+            let _ = self.bring_clear(hand, target).await;
         }
         let place = self.validated(document, target, "fill", text).await?;
         let planned = pace::typing_time(hand.person, text);
@@ -768,6 +860,12 @@ impl Page {
             ));
         }
         let aimed = self.op_at(&place, json!({"op": "aim", "target": target})).await?;
+        if lines && !matches!(aimed["field"].as_str(), Some("textarea" | "editable")) {
+            return Err((
+                "unsupported_target".to_owned(),
+                "Enter sends a one-line field: fill it without line breaks, and send it with the page's own button".to_owned(),
+            ));
+        }
         let spot = self.spot(&place, &aimed).await?;
         // In a frame, the frame must hold the keyboard as well.
         if aimed["focused"] != true || place.frame.is_some() {
@@ -802,7 +900,8 @@ impl Page {
             let held = pace::key_hold(hand.rng);
             let down = Instant::now();
             let lead = Duration::from_millis(u64::from(hand.rng.whole(25, 70)));
-            if let Err(error) = self.type_one(grapheme, held, lead).await {
+            let typed = if *grapheme == "\n" { self.line_break(held, lead).await } else { self.type_one(grapheme, held, lead).await };
+            if let Err(error) = typed {
                 let failure = ("outcome_unknown".to_owned(), format!("a key may not have gone through ({error})"));
                 return Err(failed_after(failure, done, of));
             }
@@ -848,7 +947,7 @@ impl Page {
         if self.hits(spot, target, aimed).await.is_ok() {
             return Ok(aimed);
         }
-        let middle = ((rect.0 + rect.2 / 2.0).clamp(0.0, view.0 - 1.0), (rect.1 + rect.3 / 2.0).clamp(0.0, view.1 - 1.0));
+        let middle = pace::pixel((rect.0 + rect.2 / 2.0, rect.1 + rect.3 / 2.0), view);
         self.hits(spot, target, middle).await?;
         Ok(middle)
     }
@@ -872,13 +971,14 @@ impl Page {
         Ok(())
     }
 
-    /// The mouse goes from where it is to `to` over a person's time, on a
-    /// gentle curve inside the `view`; it first shows up somewhere inside.
-    async fn move_to(&self, hand: &mut Hand<'_>, to: Point, view: Point, width: f64) -> Result<(), (String, String)> {
+    /// The mouse goes from where it is to `to`, a target `width` wide, over
+    /// a person's time and in a hand's sub-movements inside the `view`; it
+    /// first shows up somewhere inside.
+    pub(super) async fn move_to(&self, hand: &mut Hand<'_>, to: Point, view: Point, width: f64) -> Result<(), (String, String)> {
         let from = match *hand.pointer {
-            Some((x, y)) => (x.clamp(0.0, view.0 - 1.0), y.clamp(0.0, view.1 - 1.0)),
+            Some(at) => pace::pixel(at, view),
             None => {
-                let start = (view.0 * hand.rng.between(0.2, 0.8), view.1 * hand.rng.between(0.2, 0.8));
+                let start = pace::pixel((view.0 * hand.rng.between(0.2, 0.8), view.1 * hand.rng.between(0.2, 0.8)), view);
                 (hand.still)()?;
                 self.mouse("mouseMoved", start).await.map_err(gone)?;
                 *hand.pointer = Some(start);
@@ -886,34 +986,88 @@ impl Page {
             }
         };
         let took = pace::travel(hand.rng, (to.0 - from.0).hypot(to.1 - from.1), width);
+        self.glide(hand, from, to, width, view, took).await
+    }
+
+    /// The mouse goes from `from` to `to`, a target `width` wide, taking
+    /// `took`, inside the `view`.
+    /// Each move goes out on time, without waiting for Chrome's answer to
+    /// the one before, which comes a frame later: waiting would make the
+    /// mouse report once a frame and take twice its time. The answers are
+    /// all in before it returns, stopped too, so no move reaches the page
+    /// after.
+    async fn glide(&self, hand: &mut Hand<'_>, from: Point, to: Point, width: f64, view: Point, took: Duration) -> Result<(), (String, String)> {
         let mut next = Instant::now();
-        for (point, gap) in pace::path(hand.rng, from, to, view, took) {
+        let mut unanswered: VecDeque<Sent<'_>> = VecDeque::new();
+        for (point, gap) in pace::path(hand.rng, from, to, width, view, took) {
             next += gap;
-            hand.wait_until(next).await?;
-            self.mouse("mouseMoved", point).await.map_err(gone)?;
+            if let Err(stopped) = hand.wait_until(next).await {
+                for moved in unanswered {
+                    let _ = moved.answered().await;
+                }
+                return Err(stopped);
+            }
+            if unanswered.len() >= MOVES_UNANSWERED
+                && let Some(oldest) = unanswered.pop_front()
+            {
+                oldest.answered().await.map_err(gone)?;
+            }
+            let moved = self.cdp.send_within("Input.dispatchMouseEvent", mouse_event("mouseMoved", point), Some(&self.session), WAIT);
+            unanswered.push_back(moved.await.map_err(gone)?);
             *hand.pointer = Some(point);
+        }
+        for moved in unanswered {
+            moved.answered().await.map_err(gone)?;
         }
         Ok(())
     }
 
-    /// One mouse event at `at`: the left button goes down with a press
-    /// and up with a release.
-    async fn mouse(&self, kind: &str, at: Point) -> Result<Value, Error> {
-        let mut event = json!({"type": kind, "x": at.0, "y": at.1, "pointerType": "mouse"});
-        match kind {
-            "mousePressed" => {
-                event["button"] = json!("left");
-                event["buttons"] = json!(1);
-                event["clickCount"] = json!(1);
-            }
-            "mouseReleased" => {
-                event["button"] = json!("left");
-                event["buttons"] = json!(0);
-                event["clickCount"] = json!(1);
-            }
-            _ => event["buttons"] = json!(0),
+    /// The rest of a reading pause, until `until`. In some of the longer
+    /// ones the mouse drifts a little once, slowly, as a reader's hand
+    /// does: only where it already is on this page, on a page still on its
+    /// site, and under an input lease (`lease`, for as long as it may
+    /// take); without one it stays still.
+    pub(crate) async fn reading_pause<L>(
+        &self,
+        hand: &mut Hand<'_>,
+        until: Instant,
+        lease: impl FnOnce(Duration) -> Result<L, (String, String)>,
+    ) -> Result<(), (String, String)> {
+        let left = until.saturating_duration_since(Instant::now());
+        let Some((from, drift)) = hand.pointer.and_then(|from| Some((from, pace::drift(hand.rng, left)?))) else {
+            return hand.wait_until(until).await;
+        };
+        hand.wait_until(Instant::now() + drift.after).await?;
+        if !self.flagged().await
+            && matches!(self.elsewhere().await, Ok(None))
+            && let Ok(_held) = lease(drift.took + DRIFT_SPARE)
+            && let Ok(view) = self.view().await
+        {
+            let from = pace::pixel(from, view);
+            let to = (from.0 + drift.by.0, from.1 + drift.by.1);
+            self.glide(hand, from, to, DRIFT_WIDTH, view, drift.took).await?;
         }
-        self.call("Input.dispatchMouseEvent", event).await
+        hand.wait_until(until).await
+    }
+
+    /// One mouse event at `at`: the left button goes down with a press,
+    /// pressed as hard as a mouse button reads (half its range, as Pointer
+    /// Events has a mouse's buttons), and up with a release.
+    pub(super) async fn mouse(&self, kind: &str, at: Point) -> Result<Value, Error> {
+        self.call("Input.dispatchMouseEvent", mouse_event(kind, at)).await
+    }
+
+    /// A new line in a text area or an editor: Shift+Enter, as a person
+    /// writes one without sending what's typed.
+    async fn line_break(&self, held: Duration, lead: Duration) -> Result<(), Error> {
+        let shift = |kind: &str, modifiers: u32| json!({"type": kind, "key": "Shift", "code": "ShiftLeft", "windowsVirtualKeyCode": 16, "modifiers": modifiers});
+        self.call("Input.dispatchKeyEvent", shift("rawKeyDown", 8)).await?;
+        tokio::time::sleep(lead).await;
+        let enter = json!({"type": "keyDown", "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13, "text": "\r", "unmodifiedText": "\r", "modifiers": 8});
+        self.call("Input.dispatchKeyEvent", enter).await?;
+        tokio::time::sleep(held).await;
+        self.call("Input.dispatchKeyEvent", json!({"type": "keyUp", "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13, "modifiers": 8})).await?;
+        self.call("Input.dispatchKeyEvent", shift("keyUp", 0)).await.map(drop)
     }
 
     /// Types `grapheme`: its key, held `held` (Shift first, `lead` before,
@@ -984,6 +1138,12 @@ const SHIFT: u32 = 8;
 
 /// The longest a fill may take, typed at the errand's pace: past it, it's
 /// refused rather than typed faster (R11.3 #7).
+/// A drift's input lease lasts this much past its planned time.
+const DRIFT_SPARE: Duration = Duration::from_secs(2);
+
+/// A drift aims at no target: it ends where its one sub-movement does.
+const DRIFT_WIDTH: f64 = 400.0;
+
 const FILL_LONGEST: Duration = Duration::from_secs(15 * 60);
 
 /// An element's box: left, top, width, height, CSS pixels.
@@ -1179,6 +1339,29 @@ impl Hand<'_> {
     }
 }
 
+/// How many of a glide's moves may wait for Chrome's answer at once.
+const MOVES_UNANSWERED: usize = 32;
+
+/// The mouse event [`Page::mouse`] sends.
+fn mouse_event(kind: &str, at: Point) -> Value {
+    let mut event = json!({"type": kind, "x": at.0, "y": at.1, "pointerType": "mouse"});
+    match kind {
+        "mousePressed" => {
+            event["button"] = json!("left");
+            event["buttons"] = json!(1);
+            event["clickCount"] = json!(1);
+            event["force"] = json!(0.5);
+        }
+        "mouseReleased" => {
+            event["button"] = json!("left");
+            event["buttons"] = json!(0);
+            event["clickCount"] = json!(1);
+        }
+        _ => event["buttons"] = json!(0),
+    }
+    event
+}
+
 /// A number the reader gave, bounded: the page's script can't reach the
 /// reader's world, but a page can be any size.
 fn number(value: &Value, key: &str) -> Result<f64, (String, String)> {
@@ -1253,7 +1436,7 @@ mod overlay_tests;
 
 #[cfg(test)]
 #[path = "reader_frames.rs"]
-mod frame_tests;
+pub(crate) mod frame_tests;
 
 #[cfg(test)]
 pub(crate) mod tests {
@@ -1326,6 +1509,25 @@ pub(crate) mod tests {
         assert!(now.iter().any(|(id, _, attached)| *id == blank && *attached), "{now:?}");
         assert!(now.iter().any(|(id, url, attached)| *id == mail && url == MAIL && !*attached), "the mail untouched: {now:?}");
         drop(local);
+        let _ = std::fs::remove_dir_all(&profile);
+    }
+
+    #[tokio::test]
+    async fn text_in_a_wrapper_with_no_box_of_its_own_is_read_and_clipped_text_is_not() {
+        let html = r#"<!doctype html><body>
+            <div style="display:contents"><h1>Sign in</h1><p>Wrong email or password.</p></div>
+            <div style="height:0"><div style="position:absolute;top:200px">Keep me signed in</div></div>
+            <div style="height:0;overflow:hidden"><p>Folded away</p></div>
+            <div aria-hidden="true" style="display:contents"><p>Not for anyone</p></div>
+            <footer>Footer</footer>"#;
+        let Some((_local, page, profile)) = page_with(html).await else { return };
+        let Ok(Answer::Page(read)) = page.read(4096).await else { panic!("a page") };
+        for shown in ["Sign in", "Wrong email or password.", "Keep me signed in", "Footer"] {
+            assert!(read.text.contains(shown), "{shown} in {:?}", read.text);
+        }
+        for hidden in ["Folded away", "Not for anyone"] {
+            assert!(!read.text.contains(hidden), "{hidden} in {:?}", read.text);
+        }
         let _ = std::fs::remove_dir_all(&profile);
     }
 
@@ -1530,14 +1732,34 @@ pub(crate) mod tests {
 
     const RECORDED: &str = r#"<script>
         window.events = [];
-        for (const kind of ['mousemove', 'mousedown', 'mouseup', 'click', 'keydown', 'keyup', 'input', 'wheel'])
-          addEventListener(kind, (e) => events.push({kind, trusted: e.isTrusted, at: e.timeStamp, key: e.key || '', field: (e.target && e.target.id) || ''}), true);
+        for (const kind of ['mousemove', 'mousedown', 'mouseup', 'click', 'keydown', 'keyup', 'input', 'wheel', 'pointermove', 'pointerdown'])
+          addEventListener(kind, (e) => events.push({kind, trusted: e.isTrusted, at: e.timeStamp, key: e.key || '', field: (e.target && e.target.id) || '',
+            x: e.clientX, y: e.clientY, pressure: e.pressure, delta: e.deltaY}), true);
         </script>"#;
 
     /// R11 (#530): a person's input, from the browser itself. The mouse
     /// travels before it presses and holds the button a moment; a fill types
     /// every character with a trusted key, over what the field held; a
     /// scroll turns the wheel.
+    #[tokio::test]
+    async fn a_field_under_a_sticky_ad_is_wheeled_clear_before_its_filled() {
+        let html = r#"<!doctype html><body style="margin:0"><div id=spacer>Top</div>
+            <label>Company <input id=company type=text style="height:30px"></label><div style="height:3000px">Long</div>
+            <div id=ad style="position:fixed;left:0;right:0;bottom:0;height:120px;background:#fc0">An ad</div>
+            <script>document.getElementById('spacer').style.height = (innerHeight - 80) + 'px';</script>"#;
+        let Some((_local, page, profile)) = page_with(html).await else { return };
+        let mut hands = TestHand::new();
+        let Ok(Answer::Page(read)) = page.read(4096).await else { panic!("a page") };
+        let covered = seen(&page, "(() => { const r = document.getElementById('company').getBoundingClientRect(); return document.elementFromPoint(r.left + 5, r.top + r.height / 2).id; })()").await;
+        assert_eq!(covered, "ad", "the ad covers the field at first");
+        let field = element(&read, "Company").reference.clone();
+        let filled = page.act(&mut hands.hand(), &Op::on_element(&read.document, 0, &field, Some("typed")).unwrap()).await.unwrap();
+        assert!(matches!(filled, Answer::Filled(ref filled) if filled.done), "{filled:?}");
+        assert_eq!(seen(&page, "document.getElementById('company').value").await, "typed");
+        assert!(seen(&page, "scrollY").await.as_f64().unwrap() > 0.0, "the wheel turned");
+        let _ = std::fs::remove_dir_all(profile);
+    }
+
     #[tokio::test]
     async fn the_errand_moves_types_and_scrolls_as_a_person_does() {
         let html = format!(
@@ -1567,19 +1789,50 @@ pub(crate) mod tests {
         assert!(moves.as_u64().unwrap() >= 10, "the mouse travelled: {moves}");
         let held = seen(&page, "(() => { const d = events.findLast(e => e.kind == 'mousedown'), u = events.findLast(e => e.kind == 'mouseup'); return u.at - d.at; })()").await;
         assert!((35.0..400.0).contains(&held.as_f64().unwrap()), "held {held}");
+        // As a mouse reports: its button pressed at half the range, whole pixels.
+        assert_eq!(seen(&page, "events.findLast(e => e.kind == 'pointerdown').pressure").await, 0.5);
+        let fractions = seen(&page, "events.filter(e => e.kind == 'pointermove' && (e.x % 1 || e.y % 1)).length").await;
+        assert_eq!(fractions, 0, "whole pixels");
 
-        // Tab and Enter are never typed.
+        // Tab is never typed, nor Enter in a one-line field; in a text area
+        // a line break is Shift+Enter, a new line that sends nothing.
         let about = element(&read, "About").reference.clone();
-        for text in ["one\ttwo", "one\ntwo"] {
-            let refused = page.act(&mut hands.hand(), &Op::on_element(&document, 0, &about, Some(text)).unwrap()).await.unwrap_err();
+        let name = element(&read, "Name").reference.clone();
+        for (target, text) in [(&about, "one\ttwo"), (&name, "one\ntwo")] {
+            let refused = page.act(&mut hands.hand(), &Op::on_element(&document, 0, target, Some(text)).unwrap()).await.unwrap_err();
             assert_eq!(refused.0, "unsupported_target", "{text:?}");
         }
+        let filled = page.act(&mut hands.hand(), &Op::on_element(&document, 0, &about, Some("one\ntwo")).unwrap()).await.unwrap();
+        assert!(matches!(filled, Answer::Filled(ref filled) if filled.done), "{filled:?}");
+        assert_eq!(seen(&page, "document.getElementById('about').value").await, "one\ntwo");
 
         let scrolled = page.scroll(&mut hands.hand(), schema::Direction::Down, 1).await.unwrap();
         let Answer::Scrolled(scrolled) = scrolled else { panic!("scrolled") };
         assert!(scrolled.scroll_y > 100.0, "{scrolled:?}");
         let wheels = seen(&page, "events.filter(e => e.kind == 'wheel' && e.trusted).length").await;
-        assert!(wheels.as_u64().unwrap() >= 5, "{wheels}");
+        assert!(wheels.as_u64().unwrap() >= 3, "{wheels}");
+        let notches = seen(&page, "[...new Set(events.filter(e => e.kind == 'wheel').map(e => e.delta))]").await;
+        assert_eq!(notches.as_array().map(|deltas| deltas.iter().map(Value::as_f64).collect()), Some(vec![Some(pace::NOTCH)]), "one notch a wheel event: {notches}");
+        let _ = std::fs::remove_dir_all(&profile);
+    }
+
+    /// A mouse reports about every 8 ms however long Chrome takes to answer
+    /// each move (about a frame): the moves go out on time, never one each
+    /// time Chrome answers the last. Headless, the page sees each as it
+    /// comes, not one a frame.
+    #[tokio::test]
+    async fn the_mouse_reports_at_a_mouses_rate_not_the_pages() {
+        let html = r#"<script>window.at = []; addEventListener('pointermove', (e) => at.push(e.timeStamp), true);</script>
+            <div style="height:2000px">Far</div>"#;
+        let Some((_local, page, profile)) = page_with(html).await else { return };
+        let mut hands = TestHand::new();
+        let view = page.view().await.unwrap();
+        for to in [(view.0 - 20.0, view.1 - 20.0), (20.0, 20.0)] {
+            page.move_to(&mut hands.hand(), to, view, 8.0).await.unwrap();
+        }
+        let median = seen(&page, "(() => { const g = at.slice(1).map((t, i) => t - at[i]).filter(g => g < 100).sort((a, b) => a - b); return g[g.length >> 1]; })()").await;
+        let count = seen(&page, "at.length").await;
+        assert!(median.as_f64().is_some_and(|median| (6.0..11.0).contains(&median)), "median gap {median} ms over {count} moves");
         let _ = std::fs::remove_dir_all(&profile);
     }
 
@@ -1688,6 +1941,36 @@ pub(crate) mod tests {
         let refused = page.scroll(&mut hands.hand(), schema::Direction::Down, 1).await.unwrap_err();
         assert_eq!(refused.0, "unsupported_target", "{refused:?}");
         assert_eq!(seen(&page, "scrollY").await, 0);
+        let _ = std::fs::remove_dir_all(&profile);
+    }
+
+    /// In a long reading pause the mouse drifts a little once, now and
+    /// then, under a lease of its own; with no place on the page yet, it
+    /// stays still.
+    #[tokio::test]
+    async fn a_reading_pause_now_and_then_drifts_the_mouse_from_where_it_is() {
+        let Some((_local, page, profile)) = page_with(RECORDED).await else { return };
+        let left = Duration::from_millis(4500);
+        let seed = (0..).find(|seed| pace::drift(&mut pace::Rng::seeded(*seed), left).is_some()).unwrap();
+        let leased = std::cell::Cell::new(None);
+        let moves = || seen(&page, "events.filter(e => e.kind == 'mousemove').length");
+        let mut hands = TestHand { rng: pace::Rng::seeded(seed), ..TestHand::new() };
+        let lease = |until| {
+            leased.set(Some(until));
+            Ok(())
+        };
+        page.reading_pause(&mut hands.hand(), Instant::now() + left, lease).await.unwrap();
+        assert_eq!((moves().await, leased.get()), (json!(0), None), "nowhere to drift from");
+
+        let start = (300.0, 200.0);
+        let mut hands = TestHand { rng: pace::Rng::seeded(seed), pointer: Some(start), ..TestHand::new() };
+        let began = Instant::now();
+        page.reading_pause(&mut hands.hand(), began + left, lease).await.unwrap();
+        assert!(began.elapsed() >= left);
+        assert!(moves().await.as_u64().unwrap() >= 5, "it drifted");
+        assert!(leased.get().is_some_and(|until: Duration| until >= DRIFT_SPARE + Duration::from_millis(400)), "{:?}", leased.get());
+        let end = hands.pointer.unwrap();
+        assert!((19.0..=121.0).contains(&(end.0 - start.0).hypot(end.1 - start.1)), "{end:?}");
         let _ = std::fs::remove_dir_all(&profile);
     }
 

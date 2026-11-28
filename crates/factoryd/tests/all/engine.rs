@@ -82,12 +82,29 @@ async fn only_this_macs_own_app_can_stop_claktory() {
 }
 
 /// A client on the loopback port without this Mac's token is turned away
-/// at Hello, and the connection ends, so StopEngine never gets in.
+/// at Hello, and the connection ends, so StopEngine never gets in; one with
+/// no token at all (an app from before the app's socket) is welcomed only to
+/// Claktory's version, and StopEngine is refused.
 #[tokio::test]
 async fn a_client_without_the_token_cannot_ask_to_stop() {
     let dir = temp_dir();
     let (addr, _factory) = start(&dir).await;
-    for token in ["", "not the token"] {
+    {
+        let mut client = Client::open(addr).await;
+        let hello = v1::Hello { protocol_version: factory_protocol::PROTOCOL_VERSION, client_version: "test".into(), ..Default::default() };
+        client.send(v1::ClientMessage { id: 1, body: Some(Request::Hello(hello)) }).await;
+        let Some(Body::Welcome(welcome)) = client.receive().await.body else { panic!("expected the old app's welcome") };
+        assert!(welcome.name.is_empty() && welcome.device_id.is_empty(), "{welcome:?}");
+        let Some(Body::Workspace(workspace)) = client.receive().await.body else { panic!("expected its version") };
+        assert!(workspace.agents.is_empty() && workspace.settings.is_none(), "only the version");
+        client.send(v1::ClientMessage { id: 2, body: Some(stop(true)) }).await;
+        match client.receive().await.body {
+            Some(Body::Error(error)) => assert_eq!(error.code(), v1::ErrorCode::Unauthorized),
+            other => panic!("expected the refusal, got {other:?}"),
+        }
+    }
+    {
+        let token = "not the token";
         let mut client = Client::open(addr).await;
         let hello = v1::Hello {
             protocol_version: factory_protocol::PROTOCOL_VERSION,

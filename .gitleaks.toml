@@ -24,9 +24,9 @@ regex = '''/(?:Users|home)/[A-Za-z0-9._-]+'''
 keywords = ["/users/", "/home/"]
 
 [[rules.allowlists]]
-description = "Placeholder home folders in tests and docs (mex is the prefix-boundary case beside me: /Users/me must not move /Users/mex; someone and myself are the Android build checks' made-up homes, myself being the literal text Flutter's debug engine carries; a is the app's shared-build test's made-up home, app/test/hook_shared_build_test.dart since 9b5a7d73; ann is the made-up home in factoryd's annotations/embeds.rs tests, since 833c59aed; ana is the made-up home of the protected-places code, its tests and the protocol's comments (/Users/ana/Documents), since 82dcb4474; fred is Windows shell.rs's made-up C:/Users/fred in a test, since fd268ad34)"
+description = "Placeholder home folders in tests and docs (mex is the prefix-boundary case beside me: /Users/me must not move /Users/mex; someone and myself are the Android build checks' made-up homes, myself being the literal text Flutter's debug engine carries; a is the app's shared-build test's made-up home, app/test/hook_shared_build_test.dart since 9b5a7d73; ann is the made-up home in factoryd's annotations/embeds.rs tests, since 833c59aed; ana is the made-up home of the protected-places code, its tests and the protocol's comments (/Users/ana/Documents), since 82dcb4474; fred is Windows shell.rs's made-up C:/Users/fred in a test, since fd268ad34; lee is the made-up home of factoryd's authority.rs socket-path tests, /Users/lee/.factory and a long one under it, since f38ee229c)"
 regexTarget = "match"
-regexes = ['''^/(?:Users|home)/(?:me|mex|x|a|ann|ana|fred|you|user|runner|linuxbrew|Shared|someone|myself)$''']
+regexes = ['''^/(?:Users|home)/(?:me|mex|x|a|ann|ana|fred|lee|you|user|runner|linuxbrew|Shared|someone|myself)$''']
 
 [[rules.allowlists]]
 description = "The Map tests' made-up home folder in the fixture's sample paths (workspace, projects, factory.db): not this machine's home, nothing real behind it; new fixtures use /Users/me"
@@ -72,6 +72,13 @@ description = "The recovery key's Download as first committed (a0fd4e35): a made
 condition = "AND"
 commits = ["a0fd4e35613f1dc4302dff663660480d667e9708"]
 paths = ['''^app/test/(account|recovery_key)_test\.dart$''']
+regexTarget = "match"
+regexes = ['''^/Users/matt$''']
+
+[[rules.allowlists]]
+description = "Calendar Open's shots test (6aec1586): a made-up /Users/matt home in two sample background tasks' log paths in app/test/calendar_open_shots_test.dart, not this machine's home, nothing real behind it. That file only, until it's moved to /Users/me after v0.1.28; then this narrows to that commit"
+condition = "AND"
+paths = ['''^app/test/calendar_open_shots_test\.dart$''']
 regexTarget = "match"
 regexes = ['''^/Users/matt$''']
 
@@ -134,6 +141,13 @@ condition = "AND"
 paths = ['''^crates/factoryd/tests/fixtures/web/yahoo-results\.html$''']
 regexTarget = "secret"
 regexes = ['''^stickyHeaderV2$''']
+
+[[rules.allowlists]]
+description = "The move approval's test vector (app/rust/src/api/account.rs and app/test/device_approval_test.dart, since 23a5e4054): a token signed with the made-up seed 03…03, whose payload's device_key is that seed's Ed25519 public key; gitleaks decodes the payload and reads the public key as a generic key. A public key of a test seed, in those files only; no private material"
+condition = "AND"
+paths = ['''^app/rust/src/api/account\.rs$''', '''^app/test/device_approval_test\.dart$''']
+regexTarget = "secret"
+regexes = ['''^7UkoxijRwsbq6QM4kFmVYSlZJzpcY_k2NsFGFKyHN9E$''']
 
 # Exceptions. One here, at the top level, names exact values only: given
 # paths, gitleaks (8.30) skips those files whole, whatever its condition. One

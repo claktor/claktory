@@ -1,4 +1,4 @@
-//! The request cards (#360): the agent's link and steps (K3), the vault's
+//! The request cards: the agent's link and steps (K3), the vault's
 //! secret that fits a request (K4), the form's answer marked as added (K2),
 //! a generated key put in place (K6), and an import for no one (K7).
 
@@ -218,7 +218,7 @@ async fn an_import_asked_for_no_one_cant_be_given_to_the_agent() {
     assert_eq!(shown(&view, &request.id).state(), v1::SecretRequestState::Pending);
 }
 
-/// Submit (#370): a comment instead of Give or Dismiss is a reply. Nothing
+/// Submit: a comment instead of Give or Dismiss is a reply. Nothing
 /// is given, and the agent gets the person's words to ask again with.
 #[tokio::test]
 async fn a_reply_to_a_request_gives_nothing_and_tells_the_agent_the_persons_words() {

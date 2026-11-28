@@ -1,4 +1,4 @@
-//! The curator (pipes-automation.md §3, H2): a contained agent that reads
+//! The curator: a contained agent that reads
 //! friends' hand-offs. It keeps its own database, the file tools in its own
 //! folder and ask_person; no commands, Claktory's records, secrets,
 //! messaging or pipes. Only the person makes one (or Rivet for them), and
@@ -124,7 +124,7 @@ async fn a_curator_keeps_its_database_files_and_asks_and_nothing_else() {
     assert!(back.iter().any(|tool| tool == "bash"), "{back:?}");
 }
 
-/// #346: reading a pipe's files marks no one (pipes are friends): its inbox
+/// Reading a pipe's files marks no one (pipes are friends): its inbox
 /// and outbox, what arrived in `pipes/incoming`, and a curator's files, her
 /// database too, even while she has read a web page (nothing spreads).
 #[tokio::test]

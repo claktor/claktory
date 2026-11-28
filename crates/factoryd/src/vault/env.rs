@@ -5,7 +5,7 @@
 
 use zeroize::Zeroizing;
 
-use super::{SHORT, Value, valid_variable};
+use super::{Value, too_short, too_short_warning, valid_variable};
 
 pub(crate) struct Parsed {
     /// In the order they appear; a variable set twice keeps its last value.
@@ -63,8 +63,8 @@ pub(crate) fn parse(text: &str) -> Parsed {
         let value = Zeroizing::new(value);
         if value.is_empty() {
             warnings.push(format!("{key} is empty."));
-        } else if value.len() < SHORT {
-            warnings.push(format!("{key} is too short to hide in agents' output."));
+        } else if too_short(&value) {
+            warnings.push(too_short_warning(key));
         }
         if let Some(earlier) = values.iter_mut().find(|earlier| earlier.variable == key) {
             warnings.push(format!("{key} is set twice; the last one is kept."));
@@ -116,7 +116,7 @@ mod tests {
 
     #[test]
     fn a_dotenv_file_reads_as_its_variables() {
-        let text = "# Cloudflare\nexport CLOUDFLARE_API_TOKEN=abcdefghijklmnop # the token\nZONE='claktory.com'\nKEY=\"-----BEGIN KEY-----\nline two\n-----END KEY-----\"\nESCAPED=\"a\\nb \\\"quoted\\\"\"\nPIN=1234\nEMPTY=\nnot a line\n1BAD=x\nZONE=claktory.dev\nOPEN=\"never closed\n";
+        let text = "# Cloudflare\nexport CLOUDFLARE_API_TOKEN=abcdefghijklmnop # the token\nZONE='claktory.com'\nKEY=\"-----BEGIN KEY-----\nline two\n-----END KEY-----\"\nESCAPED=\"a\\nb \\\"quoted\\\"\"\nPIN=123\nEMPTY=\nnot a line\n1BAD=x\nZONE=claktory.dev\nOPEN=\"never closed\n";
         let parsed = parse(text);
         let values: Vec<(&str, &str)> = parsed.values.iter().map(|value| (value.variable.as_str(), value.value.as_str())).collect();
         assert_eq!(
@@ -126,14 +126,14 @@ mod tests {
                 ("ZONE", "claktory.dev"),
                 ("KEY", "-----BEGIN KEY-----\nline two\n-----END KEY-----"),
                 ("ESCAPED", "a\nb \"quoted\""),
-                ("PIN", "1234"),
+                ("PIN", "123"),
                 ("EMPTY", ""),
             ]
         );
         assert_eq!(
             parsed.warnings,
             [
-                "PIN is too short to hide in agents' output.",
+                "PIN is too short to hide, so agents may see it if a command prints it.",
                 "EMPTY is empty.",
                 "Line 10 isn't KEY=value, so it was left out.",
                 "Line 11's name isn't a variable's name, so it was left out.",

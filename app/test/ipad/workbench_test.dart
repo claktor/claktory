@@ -4,6 +4,7 @@ import 'package:factory_app/ipad/columns.dart';
 import 'package:factory_app/ipad/workbench.dart';
 import 'package:factory_app/layout.dart' show chatKind, layoutOf;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
+import 'package:flutter/rendering.dart' show RenderParagraph;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -283,6 +284,23 @@ void main() {
       await tester.pump();
       expect(focus.focusedIn('wren', root), 'chat');
     });
+
+    for (final (scale, labels) in [
+      (2.0, ['Conversation', 'paper.pdf']),
+      (53 / 17, ['Conversation']),
+    ]) {
+      testWidgets(
+        'gives its labels the bar\'s room at ${scale.toStringAsFixed(2)}x text',
+        (tester) async {
+          await _show(tester, const Size(1052, 672), textScale: scale);
+          expect(_key('rail'), findsNothing);
+          for (final label in labels) {
+            final text = tester.renderObject<RenderParagraph>(find.text(label));
+            expect(text.didExceedMaxLines, isFalse, reason: label);
+          }
+        },
+      );
+    }
 
     testWidgets('has no switch when there\'s only the conversation', (
       tester,

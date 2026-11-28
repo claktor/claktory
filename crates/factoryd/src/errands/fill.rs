@@ -235,6 +235,17 @@ const HITS: &str = r#"function (x, y) {
   return !!at && (at === this || this.contains(at));
 }"#;
 
+/// Whether the field's form says it sends its values in the next page's
+/// address (method="get", said on the form or its button). A form that says
+/// nothing is sent by the page's own script on most sign-in pages, so it
+/// isn't refused; the address the agent is told never has a query anyway.
+const SENDS_IN_ADDRESS: &str = r#"function () {
+  const form = this.form;
+  if (!form) return false;
+  const said = (element) => (element && element.getAttribute(element === form ? 'method' : 'formmethod') || '').trim().toLowerCase() === 'get';
+  return said(form) || Array.from(form.querySelectorAll('button[formmethod], input[formmethod]')).some(said);
+}"#;
+
 /// Empties the field: after a sign-in stopped partway, nothing typed stays.
 const CLEAR: &str = r#"function () {
   if (!this.isConnected) return false;
@@ -263,6 +274,14 @@ fn lost(error: super::cdp::Error) -> Refused {
 struct LoginField {
     object: String,
     field: Field,
+}
+
+/// How characters are typed: by the keyboard's keys (text for one no key
+/// types), or all as text.
+#[derive(Clone, Copy)]
+enum Keys {
+    Keys,
+    Text,
 }
 
 /// A page being typed into: its top frame as it was when the sign-in began
@@ -307,58 +326,92 @@ impl Typing<'_> {
         if self.held(object).await.is_some() {
             return Ok(());
         }
-        let place = self.on(object, PLACE, Vec::new()).await?;
-        let number = |at: usize| place[at].as_f64().filter(|n| n.is_finite() && (-1e7..1e7).contains(n));
-        let (Some(left), Some(top), Some(width), Some(height), Some(view_width), Some(view_height)) =
-            (number(0), number(1), number(2), number(3), number(4), number(5))
-        else {
-            return Err(refused("stale_target", "the field went: read the page again"));
-        };
-        if width < 1.0 || height < 1.0 || view_width < 1.0 || view_height < 1.0 {
-            return Err(refused("stale_target", "the field isn't shown: read the page again"));
-        }
-        let view = (view_width, view_height);
-        let mut at = super::pace::aim(hand.rng, (left, top, width, height), view);
-        if self.on(object, HITS, vec![json!({"value": at.0}), json!({"value": at.1})]).await? != true {
-            at = ((left + width / 2.0).clamp(0.0, view.0 - 1.0), (top + height / 2.0).clamp(0.0, view.1 - 1.0));
-        }
-        let from = match *hand.pointer {
-            Some((x, y)) => (x.clamp(0.0, view.0 - 1.0), y.clamp(0.0, view.1 - 1.0)),
-            None => (view.0 * hand.rng.between(0.2, 0.8), view.1 * hand.rng.between(0.2, 0.8)),
-        };
-        let took = super::pace::travel(hand.rng, (at.0 - from.0).hypot(at.1 - from.1), width.min(height));
-        let mut next = std::time::Instant::now();
-        for (point, gap) in super::pace::path(hand.rng, from, at, view, took) {
-            next += gap;
-            hand.wait_until(next).await?;
-            self.mouse("mouseMoved", point).await?;
-            *hand.pointer = Some(point);
-        }
-        let pause = super::pace::hover(hand.rng);
-        hand.wait_until(std::time::Instant::now() + pause).await?;
-        // Checked right before the press, nothing awaited between.
-        if self.on(object, HITS, vec![json!({"value": at.0}), json!({"value": at.1})]).await? != true {
-            return Err(refused("stale_target", "something covers the field: read the page again"));
-        }
-        self.mouse("mousePressed", at).await?;
-        tokio::time::sleep(super::pace::hold(hand.rng)).await;
-        self.mouse("mouseReleased", at).await?;
-        let pause = super::pace::hover(hand.rng);
-        hand.wait_until(std::time::Instant::now() + pause).await?;
+        self.press_on(hand, object, "field").await?;
         if self.held(object).await.is_none() {
             return Err(refused("unsupported_target", "the field didn't take the keyboard when clicked: read the page again"));
         }
         Ok(())
     }
 
-    async fn mouse(&self, kind: &str, at: super::pace::Point) -> Result<(), Refused> {
-        let mut event = json!({"type": kind, "x": at.0, "y": at.1, "pointerType": "mouse", "buttons": 0});
-        if kind != "mouseMoved" {
-            event["button"] = json!("left");
-            event["clickCount"] = json!(1);
-            event["buttons"] = json!(if kind == "mousePressed" { 1 } else { 0 });
+    /// The mouse goes to `object` (a `what`, as the agent is told) over a
+    /// person's time and presses it.
+    async fn press_on(&self, hand: &mut super::reader::Hand<'_>, object: &str, what: &str) -> Result<(), Refused> {
+        let place = self.on(object, PLACE, Vec::new()).await?;
+        let number = |at: usize| place[at].as_f64().filter(|n| n.is_finite() && (-1e7..1e7).contains(n));
+        let (Some(left), Some(top), Some(width), Some(height), Some(view_width), Some(view_height)) =
+            (number(0), number(1), number(2), number(3), number(4), number(5))
+        else {
+            return Err(refused("stale_target", format!("the {what} went: read the page again")));
+        };
+        if width < 1.0 || height < 1.0 || view_width < 1.0 || view_height < 1.0 {
+            return Err(refused("stale_target", format!("the {what} isn't shown: read the page again")));
         }
-        self.page.call("Input.dispatchMouseEvent", event).await.map(drop).map_err(lost)
+        let view = (view_width, view_height);
+        let mut at = super::pace::aim(hand.rng, (left, top, width, height), view);
+        if self.on(object, HITS, vec![json!({"value": at.0}), json!({"value": at.1})]).await? != true {
+            at = super::pace::pixel((left + width / 2.0, top + height / 2.0), view);
+        }
+        self.page.move_to(hand, at, view, width.min(height)).await?;
+        let pause = super::pace::hover(hand.rng);
+        hand.wait_until(std::time::Instant::now() + pause).await?;
+        // Checked right before the press, nothing awaited between.
+        if self.on(object, HITS, vec![json!({"value": at.0}), json!({"value": at.1})]).await? != true {
+            return Err(refused("stale_target", format!("something covers the {what}: read the page again")));
+        }
+        self.mouse("mousePressed", at).await?;
+        tokio::time::sleep(super::pace::hold(hand.rng)).await;
+        self.mouse("mouseReleased", at).await?;
+        let pause = super::pace::hover(hand.rng);
+        hand.wait_until(std::time::Instant::now() + pause).await
+    }
+
+    /// Whether the field holds exactly `value`: yes or no, asked in the
+    /// reader's world, never the value itself.
+    async fn kept(&self, object: &str, value: &str) -> bool {
+        self.on(object, KEPT, vec![json!({"value": value})]).await.is_ok_and(|kept| kept == true)
+    }
+
+    /// The object `declaration` gives when called on `object`, if any.
+    async fn object(&self, object: &str, declaration: &str) -> Option<String> {
+        let called = self.page.call("Runtime.callFunctionOn", json!({"objectId": object, "functionDeclaration": declaration})).await.ok()?;
+        called["result"]["objectId"].as_str().filter(|id| id.len() <= 256).map(str::to_owned)
+    }
+
+    /// Makes sure the field holds exactly `value` as typed; if the keys
+    /// typed something else, it's typed once more a character at a time as
+    /// text (as a keyboard the browser doesn't know types), with the same
+    /// checks at every character, and checked again. Still not: the field is emptied and nothing is sent.
+    async fn keep(&self, hand: &mut super::reader::Hand<'_>, object: &str, value: &str) -> Result<(), Refused> {
+        if self.kept(object, value).await {
+            return Ok(());
+        }
+        self.type_as(hand, object, value, Keys::Text).await?;
+        if self.kept(object, value).await {
+            return Ok(());
+        }
+        let _ = self.on(object, CLEAR, Vec::new()).await;
+        Err(refused("interrupted", "the page didn't keep exactly what was typed into the field, so nothing was sent"))
+    }
+
+    /// Ctrl+A then Backspace, as a person clears a field that holds the
+    /// keyboard; stops if it doesn't empty it.
+    async fn select_and_delete(&self, hand: &mut super::reader::Hand<'_>, object: &str) -> Result<(), Refused> {
+        let control = if cfg!(target_os = "macos") { 4 } else { 2 };
+        let key = |kind: &str, modifiers: u32| json!({"type": kind, "key": "a", "code": "KeyA", "windowsVirtualKeyCode": 65, "modifiers": modifiers, "commands": ["selectAll"]});
+        self.page.call("Input.dispatchKeyEvent", key("rawKeyDown", control)).await.map_err(lost)?;
+        tokio::time::sleep(super::pace::key_hold(hand.rng)).await;
+        self.page.call("Input.dispatchKeyEvent", key("keyUp", control)).await.map_err(lost)?;
+        let pause = gap(hand.rng);
+        hand.wait_until(std::time::Instant::now() + pause).await?;
+        self.press("Backspace", "Backspace", 8, "", hand).await?;
+        match self.held(object).await {
+            Some(0) => Ok(()),
+            _ => Err(self.abort(object).await),
+        }
+    }
+
+    async fn mouse(&self, kind: &str, at: super::pace::Point) -> Result<(), Refused> {
+        self.page.mouse(kind, at).await.map(drop).map_err(lost)
     }
 
     /// Types `value` into the field with the browser's own keys, at a
@@ -370,23 +423,17 @@ impl Typing<'_> {
     /// at most one character can land elsewhere. What was in the field is
     /// selected and typed over.
     async fn type_value(&self, hand: &mut super::reader::Hand<'_>, object: &str, value: &str) -> Result<(), Refused> {
+        self.type_as(hand, object, value, Keys::Keys).await
+    }
+
+    /// `type_value`, each character by its key or as text.
+    async fn type_as(&self, hand: &mut super::reader::Hand<'_>, object: &str, value: &str, keys: Keys) -> Result<(), Refused> {
         use unicode_segmentation::UnicodeSegmentation;
         self.click_into(hand, object).await?;
         let Some(mut length) = self.held(object).await else { return Err(self.abort(object).await) };
         if length > 0 {
-            // Ctrl+A then Backspace, as a person clears a field.
-            let control = if cfg!(target_os = "macos") { 4 } else { 2 };
-            let key = |kind: &str, modifiers: u32| json!({"type": kind, "key": "a", "code": "KeyA", "windowsVirtualKeyCode": 65, "modifiers": modifiers, "commands": ["selectAll"]});
-            self.page.call("Input.dispatchKeyEvent", key("rawKeyDown", control)).await.map_err(lost)?;
-            tokio::time::sleep(super::pace::key_hold(hand.rng)).await;
-            self.page.call("Input.dispatchKeyEvent", key("keyUp", control)).await.map_err(lost)?;
-            let pause = gap(hand.rng);
-            hand.wait_until(std::time::Instant::now() + pause).await?;
-            self.press("Backspace", "Backspace", 8, "", hand).await?;
-            length = match self.held(object).await {
-                Some(0) => 0,
-                _ => return Err(self.abort(object).await),
-            };
+            self.select_and_delete(hand, object).await?;
+            length = 0;
         }
         let mut next = std::time::Instant::now() + gap(hand.rng);
         for grapheme in value.graphemes(true) {
@@ -399,7 +446,11 @@ impl Typing<'_> {
             }
             let down = std::time::Instant::now();
             let held = std::time::Duration::from_millis(u64::from(hand.rng.whole(70, 102)));
-            if self.type_one(grapheme, held).await.is_err() {
+            let typed = match keys {
+                Keys::Keys => self.type_one(grapheme, held).await,
+                Keys::Text => self.page.call("Input.insertText", json!({"text": grapheme})).await.map(drop),
+            };
+            if typed.is_err() {
                 return Err(self.abort(object).await);
             }
             length += grapheme.encode_utf16().count() as i64;
@@ -461,58 +512,165 @@ fn gap(rng: &mut super::pace::Rng) -> std::time::Duration {
     std::time::Duration::from_millis(u64::from(rng.whole(134, 190)))
 }
 
-/// What a page says after a sign-in was sent, as read: a code asked for
-/// next, a password field still there with words of a refusal, or neither.
-fn after_sign_in(read: &crate::browser::schema::Page) -> Option<factory_protocol::v1::SecretLoginOutcome> {
-    use factory_protocol::v1::SecretLoginOutcome;
-    let sensitive = |element: &crate::browser::schema::Element| element.sensitive.clone().unwrap_or_default().to_lowercase();
-    let code = read.elements.iter().any(|element| {
-        let why = sensitive(element);
-        why.contains("one-time-code") || why.contains("one digit of a code") || why.contains("verification code")
-    });
-    if code {
-        return Some(SecretLoginOutcome::CodeNext);
-    }
-    let password = read.elements.iter().any(|element| {
-        let why = sensitive(element);
-        why == "password" || why.contains("current-password") || why == "masked like a password"
-    });
-    if !password {
-        return Some(SecretLoginOutcome::SignedIn);
-    }
-    let words = read.text.to_lowercase();
-    let refusal = [
-        "incorrect",
-        "wrong password",
-        "wrong username",
-        "wrong email",
-        "wrong login",
-        "wrong credentials",
-        "password is wrong",
-        "password was wrong",
-        "unrecognized",
-        "unrecognised",
-        "not valid",
-        "login failed",
-        "sign-in failed",
-        "sign in failed",
-        "couldn't sign you in",
-        "could not sign you in",
-        "unable to sign in",
-        "unable to log in",
-        "invalid",
-        "doesn't match",
-        "does not match",
-        "didn't match",
-        "not recognized",
-        "not recognised",
-        "try again",
-        "couldn't find",
-        "could not find",
-        "no account",
-    ];
-    refusal.iter().any(|said| words.contains(said)).then_some(SecretLoginOutcome::Refused)
+/// What the page shows as a sign-in settles, asked in the reader's world:
+/// its address, whether it's loaded, how many password fields a person
+/// would see on it, and its words.
+const AFTER: &str = r#"(() => {
+  const shown = (field) => {
+    if (!field.isConnected) return false;
+    const box = field.getBoundingClientRect();
+    if (box.width < 1 || box.height < 1 || box.right + scrollX <= 0 || box.bottom + scrollY <= 0) return false;
+    const style = getComputedStyle(field);
+    return style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity) > 0;
+  };
+  const passwords = Array.from(document.querySelectorAll('input[type=password]')).filter(shown).length;
+  const text = document.body ? document.body.innerText || '' : '';
+  return {url: location.href, ready: document.readyState === 'complete', passwords, text: text.slice(0, 20000)};
+})()"#;
+
+/// The page as a sign-in settles (`AFTER`), and whether the reader sees a
+/// field for a code on it.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct After {
+    url: String,
+    ready: bool,
+    passwords: u64,
+    text: String,
+    code: bool,
 }
+
+impl After {
+    async fn of(page: &Page) -> Option<After> {
+        let said = page.in_world(AFTER).await?;
+        let code = match page.read(4096).await {
+            Ok(crate::browser::schema::Answer::Page(read)) => asks_for_a_code(&read),
+            _ => false,
+        };
+        Some(After {
+            url: said["url"].as_str()?.to_owned(),
+            ready: said["ready"] == true,
+            passwords: said["passwords"].as_u64().unwrap_or_default(),
+            text: said["text"].as_str().unwrap_or_default().to_lowercase(),
+            code,
+        })
+    }
+}
+
+/// Whether the reader marked a field for a one-time code on the page.
+fn asks_for_a_code(read: &crate::browser::schema::Page) -> bool {
+    read.elements.iter().any(|element| {
+        let why = element.sensitive.clone().unwrap_or_default().to_lowercase();
+        why.contains("one-time-code") || why.contains("one digit of a code") || why.contains("verification code")
+    })
+}
+
+/// How a sign-in went, as the page shows it.
+#[derive(Clone, Debug, PartialEq)]
+enum Settled {
+    SignedIn,
+    CodeNext,
+    /// The form again, with words of a refusal it didn't have before.
+    Refused,
+    /// The sign-in form, still there.
+    Form,
+    /// Another page that isn't the site itself yet (a check, a challenge,
+    /// another step): its path.
+    Asks(String),
+}
+
+/// Words a site refuses a login with.
+const REFUSALS: &[&str] = &[
+    "incorrect",
+    "wrong password",
+    "wrong username",
+    "wrong email",
+    "wrong login",
+    "wrong credentials",
+    "password is wrong",
+    "password was wrong",
+    "unrecognized",
+    "unrecognised",
+    "not valid",
+    "login failed",
+    "sign-in failed",
+    "sign in failed",
+    "couldn't sign you in",
+    "could not sign you in",
+    "unable to sign in",
+    "unable to log in",
+    "invalid",
+    "doesn't match",
+    "does not match",
+    "do not match",
+    "don't match",
+    "didn't match",
+    "not recognized",
+    "not recognised",
+    "try again",
+    "couldn't find",
+    "could not find",
+    "no account",
+];
+
+/// Words of an address's path that say it's still part of signing in: a
+/// sign-in page, a check or another step.
+const STILL_SIGNING_IN: &[&str] =
+    &["login", "log-in", "logon", "signin", "sign-in", "sign_in", "auth", "checkpoint", "challenge", "verif", "two-factor", "two_factor", "2fa", "mfa", "captcha"];
+
+/// An address without its fragment.
+fn without_fragment(url: &str) -> &str {
+    url.split('#').next().unwrap_or(url)
+}
+
+/// What `now` says of a sign-in sent from the page `before` showed: None
+/// while it may still be on its way.
+fn after_sign_in(before: &After, now: &After) -> Option<Settled> {
+    if now.code {
+        return Some(Settled::CodeNext);
+    }
+    if now.passwords > 0 {
+        // New words, or the same said once more (a page that explains its
+        // own errors beforehand, say).
+        let (was, is) = (before.text.to_lowercase(), now.text.to_lowercase());
+        let refused = REFUSALS.iter().any(|words| is.matches(words).count() > was.matches(words).count());
+        return Some(if refused { Settled::Refused } else { Settled::Form });
+    }
+    if !now.ready {
+        return None;
+    }
+    let path = url::Url::parse(&now.url).map(|url| url.path().to_owned()).unwrap_or_default();
+    if without_fragment(&now.url) == without_fragment(&before.url) {
+        return Some(Settled::Asks(path));
+    }
+    let lower = path.to_lowercase();
+    if STILL_SIGNING_IN.iter().any(|words| lower.contains(words)) {
+        return Some(Settled::Asks(path));
+    }
+    Some(Settled::SignedIn)
+}
+
+/// How long the page may stay as it is after a sign-in before it's taken
+/// as its answer: a site checking a login takes a few seconds.
+const QUIET: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The longest a sign-in is watched after it's sent.
+const LONGEST: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How long after Enter a form that did nothing with it is sent with its
+/// button instead.
+const ENTER_IGNORED: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// The button that sends the password field's form, if one shows: its
+/// form's submit button, else a button named as a sign-in's is.
+const SUBMIT: &str = r#"function () {
+  const shown = (button) => { const box = button.getBoundingClientRect(); return box.width >= 1 && box.height >= 1; };
+  const scope = this.form || this.closest('form, [role=dialog], main') || document;
+  const buttons = Array.from(scope.querySelectorAll('button, input[type=submit], [role=button]')).filter(shown);
+  const named = (button) => (button.innerText || button.value || button.getAttribute('aria-label') || '').trim();
+  return buttons.find((button) => (button.type || '').toLowerCase() === 'submit' && this.form && button.form === this.form)
+    || buttons.find((button) => /^(sign in|log in|login|sign on|continue|next|submit)$/i.test(named(button)))
+    || null;
+}"#;
 
 /// Why a field in a frame isn't signed in to.
 const FRAMED: &str = "Claktory signs in only into the page's own fields, never one in a frame: open the sign-in page itself with browser_open, or say in your reply that you couldn't sign in";
@@ -564,6 +722,9 @@ pub(crate) async fn sign_in(
     let mut fields = Vec::new();
     for (target, wanted) in [(username, Field::Username), (password, Field::Password)] {
         let Some(target) = target else { continue };
+        if !page.in_a_frame(target) {
+            let _ = page.bring_clear(hand, target).await;
+        }
         let (object, frame) = match page.element(document, target).await {
             Ok(found) => found,
             Err(_) if page.in_a_frame(target) => return Err(said(refused("unsupported_target", FRAMED))),
@@ -582,6 +743,9 @@ pub(crate) async fn sign_in(
         };
         if field != wanted {
             return Err(said(refused("unsupported_target", format!("{target} isn't a {} field", wanted.word()))));
+        }
+        if field == Field::Password && typing.on(&object, SENDS_IN_ADDRESS, Vec::new()).await.map_err(said)? == true {
+            return Err(said(refused("unsupported_target", "this form would put the password in the page's address, so Claktory won't sign in here")));
         }
         fields.push(LoginField { object, field });
     }
@@ -667,6 +831,7 @@ async fn type_login(
     let typing = Typing { page, top, origin };
     for field in fields {
         let Some(value) = value_of(field.field) else { continue };
+        page.remember_filled(&field.object);
         let typed = typing.type_value(hand, &field.object, &value.value).await;
         let target = format!("{} field", field.field.word());
         if let Err(stopped) = typed {
@@ -681,6 +846,17 @@ async fn type_login(
             tracing::error!(%error, "a sign-in wasn't logged in the login's uses");
         }
     }
+    // Exactly what the login holds, or nothing is sent: a key the
+    // browser's keyboard turned into another character leaves the length
+    // right and the value wrong. Asked in the reader's world, yes or no.
+    for field in fields {
+        let Some(value) = value_of(field.field) else { continue };
+        if let Err(stopped) = typing.keep(hand, &field.object, &value.value).await {
+            log::write(&factory.store, &entry(format!("Typed {} into the {} field", login.name, field.field.word()), said(stopped.clone()), String::new()));
+            outcome(SecretLoginOutcome::Unspecified);
+            return Err(said(stopped));
+        }
+    }
     // Sent as a person sends it: Enter in the last field, still holding the
     // keyboard.
     let last = fields.last().map(|field| field.object.as_str()).unwrap_or_default();
@@ -689,44 +865,38 @@ async fn type_login(
         outcome(SecretLoginOutcome::Unspecified);
         return Err(said(stopped));
     }
+    let before = After::of(page).await.unwrap_or_default();
     let pause = gap(hand.rng);
     hand.wait_until(std::time::Instant::now() + pause).await.map_err(said)?;
     typing.press("Enter", "Enter", 13, "\r", hand).await.map_err(said)?;
-    let password_typed = fields.iter().any(|field| field.field == Field::Password);
-    if !password_typed {
+    let password_field = fields.iter().find(|field| field.field == Field::Password);
+    let Some(password_field) = password_field else {
         tokio::time::sleep(super::pace::settle(hand.rng)).await;
         outcome(SecretLoginOutcome::Unspecified);
         return Ok((
             format!("Typed the username of {} on {site} and sent it. Read the page, then call {SIGN_IN_TOOL} with the password field.", login.name),
             Value::Null,
         ));
-    }
-    // What the site does with it: read the page as it settles, for up to
-    // ten seconds.
-    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    let mut seen = None;
-    while std::time::Instant::now() < until {
-        hand.wait_until(std::time::Instant::now() + std::time::Duration::from_millis(700)).await.map_err(said)?;
-        let Ok(crate::browser::schema::Answer::Page(read)) = page.read(4096).await else { continue };
-        seen = after_sign_in(&read);
-        if matches!(seen, Some(SecretLoginOutcome::SignedIn | SecretLoginOutcome::CodeNext)) {
-            break;
-        }
-    }
-    match seen {
-        Some(SecretLoginOutcome::SignedIn) => {
+    };
+    let password = value_of(Field::Password).map(|value| value.value.as_str()).unwrap_or_default();
+    let (settled, now) = settle(page, hand, &typing, &password_field.object, password, &before).await.map_err(said)?;
+    // Never its query or fragment: a sign-in's next address can carry a
+    // token, or a form's values.
+    let address = url::Url::parse(&now.url).map(|url| format!("{}{}", url.origin().ascii_serialization(), super::fence::path_of(&url))).unwrap_or_default();
+    match settled {
+        Seen::Settled(Settled::SignedIn) => {
             outcome(SecretLoginOutcome::SignedIn);
             log::write(&factory.store, &entry(format!("Signed in with {}", login.name), String::new(), String::new()));
-            Ok((format!("Signed in to {site} with {}. Read the page to go on.", login.name), Value::Null))
+            Ok((format!("Signed in to {site} with {}: it left its sign-in page for {address}. Read the page to go on.", login.name), Value::Null))
         }
-        Some(SecretLoginOutcome::CodeNext) => {
+        Seen::Settled(Settled::CodeNext) => {
             outcome(SecretLoginOutcome::CodeNext);
             Ok((
                 format!("Typed {} on {site}; it asks for a code next. Read the page, and hand the code to {person} as your browser tools say.", login.name),
                 Value::Null,
             ))
         }
-        Some(SecretLoginOutcome::Refused) => {
+        Seen::Settled(Settled::Refused) => {
             log::write(&factory.store, &entry(format!("Signed in with {}", login.name), "the site didn't accept it".to_owned(), String::new()));
             // The person is asked again, on the card they gave it on, or
             // on a new one; Sign in replaces the login's values.
@@ -750,10 +920,94 @@ async fn type_login(
                 crate::vault::asks::details(&request),
             ))
         }
-        _ => {
+        Seen::Check(who) => {
             outcome(SecretLoginOutcome::Unspecified);
-            Ok((format!("Typed {} on {site} and sent it. Read the page to see whether it signed in.", login.name), Value::Null))
+            log::write(&factory.store, &entry(format!("Signed in with {}", login.name), format!("a check that you're a person ({who})"), String::new()));
+            Ok((
+                format!(
+                    "Typed {} on {site} and sent it, and the site shows a check that you're a person. You're not signed in yet: get past the check yourself (browser_screenshot shows it; act on it as a person would), then read the page to see whether you're signed in.",
+                    login.name
+                ),
+                Value::Null,
+            ))
         }
+        Seen::Settled(Settled::Form) => {
+            outcome(SecretLoginOutcome::Unspecified);
+            log::write(&factory.store, &entry(format!("Signed in with {}", login.name), "still on the sign-in page".to_owned(), String::new()));
+            Ok((
+                format!(
+                    "Not signed in: {site} still shows its sign-in form at {address}, with no error Claktory recognized. Take a browser_screenshot to see what it says (an error, a check that you're a person, or something else) and go on from there; don't say you're signed in."
+                ),
+                Value::Null,
+            ))
+        }
+        Seen::Settled(Settled::Asks(path)) => {
+            outcome(SecretLoginOutcome::Unspecified);
+            log::write(&factory.store, &entry(format!("Signed in with {}", login.name), format!("the site asks for more at {path}"), String::new()));
+            Ok((
+                format!(
+                    "Typed {} on {site} and sent it. Not signed in: the site went to {address}, which asks for something more (a check, a code or another step). The site hasn't said whether the login was right, so don't say it was accepted or that you're signed in. Take a browser_screenshot and read the page to see what it asks, and go on from there.",
+                    login.name
+                ),
+                Value::Null,
+            ))
+        }
+    }
+}
+
+/// What a sent sign-in came to.
+enum Seen {
+    Settled(Settled),
+    /// A check that the visitor is a person: whose.
+    Check(String),
+}
+
+/// Watches the page after a sign-in was sent until it says how it went:
+/// the same answer twice in a row on a loaded page, or the page unchanged
+/// for [`QUIET`]. A form that did nothing with Enter for
+/// [`ENTER_IGNORED`] (the same document and address, the password still
+/// in its field) is sent once with its button, as a person would.
+async fn settle(
+    page: &Page,
+    hand: &mut super::reader::Hand<'_>,
+    typing: &Typing<'_>,
+    password_field: &str,
+    password: &str,
+    before: &After,
+) -> Result<(Seen, After), Refused> {
+    let sent = std::time::Instant::now();
+    let mut changed = sent;
+    let mut clicked = false;
+    let mut last: Option<(String, u64, Option<Settled>)> = None;
+    loop {
+        hand.wait_until(std::time::Instant::now() + std::time::Duration::from_millis(700)).await?;
+        if let Some(who) = page.check().await {
+            let now = After::of(page).await.unwrap_or_default();
+            return Ok((Seen::Check(who), now));
+        }
+        let Some(now) = After::of(page).await else { continue };
+        let judged = after_sign_in(before, &now);
+        let shape = (without_fragment(&now.url).to_owned(), now.passwords, judged.clone());
+        if last.as_ref() != Some(&shape) {
+            changed = std::time::Instant::now();
+        } else if now.ready
+            && let Some(settled @ (Settled::SignedIn | Settled::CodeNext | Settled::Refused)) = judged.clone()
+        {
+            return Ok((Seen::Settled(settled), now));
+        }
+        let unchanged = without_fragment(&now.url) == without_fragment(&before.url) && now.text == before.text;
+        if !clicked && unchanged && sent.elapsed() >= ENTER_IGNORED && typing.kept(password_field, password).await {
+            clicked = true;
+            if let Some(button) = typing.object(password_field, SUBMIT).await {
+                typing.press_on(hand, &button, "sign-in button").await?;
+                changed = std::time::Instant::now();
+            }
+        }
+        if changed.elapsed() >= QUIET || sent.elapsed() >= LONGEST {
+            let settled = judged.unwrap_or_else(|| Settled::Asks(url::Url::parse(&now.url).map(|url| url.path().to_owned()).unwrap_or_default()));
+            return Ok((Seen::Settled(settled), now));
+        }
+        last = Some(shape);
     }
 }
 
@@ -957,24 +1211,48 @@ mod tests {
     }
 
     #[test]
-    fn what_the_page_says_after_a_sign_in_is_read_for_the_card() {
-        use factory_protocol::v1::SecretLoginOutcome;
-        let page = |sensitive: &[&str], text: &str| {
-            let elements: Vec<Value> = sensitive
-                .iter()
-                .enumerate()
-                .map(|(at, why)| json!({"ref": format!("e{at}"), "role": "textbox", "name": "Field", "sensitive": why}))
-                .collect();
-            let page = json!({"document": "d1", "revision": 1, "title": "X", "path": "/", "text": text, "truncated": false, "elements": elements});
-            serde_json::from_value::<crate::browser::schema::Page>(page).expect("a page")
-        };
-        assert_eq!(after_sign_in(&page(&[], "Home")), Some(SecretLoginOutcome::SignedIn));
-        assert_eq!(after_sign_in(&page(&["one-time-code"], "Enter the code we sent")), Some(SecretLoginOutcome::CodeNext));
-        assert_eq!(after_sign_in(&page(&["password"], "Wrong password. Try again.")), Some(SecretLoginOutcome::Refused));
-        for refusal in ["Wrong username or password.", "Wrong email or password", "Login failed", "We couldn't sign you in.", "Unrecognized username"] {
-            assert_eq!(after_sign_in(&page(&["password"], refusal)), Some(SecretLoginOutcome::Refused), "{refusal}");
+    fn a_sign_in_is_signed_in_only_once_the_site_left_its_sign_in_pages() {
+        let login = "https://www.linkedin.com/login";
+        let form = After { url: login.into(), ready: true, passwords: 1, text: "sign in\nforgot password?".into(), code: false };
+        let at = |url: &str, passwords: u64, text: &str| After { url: url.into(), ready: true, passwords, text: text.into(), code: false };
+        assert_eq!(after_sign_in(&form, &at("https://www.linkedin.com/feed/", 0, "home")), Some(Settled::SignedIn));
+        assert_eq!(after_sign_in(&form, &at("https://x.com/home", 0, "for you")), Some(Settled::SignedIn));
+        // Still on the sign-in page, with its form and no new words: not signed in.
+        assert_eq!(after_sign_in(&form, &form), Some(Settled::Form));
+        assert_eq!(after_sign_in(&form, &at("https://www.linkedin.com/checkpoint/lg/login-submit", 1, "sign in")), Some(Settled::Form));
+        // The form again, now saying it's wrong.
+        for refusal in ["wrong email or password. try again.", "that's not the right password", "login failed", "we couldn't sign you in.", "unrecognized username"] {
+            let refused = after_sign_in(&form, &at(login, 1, &format!("sign in\n{refusal}")));
+            assert!(matches!(refused, Some(Settled::Refused | Settled::Form)), "{refusal}");
         }
-        assert_eq!(after_sign_in(&page(&["password"], "Sign in to X")), None, "still loading, or something else");
+        assert_eq!(after_sign_in(&form, &at(login, 1, "sign in\nwrong email or password. try again.")), Some(Settled::Refused));
+        // Words a refusal uses that were on the form before it was sent say nothing.
+        let said_before = At::with(&form, "sign in\ntry again later");
+        assert_eq!(after_sign_in(&said_before, &said_before), Some(Settled::Form));
+        // Unless said once more, as a page that explains its errors beforehand does.
+        let explains = At::with(&form, "Test with an invalid password to see an error.");
+        let invalid = At::with(&form, "Your password is invalid!\nTest with an invalid password to see an error.");
+        assert_eq!(after_sign_in(&explains, &invalid), Some(Settled::Refused));
+        let sauce = At::with(&form, "Epic sadface: Username and password do not match any user in this service");
+        assert_eq!(after_sign_in(&form, &sauce), Some(Settled::Refused));
+        // The form went, but the site isn't signed in to yet: a check, a challenge, or the same page.
+        assert_eq!(after_sign_in(&form, &at("https://www.linkedin.com/checkpoint/challenge/AgF", 0, "let's do a quick security check")), Some(Settled::Asks("/checkpoint/challenge/AgF".into())));
+        assert_eq!(after_sign_in(&form, &at("https://www.linkedin.com/login#step2", 0, "")), Some(Settled::Asks("/login".into())));
+        assert_eq!(after_sign_in(&form, &at("https://accounts.shop.example/two-factor", 0, "")), Some(Settled::Asks("/two-factor".into())));
+        // A code asked for next.
+        let code = After { code: true, ..at("https://x.com/i/flow/login", 0, "enter your code") };
+        assert_eq!(after_sign_in(&form, &code), Some(Settled::CodeNext));
+        // Still loading.
+        let loading = After { ready: false, ..at("https://www.linkedin.com/feed/", 0, "") };
+        assert_eq!(after_sign_in(&form, &loading), None);
+    }
+
+    /// A page as it was, with other words.
+    struct At;
+    impl At {
+        fn with(page: &After, text: &str) -> After {
+            After { text: text.into(), ..page.clone() }
+        }
     }
 
     #[test]

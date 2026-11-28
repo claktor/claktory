@@ -251,6 +251,10 @@ class TunnelStatus {
   /// out, and the app's connect window with it.
   final int dialTimeoutMs;
 
+  /// How long the dial that made the open connection took, in ms, to the
+  /// connection made on its first path; 0 while there's none.
+  final int dialMs;
+
   /// What a direct path crosses, from its address (never the address):
   /// for diagnostics, per route.
   final TunnelReach reach;
@@ -266,6 +270,7 @@ class TunnelStatus {
     required this.received,
     required this.linkReceived,
     required this.dialTimeoutMs,
+    required this.dialMs,
     required this.reach,
   });
 
@@ -281,6 +286,7 @@ class TunnelStatus {
       received.hashCode ^
       linkReceived.hashCode ^
       dialTimeoutMs.hashCode ^
+      dialMs.hashCode ^
       reach.hashCode;
 
   @override
@@ -298,5 +304,6 @@ class TunnelStatus {
           received == other.received &&
           linkReceived == other.linkReceived &&
           dialTimeoutMs == other.dialTimeoutMs &&
+          dialMs == other.dialMs &&
           reach == other.reach;
 }

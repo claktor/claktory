@@ -1003,7 +1003,7 @@ void main() {
     final harness = await show(
       tester,
       _workspace([
-        // A new pipe: both reviews off, as the card reads them (#470).
+        // A new pipe: both reviews off, as the card reads them.
         _pipe(
           state: PipeState.PIPE_STATE_APPROVAL,
           digits: '4821',
@@ -1371,7 +1371,7 @@ void main() {
     final clipboard = FakeSecretClipboard.install();
     await tester.tap(menuButton());
     await pumpFrames(tester);
-    // The project's menu has it (§4).
+    // The project's menu has it.
     await tester.longPress(find.text('Factory').first);
     await pumpFrames(tester);
     await tester.ensureVisible(find.text('Connect a pipe…'));
@@ -2053,7 +2053,7 @@ void main() {
         ),
         findsOneWidget,
       );
-      // Each member's choice (#414): Omar's, the last.
+      // Each member's choice: Omar's, the last.
       void choose(PipeAccess access) => tester
           .widget<Select<PipeAccess>>(find.byType(Select<PipeAccess>).last)
           .onChanged(access);
@@ -2069,7 +2069,7 @@ void main() {
         find.text('Let Omar run commands on this computer?'),
         findsOneWidget,
       );
-      // Having read the pipe means nothing any more (#346).
+      // Having read the pipe means nothing any more.
       expect(
         find.text('It will be able to reach your files, secrets and network.'),
         findsOneWidget,
@@ -2586,7 +2586,7 @@ void main() {
       expect(sent.quarantined.agentIds, ['omar']);
     });
 
-    // Zucchero's row 535: on a 375 pt phone, the line beside the buttons
+    // On a 375 pt phone, the line beside the buttons
     // goes above them whole, the Verified mark under who; updated before
     // it's shown, it says so once and asks to check it again.
     testWidgets('on a phone it fits; updated before it shows, it says so '
@@ -2621,7 +2621,7 @@ void main() {
         'and the choice still wider shows it; Approve stays the '
         "person's (Fugo)", (tester) async {
       // Asked with Omar in the pipe, able to run commands; limited to the
-      // pipe at once, and Review incoming on, before Matt saw the card.
+      // pipe at once, and Review incoming on, before the person saw the card.
       final harness = await showCard(
         tester,
         proposal(askedFrom: PipeApprovalBaseline(memberIds: ['omar'])),

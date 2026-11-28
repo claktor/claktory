@@ -1,4 +1,4 @@
-//! Files apps read (#339 follow-up 4, Fugo's ruling): a CSV or TSV file in
+//! Files apps read: a CSV or TSV file in
 //! the workspace or a project's folder, given only on a card when Rivet
 //! asks (whatever folder it's in), read as one table at every query, so
 //! it's live. Every read walks its path again: no symbolic link anywhere in

@@ -25,7 +25,7 @@ import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'network.dart';
 
 /// The areas diagnostics cover, as the Claktory files them.
-enum DiagnosticArea { connection, notifications }
+enum DiagnosticArea { connection, notifications, viewer }
 
 /// What happened, in an area.
 abstract interface class DiagnosticKind implements Enum {
@@ -120,11 +120,26 @@ enum ConnectionKey implements DiagnosticKey {
   reach,
 
   /// Bytes received, a count.
-  bytes;
+  bytes,
+
+  /// How long the try waited for the tunnel to make its endpoint afresh
+  /// before it dialed, in ms.
+  rebuildMs,
+
+  /// How long the tunnel's dial took, from its start to the connection
+  /// made on its first path, in ms.
+  dialMs,
+
+  /// How long the tunnel's relay took to come up, in ms, when it was up by
+  /// then; left out when it wasn't.
+  relayMs;
 
   @override
   String get wire => switch (this) {
     ConnectionKey.awayS => 'away_s',
+    ConnectionKey.rebuildMs => 'rebuild_ms',
+    ConnectionKey.dialMs => 'dial_ms',
+    ConnectionKey.relayMs => 'relay_ms',
     _ => name,
   };
 }
@@ -286,6 +301,82 @@ enum PushStep implements DiagnosticWord {
   /// Anything else.
   other,
 }
+
+/// How opening a file in a viewer went (viewers/registry.dart): how long
+/// it took to show, and what it waited on.
+enum ViewerKind implements DiagnosticKind {
+  /// The file is on screen, for the first time in this viewer: how long
+  /// after the viewer asked for it.
+  shown,
+
+  /// A copy kept on this device, shown at once, was checked against the
+  /// file: how long the check took.
+  checked;
+
+  @override
+  DiagnosticArea get area => DiagnosticArea.viewer;
+}
+
+/// The keys a viewer event's detail may have.
+enum ViewerKey implements DiagnosticKey {
+  /// What kind of file: [ViewedFile].
+  file,
+
+  /// Where what's shown came from: [ViewedFrom].
+  from,
+
+  /// Whether it's a preview made for this screen.
+  preview,
+
+  /// How long the read waited for the connection first, in milliseconds.
+  waitMs,
+
+  /// Bytes that came over the connection for it to show.
+  bytes,
+
+  /// The file's size, in bytes.
+  size,
+
+  /// Whether another file's bulk read was on its way when it was asked
+  /// for, so its answer may have waited behind a big piece.
+  bulk,
+
+  /// What the check of a kept copy found: [KeptCheck].
+  kept;
+
+  @override
+  String get wire => switch (this) {
+    ViewerKey.waitMs => 'wait_ms',
+    _ => name,
+  };
+}
+
+/// A file's kind, from its type.
+enum ViewedFile implements DiagnosticWord {
+  text,
+  markdown,
+  image,
+  pdf,
+  video,
+  other,
+}
+
+/// Where what a viewer shows came from: this device's copy, or a read.
+enum ViewedFrom implements DiagnosticWord { kept, read }
+
+/// What checking a kept copy found: still the file, changed (or gone), or
+/// it couldn't be asked (not connected).
+enum KeptCheck implements DiagnosticWord { current, changed, unasked }
+
+/// [mime]'s kind of file.
+ViewedFile viewedFile(String mime) => switch (mime) {
+  'text/markdown' => ViewedFile.markdown,
+  'application/pdf' => ViewedFile.pdf,
+  _ when mime.startsWith('text/') => ViewedFile.text,
+  _ when mime.startsWith('image/') => ViewedFile.image,
+  _ when mime.startsWith('video/') => ViewedFile.video,
+  _ => ViewedFile.other,
+};
 
 /// One event, as the device keeps it and sends it.
 class RecordedEvent {

@@ -21,6 +21,7 @@ import '../controls.dart';
 import '../dictation.dart' show Dictation, DictationFor;
 import '../identity.dart';
 import '../backend.dart' show fireAndLog;
+import '../account_join.dart' show joinOpenLine;
 import '../inbox.dart'
     show
         NeedsYouCard,
@@ -561,6 +562,11 @@ class _WhoAsks extends StatelessWidget {
       entry: item.isEntry ? entries.entryOf(item) : null,
       message: entries.messageOf(item),
     );
+    // A join's card says how it ended itself: under its title only its
+    // time left.
+    final shown = item.kind == NeedsYouKind.join
+        ? joinOpenLine(backend, item.sessionId)
+        : what;
     final time = entries.timeOf(item, workspace);
     final watch = focusWatchOf(item) != null;
     final routes = PhoneRoutes.of(context);
@@ -612,12 +618,13 @@ class _WhoAsks extends StatelessWidget {
                     );
                   },
                 ),
-                if (!watch)
-                  Text(
-                    what,
-                    style: type.caption.copyWith(color: palette.textMuted),
-                  )
-                else if (project != null || pipe != null || time > 0)
+                if (!watch) ...[
+                  if (shown.isNotEmpty)
+                    Text(
+                      shown,
+                      style: type.caption.copyWith(color: palette.textMuted),
+                    ),
+                ] else if (project != null || pipe != null || time > 0)
                   Ticking(
                     active: time > 0,
                     builder: (context, now) => Text(
@@ -1203,6 +1210,7 @@ String _systemGlyph(NeedsYouItem item) => switch (item.kind) {
   NeedsYouKind.backendService ||
   NeedsYouKind.lidStuck => 'laptop-minimal',
   NeedsYouKind.protectedPlace => 'folder-lock',
+  NeedsYouKind.join => 'server',
   NeedsYouKind.chat => 'message-circle',
   NeedsYouKind.signIn => 'user',
   _ => 'arrow-left-right',

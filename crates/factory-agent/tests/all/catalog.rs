@@ -195,3 +195,25 @@ fn only_a_provider_at_its_own_address_fetches_its_models() {
     let elsewhere = Registry::with_providers(store(), with_env(&[]), providers);
     assert!(["anthropic", "openai", "openai-codex", "openrouter", "grok"].iter().all(|id| !elsewhere.fetches_models(id)));
 }
+
+#[test]
+fn codexs_recorded_list_brings_its_gpt_6_models_with_the_efforts_claktory_sends() {
+    use factory_agent::providers::listing;
+    let body = include_bytes!("../fixtures/codex_models.json");
+    let models = listing::parse("openai-codex", body).expect("Codex's list");
+    let named = |id: &str| models.iter().find(|model| model.id == id).map(|model| model.name.as_str());
+    assert_eq!(named("gpt-6-astra"), Some("GPT-6 Astra"));
+    assert_eq!(named("gpt-6-sol"), Some("GPT-6 Sol"));
+    assert_eq!(named("gpt-6-luna"), Some("GPT-6 Luna"));
+    assert_eq!(named("gpt-6.1-terra"), Some("GPT-6.1 Terra"));
+    assert!(named("gpt-reserve").is_none() && named("codex-auto-review").is_none(), "hidden in Codex's own menu too");
+    let astra = models.iter().find(|model| model.id == "gpt-6-astra").expect("listed");
+    assert_eq!(astra.api, "openai-codex-responses");
+    assert_eq!(astra.context_window, 272_000);
+    assert!(astra.input.iter().any(|input| input == "image"));
+    let levels: Vec<&str> =
+        factory_agent::providers::supported_thinking_levels(astra).into_iter().map(|level| level.as_str()).collect();
+    assert_eq!(levels, ["off", "minimal", "low", "medium", "high", "xhigh", "max"], "as GPT-5.6 Sol; ultra hands work to Codex's own subagents");
+    let luna = models.iter().find(|model| model.id == "gpt-6-luna").expect("listed");
+    assert!(!factory_agent::providers::supported_thinking_levels(luna).iter().any(|level| level.as_str() == "ultra"));
+}

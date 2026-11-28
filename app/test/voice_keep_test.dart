@@ -113,7 +113,6 @@ void main() {
       transcript: TranscriptStore(),
       explorer: ExplorerStore(),
       extensionView: ExtensionViewStore(),
-      localPairing: () async => null,
     );
     addTearDown(backend.close);
     final atLaunch = empty('4');
@@ -130,7 +129,6 @@ void main() {
       transcript: TranscriptStore(),
       explorer: ExplorerStore(),
       extensionView: ExtensionViewStore(),
-      localPairing: () async => null,
     );
     addTearDown(backend.close);
     final sent = keep('1', kind: KeptKind.agent, target: 'june', save: false)
@@ -197,7 +195,6 @@ void main() {
       transcript: TranscriptStore(),
       explorer: ExplorerStore(),
       extensionView: ExtensionViewStore(),
-      localPairing: () async => null,
     );
     addTearDown(backend.close);
     keep('1', kind: KeptKind.agent, target: 'june');

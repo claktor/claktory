@@ -83,7 +83,6 @@ void main() {
       explorer: ExplorerStore(),
       extensionView: ExtensionViewStore(),
       tunnels: FakeTunnels(FakeTunnel(0)),
-      localPairing: () async => null,
       localEndpoint: 'ws://127.0.0.1:${moved.server.port}',
     )..connectWithin = const Duration(seconds: 2);
     unawaited(backend.run());

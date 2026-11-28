@@ -1,4 +1,4 @@
-//! History (#458): every change to the Map is kept in `map_history`, as it
+//! History: every change to the Map is kept in `map_history`, as it
 //! happens, whatever made it.
 
 use crate::common::{Client, View, apply_request, create_agent, create_project, start, temp_dir};
@@ -290,7 +290,7 @@ async fn history_plays_back_who_wrote_to_whom_and_never_what() {
     client.ok(client_message::Body::WatchHistory(v1::WatchHistory { on: false, project_id: String::new() })).await;
 }
 
-/// A chat is the person's own conversation, never part of History (#473):
+/// A chat is the person's own conversation, never part of History:
 /// not a node, not one of who joined, not an event or a run, not a goal;
 /// one placed before keeps its place, empty. A dev build isn't a release.
 #[tokio::test]

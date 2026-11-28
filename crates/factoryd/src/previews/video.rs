@@ -1,4 +1,4 @@
-//! Phone-sized previews of videos (#379 step 2): H.264 at about 800 kbit/s,
+//! Phone-sized previews of videos: H.264 at about 800 kbit/s,
 //! at most 720p and 30 frames a second, with its index first so it plays
 //! while it loads. On a Mac, `claktory-video-preview` (app/macos/VideoPreview,
 //! AVAssetWriter) makes it, from beside factoryd; elsewhere ffmpeg, when
@@ -52,11 +52,11 @@ enum Asker {
 }
 
 /// Previews being made, apart from images'. A person's never waits behind
-/// one made ahead (Bruno 28190): one made ahead runs only while no
+/// one made ahead: one made ahead runs only while no
 /// person's is waiting or being made, and a person's stops one already
 /// running ahead, which is made again once the person's is done. Running
 /// beside it, even at a lower priority, slowed a person's several times
-/// over, since both share the Mac's video encoder (Sale, 28592). One of each
+/// over, since both share the Mac's video encoder. One of each
 /// at a time, and never the same preview twice at once: who asks for one
 /// being made waits for it.
 struct Making {
@@ -327,10 +327,10 @@ fn make(data: &Path, path: &Path, sha: &str, size: u64, screen: Screen, maker: &
                 "scale=w='min(iw,if(lte(iw,ih),{short},{long}))':h='min(ih,if(lte(iw,ih),{long},{short}))':force_original_aspect_ratio=decrease:force_divisible_by=2"
             );
             // One thread made ahead; a few for a person waiting for it,
-            // which makes it several times sooner (Sale, 28789).
+            // which makes it several times sooner.
             let threads = if asker == Asker::Person { PERSON_THREADS } else { "1" };
-            // Only the file it's given, read as what it was sniffed as
-            // (Fugo, 24362): no other file or URL a movie could point at.
+            // Only the file it's given, read as what it was sniffed as:
+            // no other file or URL a movie could point at.
             command
                 .args(["-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-protocol_whitelist", "file", "-enable_drefs", "0"])
                 .args(["-threads", threads, "-f", "mov", "-i"])
@@ -637,9 +637,9 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// Bruno 28190: a person opening a video never waits behind a preview
+    /// A person opening a video never waits behind a preview
     /// made ahead for another video or another screen, nor shares the
-    /// computer with it (Sale, 28592), and one asking for the very preview
+    /// computer with it, and one asking for the very preview
     /// being made ahead gets it once it's done, made once.
     #[test]
     fn a_persons_preview_goes_before_those_made_ahead() {
@@ -733,7 +733,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// Sale, 28789: ffmpeg makes a person's preview with a few threads, and
+    /// Ffmpeg makes a person's preview with a few threads, and
     /// one made ahead with one.
     #[test]
     fn ffmpeg_gives_a_persons_preview_more_threads() {

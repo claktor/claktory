@@ -221,6 +221,48 @@ void main() {
     variant: mac,
   );
 
+  FileSeals seals(FileSealState state) => FileSeals(
+    path: _path,
+    seals: [
+      FileSeal(
+        sha256: 'sealed-sha',
+        agentName: 'Tomás',
+        sealedMs: Int64(DateTime.now().millisecondsSinceEpoch),
+        kept: true,
+      ),
+    ],
+    state: state,
+  );
+
+  testWidgets(
+    'a PDF changed since its seal says who sealed it, as other files do',
+    (tester) async {
+      _Cache();
+      _Native();
+      await _show(
+        tester,
+        _pdf('a paper')..seals = seals(FileSealState.FILE_SEAL_STATE_CHANGED),
+      );
+      expect(
+        find.textContaining('Changed since Tomás sealed it'),
+        findsOneWidget,
+      );
+      expect(find.text('Open sealed version'), findsOneWidget);
+    },
+    variant: mac,
+  );
+
+  testWidgets('a PDF still as it was sealed says "Sealed"', (tester) async {
+    _Cache();
+    _Native();
+    await _show(
+      tester,
+      _pdf('a paper')..seals = seals(FileSealState.FILE_SEAL_STATE_MATCHES),
+    );
+    expect(find.text('Sealed'), findsOneWidget);
+    expect(find.textContaining('Changed since'), findsNothing);
+  }, variant: mac);
+
   testWidgets(
     'from a Claktory on another machine, the PDF is kept with the files '
     'this device keeps (#446): opened again, only a one-byte read',

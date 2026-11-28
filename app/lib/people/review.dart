@@ -241,7 +241,7 @@ bool hiddenCharacter(int rune) =>
     rune == 0x3164 ||
     rune == 0xfeff ||
     rune == 0xffa0 ||
-    (rune >= 0xfff9 && rune <= 0xfffb) ||
+    (rune >= 0xfff0 && rune <= 0xfffb) ||
     (rune >= 0x1d173 && rune <= 0x1d17a) ||
     (rune >= 0xe0000 && rune <= 0xe0fff);
 
@@ -266,19 +266,86 @@ bool _space(int rune) =>
     rune == 0x205f ||
     rune == 0x3000;
 
+/// Whether the zero width joiner at [at] joins two emoji (👩‍💻, ❤️‍🔥,
+/// 🧑🏽‍💻): the character after it is a pictograph, and so is the one before
+/// it, with at most one U+FE0F and one skin tone (U+1F3FB–1F3FF) between.
+/// Anywhere else it could hide something. The same rule as the Claktories'
+/// and the certificates' (claktory-dm-crypto's joins_pictographs).
+bool _joinsPictographs(List<int> runes, int at) {
+  if (at + 1 >= runes.length || !pictographic(runes[at + 1])) return false;
+  var selector = false, tone = false;
+  for (var i = at - 1; i >= 0; i--) {
+    final before = runes[i];
+    if (before == 0xfe0f && !selector) {
+      selector = true;
+    } else if (before >= 0x1f3fb && before <= 0x1f3ff && !tone) {
+      tone = true;
+    } else {
+      return pictographic(before);
+    }
+  }
+  return false;
+}
+
+/// Unicode's Extended_Pictographic (emoji-data.txt, Unicode 15.1), which
+/// emoji sequences are made of: not letters, digits, flags' regional
+/// indicators or skin tones.
+bool pictographic(int rune) {
+  var low = 0, high = _pictographs.length ~/ 2 - 1;
+  while (low <= high) {
+    final middle = (low + high) ~/ 2;
+    if (_pictographs[middle * 2 + 1] < rune) {
+      low = middle + 1;
+    } else if (_pictographs[middle * 2] > rune) {
+      high = middle - 1;
+    } else {
+      return true;
+    }
+  }
+  return false;
+}
+
+/// [pictographic]'s ranges, first and last of each, in order.
+const _pictographs = [
+  0x00a9, 0x00a9, 0x00ae, 0x00ae, 0x203c, 0x203c, 0x2049, 0x2049, //
+  0x2122, 0x2122, 0x2139, 0x2139, 0x2194, 0x2199, 0x21a9, 0x21aa,
+  0x231a, 0x231b, 0x2328, 0x2328, 0x2388, 0x2388, 0x23cf, 0x23cf,
+  0x23e9, 0x23f3, 0x23f8, 0x23fa, 0x24c2, 0x24c2, 0x25aa, 0x25ab,
+  0x25b6, 0x25b6, 0x25c0, 0x25c0, 0x25fb, 0x25fe, 0x2600, 0x2605,
+  0x2607, 0x2612, 0x2614, 0x2685, 0x2690, 0x2705, 0x2708, 0x2712,
+  0x2714, 0x2714, 0x2716, 0x2716, 0x271d, 0x271d, 0x2721, 0x2721,
+  0x2728, 0x2728, 0x2733, 0x2734, 0x2744, 0x2744, 0x2747, 0x2747,
+  0x274c, 0x274c, 0x274e, 0x274e, 0x2753, 0x2755, 0x2757, 0x2757,
+  0x2763, 0x2767, 0x2795, 0x2797, 0x27a1, 0x27a1, 0x27b0, 0x27b0,
+  0x27bf, 0x27bf, 0x2934, 0x2935, 0x2b05, 0x2b07, 0x2b1b, 0x2b1c,
+  0x2b50, 0x2b50, 0x2b55, 0x2b55, 0x3030, 0x3030, 0x303d, 0x303d,
+  0x3297, 0x3297, 0x3299, 0x3299, 0x1f000, 0x1f0ff, 0x1f10d, 0x1f10f,
+  0x1f12f, 0x1f12f, 0x1f16c, 0x1f171, 0x1f17e, 0x1f17f, 0x1f18e, 0x1f18e,
+  0x1f191, 0x1f19a, 0x1f1ad, 0x1f1e5, 0x1f201, 0x1f20f, 0x1f21a, 0x1f21a,
+  0x1f22f, 0x1f22f, 0x1f232, 0x1f23a, 0x1f23c, 0x1f23f, 0x1f249, 0x1f3fa,
+  0x1f400, 0x1f53d, 0x1f546, 0x1f64f, 0x1f680, 0x1f6ff, 0x1f774, 0x1f77f,
+  0x1f7d5, 0x1f7ff, 0x1f80c, 0x1f80f, 0x1f848, 0x1f84f, 0x1f85a, 0x1f85f,
+  0x1f888, 0x1f88f, 0x1f8ae, 0x1f8ff, 0x1f90c, 0x1f93a, 0x1f93c, 0x1f945,
+  0x1f947, 0x1faff, 0x1fc00, 0x1fffd,
+];
+
 /// [text] in runs: what shows as it is, and each hidden character on its
-/// own ([hidden]): the ones [hiddenCharacter] names, the braille blank, and
-/// a variation selector anywhere but right after a visible character.
+/// own ([hidden]): the ones [hiddenCharacter] names, the braille blank, a
+/// variation selector anywhere but right after a visible character, and a
+/// zero width joiner anywhere but between two emoji.
 List<({String text, bool hidden})> reviewRuns(String text) {
   final runs = <({String text, bool hidden})>[];
   final plain = StringBuffer();
+  final runes = text.runes.toList();
   // Whether the last character shown as it is may take a selector.
   var takesSelector = false;
-  for (final rune in text.runes) {
-    final hidden =
-        hiddenCharacter(rune) ||
-        rune == 0x2800 ||
-        (_selector(rune) && !takesSelector);
+  for (var at = 0; at < runes.length; at++) {
+    final rune = runes[at];
+    final hidden = rune == 0x200d
+        ? !_joinsPictographs(runes, at)
+        : hiddenCharacter(rune) ||
+              rune == 0x2800 ||
+              (_selector(rune) && !takesSelector);
     if (hidden) {
       if (plain.isNotEmpty) {
         runs.add((text: plain.toString(), hidden: false));

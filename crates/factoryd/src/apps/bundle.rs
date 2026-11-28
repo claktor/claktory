@@ -174,6 +174,7 @@ fn plain(text: &str, what: &str) -> Result<(), String> {
 pub(crate) const FACTORY_RECORDS: &str = "factory-records";
 pub(crate) const ACTIVITY: &str = "activity";
 pub(crate) const CONVERSATIONS: &str = "conversations";
+pub(crate) const SCHEDULE: &str = "schedule";
 pub(crate) const AGENT_DATABASE: &str = "agent-database";
 /// Files the person (or Rivet, on a card) chooses: a CSV or TSV each
 /// (`super::files`).
@@ -225,11 +226,11 @@ impl Manifest {
         let mut sources = BTreeSet::new();
         for data in &self.data {
             match data.kind.as_str() {
-                FACTORY_RECORDS | ACTIVITY | CONVERSATIONS | FILE if data.agent.is_empty() => {}
-                FACTORY_RECORDS | ACTIVITY | CONVERSATIONS | FILE => return bad(format!("{} names no agent", data.kind)),
+                FACTORY_RECORDS | ACTIVITY | CONVERSATIONS | SCHEDULE | FILE if data.agent.is_empty() => {}
+                FACTORY_RECORDS | ACTIVITY | CONVERSATIONS | SCHEDULE | FILE => return bad(format!("{} names no agent", data.kind)),
                 AGENT_DATABASE if data.agent == "*" || (!data.agent.is_empty() && data.agent.len() <= 64) => {}
                 AGENT_DATABASE => return bad("agent-database needs agent = \"*\" or an agent's id".to_owned()),
-                other => return bad(format!("the data kind \"{other}\" isn't activity, conversations, agent-database or file")),
+                other => return bad(format!("the data kind \"{other}\" isn't activity, conversations, schedule, agent-database or file")),
             }
             if !sources.insert((data.kind.as_str(), data.agent.as_str())) {
                 return bad(format!("the data \"{}\" is there twice", data.kind));
@@ -566,7 +567,7 @@ parameters = { type = "object", required = ["text"], properties = { text = { typ
             ("kind = \"agent-database\"\n", "needs agent = \"*\" or an agent's id"),
             ("kind = \"factory-records\"\nagent = \"lea\"\n", "factory-records"),
             ("kind = \"factory-records\"\n", "is there twice"),
-            ("kind = \"files\"\n", "isn't activity, conversations, agent-database or file"),
+            ("kind = \"files\"\n", "isn't activity, conversations, schedule, agent-database or file"),
             ("kind = \"file\"\nagent = \"lea\"\n", "file names no agent"),
             ("kind = \"activity\"\nagent = \"lea\"\n", "activity names no agent"),
         ] {

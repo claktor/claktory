@@ -1,9 +1,8 @@
-// Alerts kept in Needs you (Bruno 44236, from Matt; Secco 44270; Lucy's
-// needs-you-cards.md §3.9; Trish 44382): each waits until the person reads
-// it, a light row of its own; urgent ones above the cards, the rest under
-// them under Alerts, three or more from one agent folded; opening one, or
-// Mark as read, reads it, and it stays marked Read until they leave. With
-// SHOTS set, the page is drawn to PNGs there:
+// Alerts kept in Needs you: each waits until the person reads it, a light
+// row of its own; urgent ones above the cards, the rest under them under
+// Alerts, three or more from one agent folded; opening one, or Mark as
+// read, reads it, and it stays marked Read until they leave. With SHOTS
+// set, the page is drawn to PNGs there:
 //   SHOTS=/tmp/alerts flutter test test/needs_you_alerts_test.dart
 import 'dart:io';
 import 'dart:ui' as ui;
@@ -237,6 +236,51 @@ void main() {
     expect(find.text('Read'), findsWidgets);
   });
 
+  testWidgets("an alert about this device can't be read here: no Mark as "
+      'read, a line saying where, and Mark all leaves it out', (tester) async {
+    Alert about(String id, String device, {int minutesAgo = 10}) => _alert(
+      id,
+      '',
+      title: "Lisa's iPhone can now use Studio.",
+      minutesAgo: minutesAgo,
+    )..deviceId = device;
+    final alone = Harness(_workspace([about('a1', 'd7')], card: false))
+      ..backend.deviceId = 'd7';
+    await alone.show(tester, size: const Size(1200, 900));
+    await settle(tester);
+    alone.page.value = AppPage.inbox;
+    await pumpFrames(tester);
+    expect(find.text('Mark as read'), findsNothing);
+    expect(find.text(aboutThisDevice), findsOneWidget);
+    await tester.tap(find.text("Lisa's iPhone can now use Studio."));
+    await pumpFrames(tester);
+    expect(_read(alone), isEmpty);
+
+    // On another device, it reads as any alert does.
+    await alone.apply(tester, _workspace([about('a1', 'd8')], card: false));
+    await pumpFrames(tester);
+    expect(find.text('Mark as read'), findsOneWidget);
+    expect(find.text(aboutThisDevice), findsNothing);
+
+    // Folded with Claktory's others: Mark all reads only those.
+    await alone.apply(
+      tester,
+      _workspace([
+        about('a1', 'd7', minutesAgo: 30),
+        _alert('a2', '', title: 'Backup done', minutesAgo: 20),
+        _alert('a3', '', title: 'Disk almost full', minutesAgo: 10),
+      ], card: false),
+    );
+    await pumpFrames(tester);
+    await tester.tap(find.text('Studio · 3 alerts'));
+    await pumpFrames(tester);
+    expect(find.text('Mark as read'), findsNWidgets(2));
+    expect(find.text(aboutThisDevice), findsOneWidget);
+    await tester.tap(find.text('Mark all 2 as read'));
+    await pumpFrames(tester);
+    expect(_read(alone), unorderedEquals(['a2', 'a3']));
+  });
+
   testWidgets("a withheld alert says only who sent it, and where it is", (
     tester,
   ) async {
@@ -334,7 +378,7 @@ void main() {
       );
       expect(tester.takeException(), isNull);
       await _shot(tester, 'alerts-$where');
-      // An iPhone's Needs you is the list too (#599): alerts stay rows,
+      // An iPhone's Needs you is the list too: alerts stay rows,
       // their folds opening in place.
       await tester.ensureVisible(find.textContaining('· 3 alerts'));
       await pumpFrames(tester);

@@ -1,4 +1,4 @@
-//! Grok on a SuperGrok or X Premium+ subscription: signed in as
+//! Grok on a Grok subscription: signed in as
 //! xAI's own command-line tool signs in (`oauth`), asked through the chat
 //! proxy that tool uses, which speaks OpenAI's Responses API. The proxy
 //! answers only clients that say which version of the tool they are

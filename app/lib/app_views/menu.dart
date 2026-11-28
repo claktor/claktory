@@ -1,12 +1,14 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:flutter/gestures.dart' show PointerDeviceKind, kTouchSlop;
 import 'package:flutter/rendering.dart' show RenderAbstractViewport;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 import '../controls.dart';
 import '../identity.dart';
+import '../mobile/back.dart' show BackHandle, CallbackBackToken, PhoneBack;
 import '../mobile/haptics.dart';
 import '../mobile/input.dart' show InputKind;
 import '../mobile/metrics.dart';
@@ -78,6 +80,13 @@ class _AppViewMenuState extends State<AppViewMenu> {
   final _link = LayerLink();
   final _region = Object();
 
+  /// Its hold on an Android window's Back while open, so Back closes it
+  /// and nothing under it.
+  BackHandle? _back;
+
+  /// Where each finger outside it touched down.
+  final _touches = <int, Offset>{};
+
   /// The options as they were when it opened: a choice sends the action
   /// the person saw, whatever the app has sent since.
   List<AppMenuOption> _shown = const [];
@@ -136,10 +145,20 @@ class _AppViewMenuState extends State<AppViewMenu> {
       return;
     }
     setState(_portal.show);
+    _back ??= PhoneBack.maybeOf(context)
+        ?.register(CallbackBackToken(onBack: _close));
   }
 
   void _close() {
+    _back?.release();
+    _back = null;
     if (_portal.isShowing) setState(_portal.hide);
+  }
+
+  @override
+  void dispose() {
+    _back?.release();
+    super.dispose();
   }
 
   void _chosen(List<AppMenuOption> options, int? index) {
@@ -150,9 +169,24 @@ class _AppViewMenuState extends State<AppViewMenu> {
   @override
   Widget build(BuildContext context) {
     widget.opener._open = _open;
+    // A finger closes it on lifting from a tap outside, never on touching
+    // down: an edge's Back swipe starts with a touch, and the menu must
+    // still hold Back when the swipe's Back comes.
     return TapRegion(
       groupId: _region,
-      onTapOutside: (_) => _close(),
+      onTapOutside: (event) {
+        if (event.kind == PointerDeviceKind.touch) {
+          _touches[event.pointer] = event.position;
+        } else {
+          _close();
+        }
+      },
+      onTapUpOutside: (event) {
+        final down = _touches.remove(event.pointer);
+        if (down != null && (event.position - down).distance <= kTouchSlop) {
+          _close();
+        }
+      },
       child: CompositedTransformTarget(
         link: _link,
         child: OverlayPortal(

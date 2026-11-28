@@ -1,20 +1,20 @@
-//! The Move extension (#243 S1): Rivet moves this Claktory to another
-//! computer for the person, as Settings → Move does, over the same machinery
-//! (`crate::move_run`). `move_claktory` starts the move with the code
-//! `factoryd receive` printed there and returns the digits both computers
-//! show; `move_status` says where it stands; `move_cancel` calls it off.
-//! Only the person confirms the digits, in Claktory's own confirm, whose
-//! words no agent writes (Fugo's review: a move hands over everything, so
-//! an injected Rivet mustn't be able to word a question that gets the yes);
-//! the move says an agent started it (`Move.started_by_agent_id`) so every
-//! device shows that confirm. Only Rivet (`proposals::rivet`, the settings'
-//! admin agent, never a tool argument) can use them, never while it has
-//! read a web page, and nothing here deletes the copy a move leaves behind:
-//! that stays the person's.
+//! The Move extension: Rivet helps move this Claktory to another computer for
+//! the person, over the same machinery as Settings → Move
+//! (`crate::move_run`). No agent starts or confirms a move: the
+//! other computer asks the person's Claktory account to receive this Claktory
+//! (`factoryd receive --email`), the person approves it themselves on one of
+//! their devices connected here, in Settings → Move, and this Claktory starts
+//! it once it has checked that device's own approval (`account::moves`). No
+//! code and no digits exist for an agent to see or relay. `move_claktory`
+//! says how (the email, the command), `move_status` where it stands,
+//! `move_cancel` calls it off, `move_report` checks the moved Claktory. Only
+//! Rivet (`proposals::rivet`, the settings' admin agent, never a tool
+//! argument) can use them, and nothing here deletes the copy a move leaves
+//! behind: that stays the person's. Without an account, the person moves it
+//! themselves (a receive code typed into the app).
 
 use std::fmt::Write as _;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use factory_agent::{Tool, ToolResult};
 use factory_protocol::v1::{self, MovePhase as Phase};
@@ -31,40 +31,36 @@ static MANIFEST: Manifest = Manifest {
     id: ID,
     name: "Move",
     icon: "send",
-    description: "Lets Rivet move this Claktory to another computer for you. You confirm the move and its digits in Claktory itself; Rivet can't confirm it for you.",
+    description: "Lets Rivet set up a move of this Claktory to another computer for you. You approve the move yourself, in Settings → Move on one of your devices; Rivet can't approve it for you.",
     default_enabled: false,
     options: &[],
 };
 
-/// How long move_claktory waits for the other computer's digits.
-const CONNECT_WAIT: Duration = Duration::from_secs(90);
-
-const START: &str = "Start moving this Claktory to another computer, when the person asks: code, the receive code `factoryd receive` printed there (claktory-move://…). It connects and returns the digits both computers show, or why it can't, and where project folders outside the person's home folder will go there. Claktory then asks the person itself to confirm the move; nothing is copied until they have, and you can't confirm it for them. skip: project folders the person wants left out of the move, by their full paths (a folder holding a project's folder leaves that out too).";
-const STATUS: &str = "Where the move stands: its phase, the other computer, the digits, what it's copying and any problem.";
+const START: &str = "How to move this Claktory to another computer, when the person asks: the email of the Claktory account it's signed in to, the command that receives it on the other computer, and what the person does to approve it. You can't start or approve a move yourself: the person approves it on one of their devices, and Claktory then starts it by itself. Without an account, it says the person moves it themselves.";
+const STATUS: &str = "Where the move stands: its phase, the other computer, which device approved it, what it's copying and any problem.";
 const REPORT: &str = "On the new computer, once Claktory runs there after a move: how it went, in plain words, to tell the person before you say the move is done. It says whether its secrets are unlocked (or still locked), whether the account checked in, which devices connected since, whether every project folder is in place, whether each sign-in still works (a refused one shows Sign in again), the tools the agents used that aren't here, and what of each project needs a Mac. Ask for it again once they're unlocked if it said they were locked.";
-const CANCEL: &str = "Call off the move, or dismiss one that failed. Use it when the digits don't match, or when the person asks; it can't be called off once the other computer is taking over.";
+const CANCEL: &str = "Call off the move, or dismiss one that failed. Use it when the person asks; it can't be called off once the other computer is taking over.";
 
-/// How Rivet moves this Claktory to a server (Pericolo's tested recipe,
-/// #243 S2), with Fugo's S1 rule: only the person confirms, in Claktory's
-/// own confirm.
-const RECIPE: &str = r#"When {person} asks you to move this Claktory to another computer, such as a server, follow this exactly. Only {person} confirms the move: Claktory itself asks them, on every device, naming the other computer and the digits. Never write that question yourself, with ask_person or otherwise; you can't confirm the move, and you never answer for them. Nothing you can do deletes the copy left here: that's {person}'s to do.
+/// How Rivet sets up a move of this Claktory to a server (Pericolo's tested
+/// recipe), with the rule that no agent starts or approves a move; the
+/// person approves it on their own device.
+const RECIPE: &str = r#"When {person} asks you to move this Claktory to another computer, such as a server, follow this exactly. Only {person} approves the move, in Settings → Move on one of their devices connected to this Claktory, where Claktory shows what the account service saw of the other computer. You can't approve or start it, and there's no code or digits to pass on. Don't ask for the approval with ask_person or otherwise: only tell {person} where to give it. Nothing you can do deletes the copy left here: that's {person}'s to do.
+
+First call move_claktory: it gives EMAIL, the Claktory account this Claktory is signed in to, or says it isn't signed in, in which case tell {person} they move it themselves (Settings → General → Move to another computer…) and stop.
 
 KEY below is the file of an SSH key the vault generated for it (secrets_request with generate: "ssh-ed25519"; {person} adds its public half to the server). Name its secret on every command.
 
 1. First contact records the server's host key; tell {person} its fingerprint. After that never turn host checking off: if the key changes, ssh refuses, and you tell {person} and stop.
    ssh -i "$KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new root@SERVER true && ssh-keygen -l -F SERVER
-2. Start receive on the server, detached there, so that nothing here can stop it: not the freeze, when your own tasks stop, and not a dropped connection. It writes receive's JSON lines to ~/.claktory-move/receive.log there and reads {person}'s answer from ~/.claktory-move/answers there. Run it as it is, with its lines unindented. If receive already runs there, it says so and starts nothing.
+2. Start receive on the server, detached there, so that nothing here can stop it: not the freeze, when your own tasks stop, and not a dropped connection. It writes receive's JSON lines to ~/.claktory-move/receive.log there. Put EMAIL in it, and run it as it is, with its lines unindented. If receive already runs there, it says so and starts nothing.
 ssh -i "$KEY" -o IdentitiesOnly=yes root@SERVER sh -s <<'EOF'
 M="$HOME/.claktory-move"; mkdir -p "$M"
 if pgrep -f claktory-move/receive.sh >/dev/null; then echo "receive already runs"; exit 0; fi
-: > "$M/answers"; rm -f "$M/done" "$M/exit"
+rm -f "$M/exit"
 cat > "$M/receive.sh" <<'END'
 M="$HOME/.claktory-move"
-{ tail -n +1 -f "$M/answers" & t=$!
-  while [ ! -e "$M/done" ]; do sleep 1; done
-  kill "$t" 2>/dev/null; } |
-{ s=0; bash -c "$(curl -fsSL https://claktory.com/install.sh)" -- --receive --json || s=$?
-  echo "$s" > "$M/exit"; touch "$M/done"; }
+s=0; bash -c "$(curl -fsSL https://claktory.com/install.sh)" -- --receive --email EMAIL --json < /dev/null || s=$?
+echo "$s" > "$M/exit"
 END
 command -v loginctl >/dev/null && loginctl enable-linger "$(id -un)" 2>/dev/null
 if command -v setsid >/dev/null; then d=setsid; else d=; fi
@@ -73,8 +69,8 @@ echo started
 EOF
 3. Follow it as one background task (run_in_background, timeout up to 7200). Its log is receive's JSON lines, and it ends when receive does, with receive's exit status. If this task stops (at the freeze, or when the connection drops), receive carries on there; run it again to follow it, from the first line.
    ssh -i "$KEY" -o IdentitiesOnly=yes -o ServerAliveInterval=30 root@SERVER 'M="$HOME/.claktory-move"; tail -n +1 -f "$M/receive.log" & t=$!; while [ ! -e "$M/exit" ] && pgrep -f claktory-move/receive.sh >/dev/null; do sleep 2; done; sleep 1; kill "$t"; exit "$(cat "$M/exit" 2>/dev/null || echo 1)"'
-4. The log's first {"event":"code",…} line's code goes to move_claktory. Compare the digits it returns with the log's {"event":"confirm","digits":…} line: if they differ, call move_cancel at once, since something is between the two computers. If they match, tell {person} that Claktory is asking them to confirm the move, on any of their devices. Then wait, following move_status: once it says {person} confirmed the move here, write their yes on the server, ssh -i "$KEY" -o IdentitiesOnly=yes root@SERVER 'echo yes >> "$HOME/.claktory-move/answers"'; if they called it off (move_status says no move is under way), write no the same way. Never before a confirm line, and never your own judgement. A new code line after a no is a fresh code.
-5. The log's last line is {"ok":true,…} (Claktory runs on the server) or {"ok":false,…}: not moved (exit 3 refused, or "error":"called_off" when the move was called off after the confirm; 1 failed; 130 stopped). Then nothing runs on the server: tell {person} why, in its message. Running step 2 again resumes a move that stopped, and step 3 follows it. To stop it on purpose, stop receive on the server: ssh -i "$KEY" -o IdentitiesOnly=yes root@SERVER 'pkill -TERM -f "factoryd receive"'. If receive stops while the server sets the moved Claktory up, this Claktory gives up after two minutes without an answer, carries on here as it was, and move_status says why.
+4. Once the log says to approve the move (a progress line: "On a device connected to the Claktory you're moving, open Settings → Move…", then one with "this computer's code: XXXX XXXX XXXX XXXX"), tell {person}: on one of their devices connected to this Claktory, open Settings → Move and approve moving it to SERVER only if the code shown there is that code, word for word, and the address and network are their server's. It must be them, on their device. Then wait, following move_status: once they approve, this Claktory starts the move by itself, and move_status says which device approved it. If they decline, or it isn't approved within ten minutes, receive ends; run step 2 again when they want to try again.
+5. The log's last line is {"ok":true,…} (Claktory runs on the server) or {"ok":false,…}: not moved (exit 3 refused, declined or called off; 1 failed; 130 stopped). Then nothing runs on the server: tell {person} why, in its message. Running step 2 again resumes a move that stopped, and step 3 follows it. To stop it on purpose, stop receive on the server: ssh -i "$KEY" -o IdentitiesOnly=yes root@SERVER 'pkill -TERM -f "factoryd receive"'. If receive stops while the server sets the moved Claktory up, this Claktory gives up after two minutes without an answer, carries on here as it was, and move_status says why.
 6. At the freeze your run stops like every agent's, and so may your task from step 3; receive carries on on the server by itself. You carry on on the server: there, call move_report before you tell {person} the move is done, and pass on what it says: the copy left behind can still be gone back to while something is wrong. If it says the secrets are locked, call it again once they're unlocked, to check the sign-ins.
 "#;
 
@@ -92,18 +88,9 @@ impl Extension for Move {
     }
 
     fn tools(&self, factory: &Arc<Factory>, agent: &str) -> Vec<Tool> {
-        let code = json!({
-            "type": "object",
-            "required": ["code"],
-            "properties": {
-                "code": {"type": "string", "minLength": 1},
-                "skip": {"type": "array", "items": {"type": "string", "minLength": 1}},
-            },
-            "additionalProperties": false,
-        });
         let none = json!({"type": "object", "properties": {}, "additionalProperties": false});
         vec![
-            async_tool(factory, agent, "move_claktory", "Move this Claktory", START, code, start),
+            super::tool("move_claktory", "Move this Claktory", START, none.clone(), super::typed_handler(factory, agent, start)),
             super::tool("move_status", "Move status", STATUS, none.clone(), super::typed_handler(factory, agent, status)),
             super::tool("move_cancel", "Call off the move", CANCEL, none.clone(), super::typed_handler(factory, agent, cancel)),
             async_tool(factory, agent, "move_report", "Check the moved Claktory", REPORT, none, report),
@@ -112,6 +99,11 @@ impl Extension for Move {
 
     fn admin_default(&self) -> bool {
         true
+    }
+
+    /// Moving isn't on Windows yet (`move_run::NOT_ON_WINDOWS`).
+    fn hidden(&self) -> bool {
+        cfg!(windows)
     }
 }
 
@@ -127,114 +119,27 @@ fn only_rivet(factory: &Factory, agent: &str) -> Result<(), String> {
 }
 
 #[derive(Deserialize)]
-struct StartArgs {
-    code: String,
-    #[serde(default)]
-    skip: Vec<String>,
-}
-
-/// The folders to leave out, as full paths ("~" expanded), each holding at
-/// least one of the projects' folders.
-fn skipped(factory: &Factory, skip: &[String]) -> Result<Vec<String>, String> {
-    let folders: Vec<std::path::PathBuf> = {
-        let inner = factory.lock();
-        crate::move_report::projects_of(&inner.config).into_iter().flat_map(|(_, paths)| paths).collect()
-    };
-    let user_home = std::env::home_dir().unwrap_or_default();
-    let mut kept = Vec::new();
-    for given in skip {
-        let given = given.trim().trim_end_matches('/');
-        let path = match given.strip_prefix('~') {
-            Some(rest) if rest.is_empty() || rest.starts_with('/') => user_home.join(rest.trim_start_matches('/')),
-            _ => std::path::PathBuf::from(given),
-        };
-        if !path.is_absolute() {
-            return Err(format!(
-                "Name each folder to leave out by its full path, such as /Volumes/Data/Assets; \"{given}\" isn't one. Nothing was done."
-            ));
-        }
-        if !folders.iter().any(|folder| folder.starts_with(&path)) {
-            return Err(format!(
-                "{} holds none of the projects' folders, so there's nothing there to leave out. Nothing was done.",
-                path.display()
-            ));
-        }
-        kept.push(path.display().to_string());
-    }
-    Ok(kept)
-}
-
-/// The planned folders outside this computer's home folders, and where
-/// each goes, for move_claktory's answer.
-fn outside_folders(factory: &Factory, view: &v1::Move) -> Vec<String> {
-    let user_home = std::env::home_dir().unwrap_or_default();
-    let home = factory.home.root();
-    view.map
-        .iter()
-        .filter(|path| {
-            let from = std::path::Path::new(&path.from);
-            !from.starts_with(home) && !from.starts_with(&user_home)
-        })
-        .map(|path| format!("- {} → {}", path.from, path.to))
-        .collect()
-}
-
-#[derive(Deserialize)]
 struct NoArgs {}
 
-/// move_claktory: StartMove, then the digits once the other computer
-/// answers (or why not).
-async fn start(factory: Arc<Factory>, agent: String, args: StartArgs) -> Result<ToolResult, String> {
-    only_rivet(&factory, &agent)?;
-    super::untainted(
-        &factory,
-        &agent,
-        "start a move",
-        "start the move from Settings → Move. Nothing was done.",
-    )?;
-    let skip = skipped(&factory, &args.skip)?;
-    crate::move_run::start_by(&factory, args.code.trim(), &agent, skip.clone()).map_err(|error| error.to_string())?;
-    let until = Instant::now() + CONNECT_WAIT;
-    loop {
-        let view = factory.moving.view().unwrap_or_default();
-        match view.phase() {
-            Phase::Connecting if Instant::now() < until => tokio::time::sleep(Duration::from_millis(200)).await,
-            Phase::Connecting => {
-                return Ok(said(format!(
-                    "Still connecting to {}. Check that factoryd receive still runs there; move_status says when it answers.",
-                    view.target_machine
-                )));
-            }
-            Phase::Failed => return Err(view.error),
-            Phase::Confirm => {
-                let (person, projects) = {
-                    let inner = factory.lock();
-                    (inner.config.person().to_owned(), crate::move_report::projects_of(&inner.config))
-                };
-                let machine = &view.target_machine;
-                let platform = crate::move_report::platform_lines(&projects, &view.target_os, false);
-                let mut text = format!(
-                    "Connected to {machine} ({}, {}, Claktory {}). Both computers show {}.\n\nCompare them with the digits factoryd receive printed on {machine}. If they differ, call move_cancel now. If they match, tell {person} that Claktory is asking them to confirm the move, on any of their devices, and to check the digits there; you can't confirm it, and don't ask them yourself. Once move_status says they confirmed it, answer yes to receive there.\n\nWhat to tell {person} about their projects on {machine}:\n{platform}",
-                    view.target_os, view.target_arch, view.target_version, view.digits
-                );
-                let outside = outside_folders(&factory, &view);
-                if !outside.is_empty() {
-                    let _ = write!(
-                        text,
-                        "\n\nThese folders are outside {person}'s home folder here, so on {machine} they go under its home folder, keeping their paths:\n{}\nTell {person} before they confirm. To leave one out instead, call move_cancel (answer no to receive if it's yours to answer, as for any move called off; it then shows a new code), then call move_claktory again with that new code and skip listing the folder.",
-                        outside.join("\n")
-                    );
-                }
-                if !skip.is_empty() {
-                    let _ = write!(text, "\n\nLeft out of the move, as asked: {}.", skip.join("; "));
-                }
-                return Ok(said(text));
-            }
-            // A move a restart interrupted, picked up where it was: its
-            // digits were confirmed then.
-            _ => return Ok(said(describe(&factory, &view))),
-        }
+/// move_claktory: how the move goes, with this Claktory's account; no move
+/// starts here.
+fn start(factory: &Arc<Factory>, agent: &str, _args: NoArgs) -> Result<ToolResult, String> {
+    only_rivet(factory, agent)?;
+    let (person, config) = {
+        let inner = factory.lock();
+        (inner.config.person().to_owned(), inner.config.account.clone())
+    };
+    let Some((_, email, _)) = factory.account.signed_in_as(&config) else {
+        return Ok(said(format!(
+            "This Claktory isn't signed in to a Claktory account, so no move of it can be approved from a device: {person} moves it themselves, from Settings → General → Move to another computer…, typing the code factoryd receive shows on the other computer. You can't do it for them. Nothing was done."
+        )));
+    };
+    if let Some(view) = factory.moving.view().filter(|view| !matches!(view.phase(), Phase::Failed | Phase::Unspecified)) {
+        return Ok(said(format!("A move is already under way.\n{}", describe(factory, &view))));
     }
+    Ok(said(format!(
+        "EMAIL is {email}. On the other computer, run receive with it (install.sh -- --receive --email {email} --json, or factoryd receive --email {email} --json where Claktory is installed). It asks {person}'s Claktory account to receive this Claktory and prints no code. Then {person} approves it in Settings → Move on one of their devices connected to this Claktory, checking that the other computer's address and network shown there are theirs. Once they do, this Claktory starts the move by itself; follow it with move_status. You can't approve it, and nothing has started yet."
+    )))
 }
 
 fn said(text: String) -> ToolResult {
@@ -256,10 +161,7 @@ fn describe(factory: &Factory, view: &v1::Move) -> String {
     };
     let phase = match view.phase() {
         Phase::Connecting => format!("Connecting to {machine}."),
-        Phase::Confirm if factory.moving.confirmed_here() => {
-            format!("{person} confirmed the move here: answer yes to receive on {machine}, which waits for it.")
-        }
-        Phase::Confirm => format!("Waiting for {them} to confirm the move in Claktory, where they check the digits."),
+        Phase::Confirm => format!("Waiting for {them} to check the digits in Claktory and confirm the move there."),
         Phase::Checking => format!("{machine} is checking it can take this Claktory."),
         Phase::Copying => format!("Copying to {machine} while agents keep working."),
         Phase::Frozen => "Frozen for the last round: agents are stopped.".to_owned(),
@@ -270,12 +172,12 @@ fn describe(factory: &Factory, view: &v1::Move) -> String {
         Phase::Unspecified => "No move is under way.".to_owned(),
     };
     let mut text = phase;
+    if !view.approved_by_name.is_empty() {
+        let _ = write!(text, "\n{person} approved it on {}.", view.approved_by_name);
+    }
     if !view.target_os.is_empty() {
         let _ =
             write!(text, "\nThe other computer: {machine} ({}, {}, Claktory {}).", view.target_os, view.target_arch, view.target_version);
-    }
-    if !view.digits.is_empty() {
-        let _ = write!(text, "\nThe digits: {}.", view.digits);
     }
     if !view.step_text.is_empty() && view.phase() != Phase::Failed {
         let _ = write!(text, "\nNow: {}", view.step_text);

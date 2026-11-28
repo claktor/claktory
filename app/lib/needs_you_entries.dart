@@ -254,10 +254,28 @@ class NeedsYouEntries extends ChangeNotifier {
       } finally {
         _fetching.remove(key);
         final again = _again.remove(key);
-        notifyListeners();
         if (again != null) fetch(again);
+        notifyListeners();
       }
     }());
+  }
+
+  /// Fetches [items]' cards again, as they are now ([fetch]): completes
+  /// once none of them is being fetched, each come or failed.
+  Future<void> refetch(Iterable<NeedsYouItem> items) {
+    final keys = {for (final item in items) item.key};
+    items.forEach(fetch);
+    bool done() => !keys.any(_fetching.contains);
+    if (done()) return Future.value();
+    final fetched = Completer<void>();
+    void check() {
+      if (!done() || fetched.isCompleted) return;
+      removeListener(check);
+      fetched.complete();
+    }
+
+    addListener(check);
+    return fetched.future;
   }
 
   /// [item]'s card as it is now: the open conversation's own copy when it

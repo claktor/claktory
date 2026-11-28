@@ -1,4 +1,4 @@
-// A project's Files with a finger on an iPad's wide layouts (#540, Sale):
+// A project's Files with a finger on an iPad's wide layouts:
 // its touch and hold offers Files, and the focused project's heading keeps
 // its Files button in sight, both opening a pane beside the conversation
 // as the Mac's hover button does (a page of their own when the agent shown
@@ -87,8 +87,7 @@ void main() {
     final button = tester.getRect(filesButtons());
     expect(button.size, const Size(20, 20), reason: 'as it looks');
     // 28 points before its middle and 11 below: off the glyph, within 44
-    // wide, which reaches back before it as the row ends 4 points after it
-    // (Sale, row 162).
+    // wide, which reaches back before it as the row ends 4 points after it.
     await tester.tapAt(button.center + const Offset(-28, 11));
     await pumpFrames(tester);
     _expectFilesOf(harness, 'p1');
@@ -121,7 +120,7 @@ void main() {
     final harness = Harness(snapshot(layout: withFilesOf('p1'), focused: 'p1'));
     await harness.show(tester, size: const Size(1194, 834));
     await pumpFrames(tester);
-    // Open, the glyph that closes them (§4).
+    // Open, the glyph that closes them.
     final button = tester.getRect(find.bySemanticsLabel('Hide files'));
     await tester.tapAt(button.center + const Offset(-18, 11));
     await pumpFrames(tester);

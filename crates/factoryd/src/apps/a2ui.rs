@@ -169,6 +169,9 @@ impl Content {
             }
         };
         if applied != Applied::Deleted {
+            charts::open_cells(&next.components, &next.data)?;
+        }
+        if applied != Applied::Deleted {
             let weight: usize =
                 next.components.values().map(|component| component.to_string().len()).sum::<usize>() + next.data.to_string().len();
             if weight > MAX_CONTENT {

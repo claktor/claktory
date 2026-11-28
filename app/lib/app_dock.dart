@@ -1,3 +1,4 @@
+import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
@@ -6,6 +7,7 @@ import 'backend.dart';
 import 'controls.dart';
 import 'identity.dart';
 import 'layout.dart';
+import 'mobile/back.dart' show BackHandle, CallbackBackToken, PhoneBack;
 import 'mobile/metrics.dart';
 import 'mobile/navigation.dart' show PhoneRoutes;
 import 'mobile/presentation.dart';
@@ -70,7 +72,6 @@ void openAppsTab(BuildContext context) {
 /// with no views opens its place in the Marketplace's Apps tab.
 void openApp(BuildContext context, AppInfo app, [String view = '']) {
   final scope = AppScope.scope(context);
-  final backend = scope.backend;
   if (app.views.isEmpty) {
     openAppsTab(context);
     return;
@@ -84,11 +85,17 @@ void openApp(BuildContext context, AppInfo app, [String view = '']) {
     phone.pushApp(_appLeaf(app, view));
     return;
   }
-  final workspace = backend.workspace;
+  _expandIn(context, _appLeaf(app, view));
+}
+
+/// Shows [leaf] filling the window, beside the selected agent (or the
+/// first, with none selected).
+void _expandIn(BuildContext context, ViewLeaf leaf) {
+  final workspace = AppScope.of(context).workspace;
   final agent =
       workspace.selectedAgent ?? workspace.workspace.agents.firstOrNull;
   if (agent == null) return;
-  _expandApp(context, agent, app, view);
+  _expandApp(context, agent, leaf);
 }
 
 /// [app]'s [view] (empty: its first) as a leaf of its own.
@@ -108,41 +115,74 @@ ViewLeaf _appLeaf(AppInfo app, String view) {
 /// overlay: its entry, and the app and view it shows.
 final _expanded = Expando<({OverlayEntry entry, String app, String view})>();
 
-/// Shows [app]'s [view] (empty: its first) filling the window, in the
-/// window's overlay, so dialogs and menus still float above it: the same
-/// band and Esc as an expanded pane, "Back to [agent]". Nothing changes
-/// under it. Another view opened meanwhile takes its place.
-void _expandApp(BuildContext context, Agent agent, AppInfo app, String view) {
-  final leaf = _appLeaf(app, view);
+/// Shows [leaf], an app's view, filling the window, in the window's
+/// overlay, so dialogs and menus still float above it: the same band and
+/// Esc as an expanded pane, "Back to [agent]". Nothing changes under it.
+/// Another view opened meanwhile takes its place.
+void _expandApp(BuildContext context, Agent agent, ViewLeaf leaf) {
   final viewId = leaf.view;
   final overlay = Overlay.of(context);
+  final backend = AppScope.of(context);
   final shown = _expanded[overlay];
-  if (shown != null && shown.app == app.id && shown.view == viewId) return;
+  if (shown != null && shown.app == leaf.appId && shown.view == viewId) {
+    return;
+  }
   _closeExpandedApp(overlay);
+  final windowBack = PhoneBack.maybeOf(context);
   late final OverlayEntry entry;
   void back() {
     if (_expanded[overlay]?.entry == entry) _closeExpandedApp(overlay);
   }
 
   entry = OverlayEntry(
-    builder: (context) => ExpandedPane(
-      key: const ValueKey('expanded-app'),
-      agent: agent,
-      opened: const [],
-      onBack: back,
-      child: Pane(
-        agent: agent,
-        node: ViewNode(id: 'expanded-app', leaf: leaf),
-        onDrop: (_, _) {},
-        onClose: back,
-        expanded: true,
-        onExpand: back,
-        child: AppPane(leaf: leaf),
+    // What it covers isn't read either: VoiceOver and TalkBack stay on the
+    // view, as on a dialog. An entry of the window's overlay, so it hides
+    // only what was drawn before it.
+    builder: (context) => BlockSemantics(
+      child: _HandsOver(
+        backend: backend,
+        leaf: leaf,
+        open: () => _expanded[overlay]?.entry == entry,
+        child: _HoldsBack(
+          back: windowBack,
+          onBack: back,
+          child: ExpandedPane(
+            key: const ValueKey('expanded-app'),
+            agent: agent,
+            opened: const [],
+            onBack: back,
+            child: Pane(
+              agent: agent,
+              node: ViewNode(id: 'expanded-app', leaf: leaf),
+              onDrop: (_, _) {},
+              onClose: back,
+              expanded: true,
+              onExpand: back,
+              child: AppPane(leaf: leaf),
+            ),
+          ),
+        ),
       ),
     ),
   );
-  _expanded[overlay] = (entry: entry, app: app.id, view: viewId);
+  _expanded[overlay] = (entry: entry, app: leaf.appId, view: viewId);
   overlay.insert(entry);
+}
+
+/// Closes the app's view filling the window [context] is in ([openApp]),
+/// as its Back would. Answers a context that stays: the window's, or
+/// [context] itself when no view filled it.
+BuildContext closeExpandedApp(BuildContext context) {
+  BuildContext at = context;
+  while (true) {
+    final overlay = at.findAncestorStateOfType<OverlayState>();
+    if (overlay == null) return context;
+    if (_expanded[overlay] != null) {
+      _closeExpandedApp(overlay);
+      return overlay.context;
+    }
+    at = overlay.context;
+  }
 }
 
 void _closeExpandedApp(OverlayState overlay) {
@@ -151,6 +191,131 @@ void _closeExpandedApp(OverlayState overlay) {
   if (shown == null) return;
   shown.entry.remove();
   shown.entry.dispose();
+}
+
+/// An app's view open as its window lost its layout, by the window's
+/// Claktory: a resize or rotation crossing between the phone's layout and
+/// the wide one builds the window anew, and the new layout opens it again
+/// (on a phone, as a page; wide, filling the window). Kept for that frame
+/// only, so another Claktory's window, or one built later, never gets it.
+final _handedOver = Expando<ViewLeaf>();
+
+/// [leaf] was open as [backend]'s window lost its layout.
+void handAppOver(Backend backend, ViewLeaf leaf) {
+  _handedOver[backend] = leaf;
+  SchedulerBinding.instance
+    ..addPostFrameCallback((_) => _handedOver[backend] = null)
+    ..ensureVisualUpdate();
+}
+
+/// The app's view handed over to [backend]'s new layout ([handAppOver]),
+/// once; null for none.
+ViewLeaf? takeHandedOverApp(Backend backend) {
+  final leaf = _handedOver[backend];
+  _handedOver[backend] = null;
+  return leaf;
+}
+
+/// Hands [leaf] over as the window's layout goes with it still open.
+class _HandsOver extends StatefulWidget {
+  const _HandsOver({
+    required this.backend,
+    required this.leaf,
+    required this.open,
+    required this.child,
+  });
+
+  final Backend backend;
+  final ViewLeaf leaf;
+
+  /// Whether it's still open: closed (Back, Esc, another app), it's gone
+  /// for good.
+  final bool Function() open;
+  final Widget child;
+
+  @override
+  State<_HandsOver> createState() => _HandsOverState();
+}
+
+class _HandsOverState extends State<_HandsOver> {
+  @override
+  void dispose() {
+    if (widget.open()) handAppOver(widget.backend, widget.leaf);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
+}
+
+/// The window's Back, where it has one (Android), while the view fills
+/// the window: Back closes it, as its Back chip and Esc do, rather than
+/// leaving the app. Over an expanded pane under it, and under a dialog
+/// opened over it.
+class _HoldsBack extends StatefulWidget {
+  const _HoldsBack({
+    required this.back,
+    required this.onBack,
+    required this.child,
+  });
+
+  final PhoneBack? back;
+  final VoidCallback onBack;
+  final Widget child;
+
+  @override
+  State<_HoldsBack> createState() => _HoldsBackState();
+}
+
+class _HoldsBackState extends State<_HoldsBack> {
+  BackHandle? _handle;
+
+  @override
+  void initState() {
+    super.initState();
+    _handle = widget.back?.registerNavigation(
+      CallbackBackToken(onBack: () => widget.onBack()),
+    );
+  }
+
+  @override
+  void dispose() {
+    _handle?.release();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
+}
+
+/// The wide layout's side of [handAppOver]: an app's view open as the
+/// phone's layout went opens again filling the window. Sits in the
+/// window's overlay; on a phone's layout the phone's pages take it.
+class AppHandOver extends StatefulWidget {
+  const AppHandOver({super.key, required this.child});
+
+  final Widget child;
+
+  @override
+  State<AppHandOver> createState() => _AppHandOverState();
+}
+
+class _AppHandOverState extends State<AppHandOver> {
+  @override
+  void initState() {
+    super.initState();
+    SchedulerBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || isPhoneLayout(context)) return;
+      final leaf = takeHandedOverApp(AppScope.of(context));
+      if (leaf == null) return;
+      final app = appById(AppScope.of(context).workspace.workspace, leaf.appId);
+      if (app == null || app.views.isEmpty) return;
+      _expandIn(context, leaf);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
 }
 
 /// The apps with a view open beside the selected agent's conversation.

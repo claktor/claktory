@@ -265,6 +265,9 @@ enum ClientMessage_Body {
   providersShown,
   showRecoveryCodes,
   keepRecoveryCodes,
+  unpairAccountKey,
+  accountAuthorize,
+  proveAllowedDevice,
   readAlerts,
   checkProtectedPlaces,
   dismissProtectedPlace,
@@ -282,6 +285,14 @@ enum ClientMessage_Body {
   previewArrange,
   paymentOpened,
   setAttribution,
+  deleteSealedCopy,
+  requestAddDevice,
+  getChecklist,
+  listTasks,
+  listDeviceActivity,
+  watchAgentTab,
+  agentTabFrameAck,
+  agentTabInput,
   notSet
 }
 
@@ -531,6 +542,9 @@ class ClientMessage extends $pb.GeneratedMessage {
     ProvidersShown? providersShown,
     ShowRecoveryCodes? showRecoveryCodes,
     KeepRecoveryCodes? keepRecoveryCodes,
+    UnpairAccountKey? unpairAccountKey,
+    AccountAuthorize? accountAuthorize,
+    ProveAllowedDevice? proveAllowedDevice,
     ReadAlerts? readAlerts,
     CheckProtectedPlaces? checkProtectedPlaces,
     DismissProtectedPlace? dismissProtectedPlace,
@@ -548,6 +562,14 @@ class ClientMessage extends $pb.GeneratedMessage {
     PreviewArrange? previewArrange,
     PaymentOpened? paymentOpened,
     SetAttribution? setAttribution,
+    DeleteSealedCopy? deleteSealedCopy,
+    RequestAddDevice? requestAddDevice,
+    GetChecklist? getChecklist,
+    ListTasks? listTasks,
+    ListDeviceActivity? listDeviceActivity,
+    WatchAgentTab? watchAgentTab,
+    AgentTabFrameAck? agentTabFrameAck,
+    AgentTabInput? agentTabInput,
   }) {
     final result = ClientMessage._();
     if (id != null) result.id = id;
@@ -824,6 +846,10 @@ class ClientMessage extends $pb.GeneratedMessage {
     if (providersShown != null) result.providersShown = providersShown;
     if (showRecoveryCodes != null) result.showRecoveryCodes = showRecoveryCodes;
     if (keepRecoveryCodes != null) result.keepRecoveryCodes = keepRecoveryCodes;
+    if (unpairAccountKey != null) result.unpairAccountKey = unpairAccountKey;
+    if (accountAuthorize != null) result.accountAuthorize = accountAuthorize;
+    if (proveAllowedDevice != null)
+      result.proveAllowedDevice = proveAllowedDevice;
     if (readAlerts != null) result.readAlerts = readAlerts;
     if (checkProtectedPlaces != null)
       result.checkProtectedPlaces = checkProtectedPlaces;
@@ -850,6 +876,15 @@ class ClientMessage extends $pb.GeneratedMessage {
     if (previewArrange != null) result.previewArrange = previewArrange;
     if (paymentOpened != null) result.paymentOpened = paymentOpened;
     if (setAttribution != null) result.setAttribution = setAttribution;
+    if (deleteSealedCopy != null) result.deleteSealedCopy = deleteSealedCopy;
+    if (requestAddDevice != null) result.requestAddDevice = requestAddDevice;
+    if (getChecklist != null) result.getChecklist = getChecklist;
+    if (listTasks != null) result.listTasks = listTasks;
+    if (listDeviceActivity != null)
+      result.listDeviceActivity = listDeviceActivity;
+    if (watchAgentTab != null) result.watchAgentTab = watchAgentTab;
+    if (agentTabFrameAck != null) result.agentTabFrameAck = agentTabFrameAck;
+    if (agentTabInput != null) result.agentTabInput = agentTabInput;
     return result;
   }
 
@@ -1107,6 +1142,9 @@ class ClientMessage extends $pb.GeneratedMessage {
     251: ClientMessage_Body.providersShown,
     252: ClientMessage_Body.showRecoveryCodes,
     253: ClientMessage_Body.keepRecoveryCodes,
+    254: ClientMessage_Body.unpairAccountKey,
+    255: ClientMessage_Body.accountAuthorize,
+    256: ClientMessage_Body.proveAllowedDevice,
     257: ClientMessage_Body.readAlerts,
     258: ClientMessage_Body.checkProtectedPlaces,
     259: ClientMessage_Body.dismissProtectedPlace,
@@ -1124,6 +1162,14 @@ class ClientMessage extends $pb.GeneratedMessage {
     272: ClientMessage_Body.previewArrange,
     275: ClientMessage_Body.paymentOpened,
     276: ClientMessage_Body.setAttribution,
+    277: ClientMessage_Body.deleteSealedCopy,
+    278: ClientMessage_Body.requestAddDevice,
+    279: ClientMessage_Body.getChecklist,
+    280: ClientMessage_Body.listTasks,
+    281: ClientMessage_Body.listDeviceActivity,
+    282: ClientMessage_Body.watchAgentTab,
+    283: ClientMessage_Body.agentTabFrameAck,
+    284: ClientMessage_Body.agentTabInput,
     0: ClientMessage_Body.notSet
   };
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
@@ -1374,6 +1420,9 @@ class ClientMessage extends $pb.GeneratedMessage {
       251,
       252,
       253,
+      254,
+      255,
+      256,
       257,
       258,
       259,
@@ -1390,7 +1439,15 @@ class ClientMessage extends $pb.GeneratedMessage {
       271,
       272,
       275,
-      276
+      276,
+      277,
+      278,
+      279,
+      280,
+      281,
+      282,
+      283,
+      284
     ])
     ..a<$fixnum.Int64>(1, _omitFieldNames ? '' : 'id', $pb.PbFieldType.OU6,
         defaultOrMaker: $fixnum.Int64.ZERO)
@@ -1898,6 +1955,12 @@ class ClientMessage extends $pb.GeneratedMessage {
         subBuilder: ShowRecoveryCodes.$_createMessage)
     ..aOM<KeepRecoveryCodes>(253, _omitFieldNames ? '' : 'keepRecoveryCodes',
         subBuilder: KeepRecoveryCodes.$_createMessage)
+    ..aOM<UnpairAccountKey>(254, _omitFieldNames ? '' : 'unpairAccountKey',
+        subBuilder: UnpairAccountKey.$_createMessage)
+    ..aOM<AccountAuthorize>(255, _omitFieldNames ? '' : 'accountAuthorize',
+        subBuilder: AccountAuthorize.$_createMessage)
+    ..aOM<ProveAllowedDevice>(256, _omitFieldNames ? '' : 'proveAllowedDevice',
+        subBuilder: ProveAllowedDevice.$_createMessage)
     ..aOM<ReadAlerts>(257, _omitFieldNames ? '' : 'readAlerts',
         subBuilder: ReadAlerts.$_createMessage)
     ..aOM<CheckProtectedPlaces>(
@@ -1938,6 +2001,22 @@ class ClientMessage extends $pb.GeneratedMessage {
         subBuilder: PaymentOpened.$_createMessage)
     ..aOM<SetAttribution>(276, _omitFieldNames ? '' : 'setAttribution',
         subBuilder: SetAttribution.$_createMessage)
+    ..aOM<DeleteSealedCopy>(277, _omitFieldNames ? '' : 'deleteSealedCopy',
+        subBuilder: DeleteSealedCopy.$_createMessage)
+    ..aOM<RequestAddDevice>(278, _omitFieldNames ? '' : 'requestAddDevice',
+        subBuilder: RequestAddDevice.$_createMessage)
+    ..aOM<GetChecklist>(279, _omitFieldNames ? '' : 'getChecklist',
+        subBuilder: GetChecklist.$_createMessage)
+    ..aOM<ListTasks>(280, _omitFieldNames ? '' : 'listTasks',
+        subBuilder: ListTasks.$_createMessage)
+    ..aOM<ListDeviceActivity>(281, _omitFieldNames ? '' : 'listDeviceActivity',
+        subBuilder: ListDeviceActivity.$_createMessage)
+    ..aOM<WatchAgentTab>(282, _omitFieldNames ? '' : 'watchAgentTab',
+        subBuilder: WatchAgentTab.$_createMessage)
+    ..aOM<AgentTabFrameAck>(283, _omitFieldNames ? '' : 'agentTabFrameAck',
+        subBuilder: AgentTabFrameAck.$_createMessage)
+    ..aOM<AgentTabInput>(284, _omitFieldNames ? '' : 'agentTabInput',
+        subBuilder: AgentTabInput.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -2205,6 +2284,9 @@ class ClientMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(251)
   @$pb.TagNumber(252)
   @$pb.TagNumber(253)
+  @$pb.TagNumber(254)
+  @$pb.TagNumber(255)
+  @$pb.TagNumber(256)
   @$pb.TagNumber(257)
   @$pb.TagNumber(258)
   @$pb.TagNumber(259)
@@ -2222,6 +2304,14 @@ class ClientMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(272)
   @$pb.TagNumber(275)
   @$pb.TagNumber(276)
+  @$pb.TagNumber(277)
+  @$pb.TagNumber(278)
+  @$pb.TagNumber(279)
+  @$pb.TagNumber(280)
+  @$pb.TagNumber(281)
+  @$pb.TagNumber(282)
+  @$pb.TagNumber(283)
+  @$pb.TagNumber(284)
   ClientMessage_Body whichBody() => _ClientMessage_BodyByTag[$_whichOneof(0)]!;
   @$pb.TagNumber(2)
   @$pb.TagNumber(3)
@@ -2466,6 +2556,9 @@ class ClientMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(251)
   @$pb.TagNumber(252)
   @$pb.TagNumber(253)
+  @$pb.TagNumber(254)
+  @$pb.TagNumber(255)
+  @$pb.TagNumber(256)
   @$pb.TagNumber(257)
   @$pb.TagNumber(258)
   @$pb.TagNumber(259)
@@ -2483,6 +2576,14 @@ class ClientMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(272)
   @$pb.TagNumber(275)
   @$pb.TagNumber(276)
+  @$pb.TagNumber(277)
+  @$pb.TagNumber(278)
+  @$pb.TagNumber(279)
+  @$pb.TagNumber(280)
+  @$pb.TagNumber(281)
+  @$pb.TagNumber(282)
+  @$pb.TagNumber(283)
+  @$pb.TagNumber(284)
   void clearBody() => $_clearField($_whichOneof(0));
 
   @$pb.TagNumber(1)
@@ -5352,232 +5453,375 @@ class ClientMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(253)
   KeepRecoveryCodes ensureKeepRecoveryCodes() => $_ensure(243);
 
+  /// Unpairs the person's device signed in with this account key, after
+  /// Lock out on another device (E11-8 point 6).
+  @$pb.TagNumber(254)
+  UnpairAccountKey get unpairAccountKey => $_getN(244);
+  @$pb.TagNumber(254)
+  set unpairAccountKey(UnpairAccountKey value) => $_setField(254, value);
+  @$pb.TagNumber(254)
+  $core.bool hasUnpairAccountKey() => $_has(244);
+  @$pb.TagNumber(254)
+  void clearUnpairAccountKey() => $_clearField(254);
+  @$pb.TagNumber(254)
+  UnpairAccountKey ensureUnpairAccountKey() => $_ensure(244);
+
+  /// Signs this Claktory in to the account with no code: a device of the
+  /// person's approves it (#546, the no-code setup).
+  @$pb.TagNumber(255)
+  AccountAuthorize get accountAuthorize => $_getN(245);
+  @$pb.TagNumber(255)
+  set accountAuthorize(AccountAuthorize value) => $_setField(255, value);
+  @$pb.TagNumber(255)
+  $core.bool hasAccountAuthorize() => $_has(245);
+  @$pb.TagNumber(255)
+  void clearAccountAuthorize() => $_clearField(255);
+  @$pb.TagNumber(255)
+  AccountAuthorize ensureAccountAuthorize() => $_ensure(245);
+
+  /// This Claktory's word that the asking device is allowed on it, for
+  /// approving another computer's request to join the account (#546).
+  @$pb.TagNumber(256)
+  ProveAllowedDevice get proveAllowedDevice => $_getN(246);
+  @$pb.TagNumber(256)
+  set proveAllowedDevice(ProveAllowedDevice value) => $_setField(256, value);
+  @$pb.TagNumber(256)
+  $core.bool hasProveAllowedDevice() => $_has(246);
+  @$pb.TagNumber(256)
+  void clearProveAllowedDevice() => $_clearField(256);
+  @$pb.TagNumber(256)
+  ProveAllowedDevice ensureProveAllowedDevice() => $_ensure(246);
+
   /// The person read alerts kept in Needs you (Workspace.alerts): the
   /// person's devices only, never an agent's.
   @$pb.TagNumber(257)
-  ReadAlerts get readAlerts => $_getN(244);
+  ReadAlerts get readAlerts => $_getN(247);
   @$pb.TagNumber(257)
   set readAlerts(ReadAlerts value) => $_setField(257, value);
   @$pb.TagNumber(257)
-  $core.bool hasReadAlerts() => $_has(244);
+  $core.bool hasReadAlerts() => $_has(247);
   @$pb.TagNumber(257)
   void clearReadAlerts() => $_clearField(257);
   @$pb.TagNumber(257)
-  ReadAlerts ensureReadAlerts() => $_ensure(244);
+  ReadAlerts ensureReadAlerts() => $_ensure(247);
 
   /// The person's device asks factoryd to read macOS's protected places
   /// now (Workspace.protected_places); the person's only.
   @$pb.TagNumber(258)
-  CheckProtectedPlaces get checkProtectedPlaces => $_getN(245);
+  CheckProtectedPlaces get checkProtectedPlaces => $_getN(248);
   @$pb.TagNumber(258)
   set checkProtectedPlaces(CheckProtectedPlaces value) =>
       $_setField(258, value);
   @$pb.TagNumber(258)
-  $core.bool hasCheckProtectedPlaces() => $_has(245);
+  $core.bool hasCheckProtectedPlaces() => $_has(248);
   @$pb.TagNumber(258)
   void clearCheckProtectedPlaces() => $_clearField(258);
   @$pb.TagNumber(258)
-  CheckProtectedPlaces ensureCheckProtectedPlaces() => $_ensure(245);
+  CheckProtectedPlaces ensureCheckProtectedPlaces() => $_ensure(248);
 
   /// The person's OK on a protected place's Needs you item; the person's
   /// only.
   @$pb.TagNumber(259)
-  DismissProtectedPlace get dismissProtectedPlace => $_getN(246);
+  DismissProtectedPlace get dismissProtectedPlace => $_getN(249);
   @$pb.TagNumber(259)
   set dismissProtectedPlace(DismissProtectedPlace value) =>
       $_setField(259, value);
   @$pb.TagNumber(259)
-  $core.bool hasDismissProtectedPlace() => $_has(246);
+  $core.bool hasDismissProtectedPlace() => $_has(249);
   @$pb.TagNumber(259)
   void clearDismissProtectedPlace() => $_clearField(259);
   @$pb.TagNumber(259)
-  DismissProtectedPlace ensureDismissProtectedPlace() => $_ensure(246);
+  DismissProtectedPlace ensureDismissProtectedPlace() => $_ensure(249);
 
   /// Changes how long a website this side shares lasts (#46): the
   /// person's devices only, never an agent's.
   @$pb.TagNumber(260)
-  SetPipeShareExpiry get setPipeShareExpiry => $_getN(247);
+  SetPipeShareExpiry get setPipeShareExpiry => $_getN(250);
   @$pb.TagNumber(260)
   set setPipeShareExpiry(SetPipeShareExpiry value) => $_setField(260, value);
   @$pb.TagNumber(260)
-  $core.bool hasSetPipeShareExpiry() => $_has(247);
+  $core.bool hasSetPipeShareExpiry() => $_has(250);
   @$pb.TagNumber(260)
   void clearSetPipeShareExpiry() => $_clearField(260);
   @$pb.TagNumber(260)
-  SetPipeShareExpiry ensureSetPipeShareExpiry() => $_ensure(247);
+  SetPipeShareExpiry ensureSetPipeShareExpiry() => $_ensure(250);
 
   /// Pins an agent under Rivet in the sidebar, or moves its pin; unpins
   /// one (Settings.pinned_agents; Lucy's ux/pinned-agents.md). The
   /// person's own: refused to agents. Answered with Ack.
   @$pb.TagNumber(262)
-  PinAgent get pinAgent => $_getN(248);
+  PinAgent get pinAgent => $_getN(251);
   @$pb.TagNumber(262)
   set pinAgent(PinAgent value) => $_setField(262, value);
   @$pb.TagNumber(262)
-  $core.bool hasPinAgent() => $_has(248);
+  $core.bool hasPinAgent() => $_has(251);
   @$pb.TagNumber(262)
   void clearPinAgent() => $_clearField(262);
   @$pb.TagNumber(262)
-  PinAgent ensurePinAgent() => $_ensure(248);
+  PinAgent ensurePinAgent() => $_ensure(251);
 
   @$pb.TagNumber(263)
-  UnpinAgent get unpinAgent => $_getN(249);
+  UnpinAgent get unpinAgent => $_getN(252);
   @$pb.TagNumber(263)
   set unpinAgent(UnpinAgent value) => $_setField(263, value);
   @$pb.TagNumber(263)
-  $core.bool hasUnpinAgent() => $_has(249);
+  $core.bool hasUnpinAgent() => $_has(252);
   @$pb.TagNumber(263)
   void clearUnpinAgent() => $_clearField(263);
   @$pb.TagNumber(263)
-  UnpinAgent ensureUnpinAgent() => $_ensure(249);
+  UnpinAgent ensureUnpinAgent() => $_ensure(252);
 
   /// Drops a pending sign-in (Switch account…'s code not given yet): the
   /// person's devices only, never an agent's.
   @$pb.TagNumber(264)
-  AccountSignInCancel get accountSignInCancel => $_getN(250);
+  AccountSignInCancel get accountSignInCancel => $_getN(253);
   @$pb.TagNumber(264)
   set accountSignInCancel(AccountSignInCancel value) => $_setField(264, value);
   @$pb.TagNumber(264)
-  $core.bool hasAccountSignInCancel() => $_has(250);
+  $core.bool hasAccountSignInCancel() => $_has(253);
   @$pb.TagNumber(264)
   void clearAccountSignInCancel() => $_clearField(264);
   @$pb.TagNumber(264)
-  AccountSignInCancel ensureAccountSignInCancel() => $_ensure(250);
+  AccountSignInCancel ensureAccountSignInCancel() => $_ensure(253);
 
   /// The account's recovery key (#239): a new one the person's device made
   /// and signed (NewRecoveryKey, then this), and using one claktory.com
   /// changed in a way this Claktory couldn't verify. The person's devices
   /// only, never an agent's.
   @$pb.TagNumber(265)
-  PublishRecoveryKey get publishRecoveryKey => $_getN(251);
+  PublishRecoveryKey get publishRecoveryKey => $_getN(254);
   @$pb.TagNumber(265)
   set publishRecoveryKey(PublishRecoveryKey value) => $_setField(265, value);
   @$pb.TagNumber(265)
-  $core.bool hasPublishRecoveryKey() => $_has(251);
+  $core.bool hasPublishRecoveryKey() => $_has(254);
   @$pb.TagNumber(265)
   void clearPublishRecoveryKey() => $_clearField(265);
   @$pb.TagNumber(265)
-  PublishRecoveryKey ensurePublishRecoveryKey() => $_ensure(251);
+  PublishRecoveryKey ensurePublishRecoveryKey() => $_ensure(254);
 
   @$pb.TagNumber(266)
-  UseRecoveryKey get useRecoveryKey => $_getN(252);
+  UseRecoveryKey get useRecoveryKey => $_getN(255);
   @$pb.TagNumber(266)
   set useRecoveryKey(UseRecoveryKey value) => $_setField(266, value);
   @$pb.TagNumber(266)
-  $core.bool hasUseRecoveryKey() => $_has(252);
+  $core.bool hasUseRecoveryKey() => $_has(255);
   @$pb.TagNumber(266)
   void clearUseRecoveryKey() => $_clearField(266);
   @$pb.TagNumber(266)
-  UseRecoveryKey ensureUseRecoveryKey() => $_ensure(252);
+  UseRecoveryKey ensureUseRecoveryKey() => $_ensure(255);
 
   /// The person dismisses the "Get notified…" offer on the device that
   /// sends it (PairedDevice.notifications_offer_dismissed, or
   /// RemoteAccess.local_notifications_offer_dismissed for this computer's
   /// own app). Answered with Ack.
   @$pb.TagNumber(267)
-  DismissNotificationsOffer get dismissNotificationsOffer => $_getN(253);
+  DismissNotificationsOffer get dismissNotificationsOffer => $_getN(256);
   @$pb.TagNumber(267)
   set dismissNotificationsOffer(DismissNotificationsOffer value) =>
       $_setField(267, value);
   @$pb.TagNumber(267)
-  $core.bool hasDismissNotificationsOffer() => $_has(253);
+  $core.bool hasDismissNotificationsOffer() => $_has(256);
   @$pb.TagNumber(267)
   void clearDismissNotificationsOffer() => $_clearField(267);
   @$pb.TagNumber(267)
-  DismissNotificationsOffer ensureDismissNotificationsOffer() => $_ensure(253);
+  DismissNotificationsOffer ensureDismissNotificationsOffer() => $_ensure(256);
 
   /// A device waiting to be allowed (its Hello answered with
   /// PairingPending) takes back its own request, when the person taps
   /// Cancel on it (#603). Sent on that waiting connection only.
   @$pb.TagNumber(268)
-  WithdrawPairing get withdrawPairing => $_getN(254);
+  WithdrawPairing get withdrawPairing => $_getN(257);
   @$pb.TagNumber(268)
   set withdrawPairing(WithdrawPairing value) => $_setField(268, value);
   @$pb.TagNumber(268)
-  $core.bool hasWithdrawPairing() => $_has(254);
+  $core.bool hasWithdrawPairing() => $_has(257);
   @$pb.TagNumber(268)
   void clearWithdrawPairing() => $_clearField(268);
   @$pb.TagNumber(268)
-  WithdrawPairing ensureWithdrawPairing() => $_ensure(254);
+  WithdrawPairing ensureWithdrawPairing() => $_ensure(257);
 
   /// Folds a project in the sidebar, or unfolds it (Project.collapsed).
   /// Answered with Ack.
   @$pb.TagNumber(269)
-  SetProjectCollapsed get setProjectCollapsed => $_getN(255);
+  SetProjectCollapsed get setProjectCollapsed => $_getN(258);
   @$pb.TagNumber(269)
   set setProjectCollapsed(SetProjectCollapsed value) => $_setField(269, value);
   @$pb.TagNumber(269)
-  $core.bool hasSetProjectCollapsed() => $_has(255);
+  $core.bool hasSetProjectCollapsed() => $_has(258);
   @$pb.TagNumber(269)
   void clearSetProjectCollapsed() => $_clearField(269);
   @$pb.TagNumber(269)
-  SetProjectCollapsed ensureSetProjectCollapsed() => $_ensure(255);
+  SetProjectCollapsed ensureSetProjectCollapsed() => $_ensure(258);
 
   /// Puts back what an undoable ArrangeAgent did (Arranged.token): the
   /// sidebar's Undo. Answered with Ack.
   @$pb.TagNumber(270)
-  RestoreArrangement get restoreArrangement => $_getN(256);
+  RestoreArrangement get restoreArrangement => $_getN(259);
   @$pb.TagNumber(270)
   set restoreArrangement(RestoreArrangement value) => $_setField(270, value);
   @$pb.TagNumber(270)
-  $core.bool hasRestoreArrangement() => $_has(256);
+  $core.bool hasRestoreArrangement() => $_has(259);
   @$pb.TagNumber(270)
   void clearRestoreArrangement() => $_clearField(270);
   @$pb.TagNumber(270)
-  RestoreArrangement ensureRestoreArrangement() => $_ensure(256);
+  RestoreArrangement ensureRestoreArrangement() => $_ensure(259);
 
   /// Where a new project with this name would be kept, as CreateProject
   /// with no path would make it (New project's caption). Answered with
   /// ProjectFolderPreview, to the asker only.
   @$pb.TagNumber(271)
-  PreviewProjectFolder get previewProjectFolder => $_getN(257);
+  PreviewProjectFolder get previewProjectFolder => $_getN(260);
   @$pb.TagNumber(271)
   set previewProjectFolder(PreviewProjectFolder value) =>
       $_setField(271, value);
   @$pb.TagNumber(271)
-  $core.bool hasPreviewProjectFolder() => $_has(257);
+  $core.bool hasPreviewProjectFolder() => $_has(260);
   @$pb.TagNumber(271)
   void clearPreviewProjectFolder() => $_clearField(271);
   @$pb.TagNumber(271)
-  PreviewProjectFolder ensurePreviewProjectFolder() => $_ensure(257);
+  PreviewProjectFolder ensurePreviewProjectFolder() => $_ensure(260);
 
   /// What moving an agent to another project would do to its pipes, for
   /// the move's confirm. Answered with ArrangePreview, to the asker only.
   @$pb.TagNumber(272)
-  PreviewArrange get previewArrange => $_getN(258);
+  PreviewArrange get previewArrange => $_getN(261);
   @$pb.TagNumber(272)
   set previewArrange(PreviewArrange value) => $_setField(272, value);
   @$pb.TagNumber(272)
-  $core.bool hasPreviewArrange() => $_has(258);
+  $core.bool hasPreviewArrange() => $_has(261);
   @$pb.TagNumber(272)
   void clearPreviewArrange() => $_clearField(272);
   @$pb.TagNumber(272)
-  PreviewArrange ensurePreviewArrange() => $_ensure(258);
+  PreviewArrange ensurePreviewArrange() => $_ensure(261);
 
   /// The person tapped Open on a payment card. Answered with Ack.
   @$pb.TagNumber(275)
-  PaymentOpened get paymentOpened => $_getN(259);
+  PaymentOpened get paymentOpened => $_getN(262);
   @$pb.TagNumber(275)
   set paymentOpened(PaymentOpened value) => $_setField(275, value);
   @$pb.TagNumber(275)
-  $core.bool hasPaymentOpened() => $_has(259);
+  $core.bool hasPaymentOpened() => $_has(262);
   @$pb.TagNumber(275)
   void clearPaymentOpened() => $_clearField(275);
   @$pb.TagNumber(275)
-  PaymentOpened ensurePaymentOpened() => $_ensure(259);
+  PaymentOpened ensurePaymentOpened() => $_ensure(262);
 
   /// Turns crediting Claktory (Workspace.attribution) on or off. Answered
   /// with Ack.
   @$pb.TagNumber(276)
-  SetAttribution get setAttribution => $_getN(260);
+  SetAttribution get setAttribution => $_getN(263);
   @$pb.TagNumber(276)
   set setAttribution(SetAttribution value) => $_setField(276, value);
   @$pb.TagNumber(276)
-  $core.bool hasSetAttribution() => $_has(260);
+  $core.bool hasSetAttribution() => $_has(263);
   @$pb.TagNumber(276)
   void clearSetAttribution() => $_clearField(276);
   @$pb.TagNumber(276)
-  SetAttribution ensureSetAttribution() => $_ensure(260);
+  SetAttribution ensureSetAttribution() => $_ensure(263);
+
+  /// The person's Delete kept copy on a sealed version. Answered with Ack.
+  @$pb.TagNumber(277)
+  DeleteSealedCopy get deleteSealedCopy => $_getN(264);
+  @$pb.TagNumber(277)
+  set deleteSealedCopy(DeleteSealedCopy value) => $_setField(277, value);
+  @$pb.TagNumber(277)
+  $core.bool hasDeleteSealedCopy() => $_has(264);
+  @$pb.TagNumber(277)
+  void clearDeleteSealedCopy() => $_clearField(277);
+  @$pb.TagNumber(277)
+  DeleteSealedCopy ensureDeleteSealedCopy() => $_ensure(264);
+
+  /// `factoryd pair` on this computer: asks the person's devices to add a
+  /// device, with no code. The one device request a command line may make.
+  /// Answered with AddDeviceRequested.
+  @$pb.TagNumber(278)
+  RequestAddDevice get requestAddDevice => $_getN(265);
+  @$pb.TagNumber(278)
+  set requestAddDevice(RequestAddDevice value) => $_setField(278, value);
+  @$pb.TagNumber(278)
+  $core.bool hasRequestAddDevice() => $_has(265);
+  @$pb.TagNumber(278)
+  void clearRequestAddDevice() => $_clearField(278);
+  @$pb.TagNumber(278)
+  RequestAddDevice ensureRequestAddDevice() => $_ensure(265);
+
+  /// An agent's checklist, or its background tasks, as their panels show
+  /// them, without opening the panel. Answered with ExtensionView (reply_to
+  /// set), to the asker only; the open panel doesn't change. Its body is
+  /// unset when the agent doesn't have that extension on.
+  @$pb.TagNumber(279)
+  GetChecklist get getChecklist => $_getN(266);
+  @$pb.TagNumber(279)
+  set getChecklist(GetChecklist value) => $_setField(279, value);
+  @$pb.TagNumber(279)
+  $core.bool hasGetChecklist() => $_has(266);
+  @$pb.TagNumber(279)
+  void clearGetChecklist() => $_clearField(279);
+  @$pb.TagNumber(279)
+  GetChecklist ensureGetChecklist() => $_ensure(266);
+
+  @$pb.TagNumber(280)
+  ListTasks get listTasks => $_getN(267);
+  @$pb.TagNumber(280)
+  set listTasks(ListTasks value) => $_setField(280, value);
+  @$pb.TagNumber(280)
+  $core.bool hasListTasks() => $_has(267);
+  @$pb.TagNumber(280)
+  void clearListTasks() => $_clearField(280);
+  @$pb.TagNumber(280)
+  ListTasks ensureListTasks() => $_ensure(267);
+
+  /// Settings → Device activity: a page of what the person's devices did,
+  /// and, with `watch`, what they do next. Answered with DeviceActivity,
+  /// to the asker only. The person's devices only (never an agent's tool
+  /// or a pipe).
+  @$pb.TagNumber(281)
+  ListDeviceActivity get listDeviceActivity => $_getN(268);
+  @$pb.TagNumber(281)
+  set listDeviceActivity(ListDeviceActivity value) => $_setField(281, value);
+  @$pb.TagNumber(281)
+  $core.bool hasListDeviceActivity() => $_has(268);
+  @$pb.TagNumber(281)
+  void clearListDeviceActivity() => $_clearField(281);
+  @$pb.TagNumber(281)
+  ListDeviceActivity ensureListDeviceActivity() => $_ensure(268);
+
+  /// A live view of one agent's browser (watch only), or of the one tab a
+  /// check request holds (input allowed for that request alone). The
+  /// person's only, from their devices. Answered with Ack, or Error with a
+  /// sentence to show. See WatchAgentTab.
+  @$pb.TagNumber(282)
+  WatchAgentTab get watchAgentTab => $_getN(269);
+  @$pb.TagNumber(282)
+  set watchAgentTab(WatchAgentTab value) => $_setField(282, value);
+  @$pb.TagNumber(282)
+  $core.bool hasWatchAgentTab() => $_has(269);
+  @$pb.TagNumber(282)
+  void clearWatchAgentTab() => $_clearField(282);
+  @$pb.TagNumber(282)
+  WatchAgentTab ensureWatchAgentTab() => $_ensure(269);
+
+  @$pb.TagNumber(283)
+  AgentTabFrameAck get agentTabFrameAck => $_getN(270);
+  @$pb.TagNumber(283)
+  set agentTabFrameAck(AgentTabFrameAck value) => $_setField(283, value);
+  @$pb.TagNumber(283)
+  $core.bool hasAgentTabFrameAck() => $_has(270);
+  @$pb.TagNumber(283)
+  void clearAgentTabFrameAck() => $_clearField(283);
+  @$pb.TagNumber(283)
+  AgentTabFrameAck ensureAgentTabFrameAck() => $_ensure(270);
+
+  @$pb.TagNumber(284)
+  AgentTabInput get agentTabInput => $_getN(271);
+  @$pb.TagNumber(284)
+  set agentTabInput(AgentTabInput value) => $_setField(284, value);
+  @$pb.TagNumber(284)
+  $core.bool hasAgentTabInput() => $_has(271);
+  @$pb.TagNumber(284)
+  void clearAgentTabInput() => $_clearField(284);
+  @$pb.TagNumber(284)
+  AgentTabInput ensureAgentTabInput() => $_ensure(271);
 }
 
 /// Reads each place (ProtectedPlace.root; others are skipped) now, and keeps
@@ -5898,6 +6142,7 @@ class Alert extends $pb.GeneratedMessage {
     $core.bool? withheld,
     $fixnum.Int64? seq,
     $core.Iterable<$core.String>? alsoFrom,
+    $core.String? deviceId,
   }) {
     final result = Alert._();
     if (id != null) result.id = id;
@@ -5910,6 +6155,7 @@ class Alert extends $pb.GeneratedMessage {
     if (withheld != null) result.withheld = withheld;
     if (seq != null) result.seq = seq;
     if (alsoFrom != null) result.alsoFrom.addAll(alsoFrom);
+    if (deviceId != null) result.deviceId = deviceId;
     return result;
   }
 
@@ -5937,6 +6183,7 @@ class Alert extends $pb.GeneratedMessage {
     ..a<$fixnum.Int64>(9, _omitFieldNames ? '' : 'seq', $pb.PbFieldType.OU6,
         defaultOrMaker: $fixnum.Int64.ZERO)
     ..pPS(10, _omitFieldNames ? '' : 'alsoFrom')
+    ..aOS(11, _omitFieldNames ? '' : 'deviceId')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -6063,6 +6310,20 @@ class Alert extends $pb.GeneratedMessage {
   /// Empty for an alert nothing folded into, and for withheld ones.
   @$pb.TagNumber(10)
   $pb.PbList<$core.String> get alsoFrom => $_getList(9);
+
+  /// Claktory's own alert about a device, such as one just allowed ("Lisa's
+  /// iPhone can now use nixos."): that device's id (PairedDevice.id). That
+  /// device can't mark it read (ReadAlerts is refused there): only the
+  /// person's other devices can. Opening the alert opens Settings → Device
+  /// activity for that device, where Remove… is. Empty for every other alert.
+  @$pb.TagNumber(11)
+  $core.String get deviceId => $_getSZ(10);
+  @$pb.TagNumber(11)
+  set deviceId($core.String value) => $_setString(10, value);
+  @$pb.TagNumber(11)
+  $core.bool hasDeviceId() => $_has(10);
+  @$pb.TagNumber(11)
+  void clearDeviceId() => $_clearField(11);
 }
 
 /// A new group at the end of the project's (Workspace.pipe_groups).
@@ -7546,9 +7807,17 @@ enum ServerMessage_Body {
   timeZones,
   deviceVouched,
   recoveryCodes,
+  allowedDeviceWord,
+  recoveryKeyToSign,
   arranged,
   projectFolderPreview,
   arrangePreview,
+  fileSeals,
+  addDeviceRequested,
+  deviceActivity,
+  agentTabFrame,
+  agentTabViewEnded,
+  agentTabNote,
   notSet
 }
 
@@ -7642,9 +7911,17 @@ class ServerMessage extends $pb.GeneratedMessage {
     $core.bool? watched,
     DeviceVouched? deviceVouched,
     RecoveryCodes? recoveryCodes,
+    AllowedDeviceWord? allowedDeviceWord,
+    RecoveryKeyToSign? recoveryKeyToSign,
     Arranged? arranged,
     ProjectFolderPreview? projectFolderPreview,
     ArrangePreview? arrangePreview,
+    FileSeals? fileSeals,
+    AddDeviceRequested? addDeviceRequested,
+    DeviceActivity? deviceActivity,
+    AgentTabFrame? agentTabFrame,
+    AgentTabViewEnded? agentTabViewEnded,
+    AgentTabNote? agentTabNote,
   }) {
     final result = ServerMessage._();
     if (replyTo != null) result.replyTo = replyTo;
@@ -7741,10 +8018,19 @@ class ServerMessage extends $pb.GeneratedMessage {
     if (watched != null) result.watched = watched;
     if (deviceVouched != null) result.deviceVouched = deviceVouched;
     if (recoveryCodes != null) result.recoveryCodes = recoveryCodes;
+    if (allowedDeviceWord != null) result.allowedDeviceWord = allowedDeviceWord;
+    if (recoveryKeyToSign != null) result.recoveryKeyToSign = recoveryKeyToSign;
     if (arranged != null) result.arranged = arranged;
     if (projectFolderPreview != null)
       result.projectFolderPreview = projectFolderPreview;
     if (arrangePreview != null) result.arrangePreview = arrangePreview;
+    if (fileSeals != null) result.fileSeals = fileSeals;
+    if (addDeviceRequested != null)
+      result.addDeviceRequested = addDeviceRequested;
+    if (deviceActivity != null) result.deviceActivity = deviceActivity;
+    if (agentTabFrame != null) result.agentTabFrame = agentTabFrame;
+    if (agentTabViewEnded != null) result.agentTabViewEnded = agentTabViewEnded;
+    if (agentTabNote != null) result.agentTabNote = agentTabNote;
     return result;
   }
 
@@ -7842,9 +8128,17 @@ class ServerMessage extends $pb.GeneratedMessage {
     89: ServerMessage_Body.timeZones,
     91: ServerMessage_Body.deviceVouched,
     92: ServerMessage_Body.recoveryCodes,
+    93: ServerMessage_Body.allowedDeviceWord,
+    94: ServerMessage_Body.recoveryKeyToSign,
     95: ServerMessage_Body.arranged,
     96: ServerMessage_Body.projectFolderPreview,
     97: ServerMessage_Body.arrangePreview,
+    98: ServerMessage_Body.fileSeals,
+    99: ServerMessage_Body.addDeviceRequested,
+    100: ServerMessage_Body.deviceActivity,
+    101: ServerMessage_Body.agentTabFrame,
+    102: ServerMessage_Body.agentTabViewEnded,
+    103: ServerMessage_Body.agentTabNote,
     0: ServerMessage_Body.notSet
   };
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
@@ -7935,9 +8229,17 @@ class ServerMessage extends $pb.GeneratedMessage {
       89,
       91,
       92,
+      93,
+      94,
       95,
       96,
-      97
+      97,
+      98,
+      99,
+      100,
+      101,
+      102,
+      103
     ])
     ..a<$fixnum.Int64>(1, _omitFieldNames ? '' : 'replyTo', $pb.PbFieldType.OU6,
         defaultOrMaker: $fixnum.Int64.ZERO)
@@ -8112,6 +8414,10 @@ class ServerMessage extends $pb.GeneratedMessage {
         subBuilder: DeviceVouched.$_createMessage)
     ..aOM<RecoveryCodes>(92, _omitFieldNames ? '' : 'recoveryCodes',
         subBuilder: RecoveryCodes.$_createMessage)
+    ..aOM<AllowedDeviceWord>(93, _omitFieldNames ? '' : 'allowedDeviceWord',
+        subBuilder: AllowedDeviceWord.$_createMessage)
+    ..aOM<RecoveryKeyToSign>(94, _omitFieldNames ? '' : 'recoveryKeyToSign',
+        subBuilder: RecoveryKeyToSign.$_createMessage)
     ..aOM<Arranged>(95, _omitFieldNames ? '' : 'arranged',
         subBuilder: Arranged.$_createMessage)
     ..aOM<ProjectFolderPreview>(
@@ -8119,6 +8425,18 @@ class ServerMessage extends $pb.GeneratedMessage {
         subBuilder: ProjectFolderPreview.$_createMessage)
     ..aOM<ArrangePreview>(97, _omitFieldNames ? '' : 'arrangePreview',
         subBuilder: ArrangePreview.$_createMessage)
+    ..aOM<FileSeals>(98, _omitFieldNames ? '' : 'fileSeals',
+        subBuilder: FileSeals.$_createMessage)
+    ..aOM<AddDeviceRequested>(99, _omitFieldNames ? '' : 'addDeviceRequested',
+        subBuilder: AddDeviceRequested.$_createMessage)
+    ..aOM<DeviceActivity>(100, _omitFieldNames ? '' : 'deviceActivity',
+        subBuilder: DeviceActivity.$_createMessage)
+    ..aOM<AgentTabFrame>(101, _omitFieldNames ? '' : 'agentTabFrame',
+        subBuilder: AgentTabFrame.$_createMessage)
+    ..aOM<AgentTabViewEnded>(102, _omitFieldNames ? '' : 'agentTabViewEnded',
+        subBuilder: AgentTabViewEnded.$_createMessage)
+    ..aOM<AgentTabNote>(103, _omitFieldNames ? '' : 'agentTabNote',
+        subBuilder: AgentTabNote.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -8226,9 +8544,17 @@ class ServerMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(89)
   @$pb.TagNumber(91)
   @$pb.TagNumber(92)
+  @$pb.TagNumber(93)
+  @$pb.TagNumber(94)
   @$pb.TagNumber(95)
   @$pb.TagNumber(96)
   @$pb.TagNumber(97)
+  @$pb.TagNumber(98)
+  @$pb.TagNumber(99)
+  @$pb.TagNumber(100)
+  @$pb.TagNumber(101)
+  @$pb.TagNumber(102)
+  @$pb.TagNumber(103)
   ServerMessage_Body whichBody() => _ServerMessage_BodyByTag[$_whichOneof(0)]!;
   @$pb.TagNumber(2)
   @$pb.TagNumber(3)
@@ -8313,9 +8639,17 @@ class ServerMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(89)
   @$pb.TagNumber(91)
   @$pb.TagNumber(92)
+  @$pb.TagNumber(93)
+  @$pb.TagNumber(94)
   @$pb.TagNumber(95)
   @$pb.TagNumber(96)
   @$pb.TagNumber(97)
+  @$pb.TagNumber(98)
+  @$pb.TagNumber(99)
+  @$pb.TagNumber(100)
+  @$pb.TagNumber(101)
+  @$pb.TagNumber(102)
+  @$pb.TagNumber(103)
   void clearBody() => $_clearField($_whichOneof(0));
 
   @$pb.TagNumber(1)
@@ -9384,43 +9718,144 @@ class ServerMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(92)
   RecoveryCodes ensureRecoveryCodes() => $_ensure(87);
 
-  /// 94: RecoveryKeyToSign (#239), the answer to NewRecoveryKey with an
-  /// account, comes with v0.2.0; reserved for it.
+  /// The answer to ProveAllowedDevice, to the asker only.
+  @$pb.TagNumber(93)
+  AllowedDeviceWord get allowedDeviceWord => $_getN(88);
+  @$pb.TagNumber(93)
+  set allowedDeviceWord(AllowedDeviceWord value) => $_setField(93, value);
+  @$pb.TagNumber(93)
+  $core.bool hasAllowedDeviceWord() => $_has(88);
+  @$pb.TagNumber(93)
+  void clearAllowedDeviceWord() => $_clearField(93);
+  @$pb.TagNumber(93)
+  AllowedDeviceWord ensureAllowedDeviceWord() => $_ensure(88);
+
+  /// The answer to NewRecoveryKey with an account's key (#239), to the
+  /// asker only.
+  @$pb.TagNumber(94)
+  RecoveryKeyToSign get recoveryKeyToSign => $_getN(89);
+  @$pb.TagNumber(94)
+  set recoveryKeyToSign(RecoveryKeyToSign value) => $_setField(94, value);
+  @$pb.TagNumber(94)
+  $core.bool hasRecoveryKeyToSign() => $_has(89);
+  @$pb.TagNumber(94)
+  void clearRecoveryKeyToSign() => $_clearField(94);
+  @$pb.TagNumber(94)
+  RecoveryKeyToSign ensureRecoveryKeyToSign() => $_ensure(89);
+
   /// The answer to an undoable ArrangeAgent, to the asker only.
   @$pb.TagNumber(95)
-  Arranged get arranged => $_getN(88);
+  Arranged get arranged => $_getN(90);
   @$pb.TagNumber(95)
   set arranged(Arranged value) => $_setField(95, value);
   @$pb.TagNumber(95)
-  $core.bool hasArranged() => $_has(88);
+  $core.bool hasArranged() => $_has(90);
   @$pb.TagNumber(95)
   void clearArranged() => $_clearField(95);
   @$pb.TagNumber(95)
-  Arranged ensureArranged() => $_ensure(88);
+  Arranged ensureArranged() => $_ensure(90);
 
   /// The answer to PreviewProjectFolder, to the asker only.
   @$pb.TagNumber(96)
-  ProjectFolderPreview get projectFolderPreview => $_getN(89);
+  ProjectFolderPreview get projectFolderPreview => $_getN(91);
   @$pb.TagNumber(96)
   set projectFolderPreview(ProjectFolderPreview value) => $_setField(96, value);
   @$pb.TagNumber(96)
-  $core.bool hasProjectFolderPreview() => $_has(89);
+  $core.bool hasProjectFolderPreview() => $_has(91);
   @$pb.TagNumber(96)
   void clearProjectFolderPreview() => $_clearField(96);
   @$pb.TagNumber(96)
-  ProjectFolderPreview ensureProjectFolderPreview() => $_ensure(89);
+  ProjectFolderPreview ensureProjectFolderPreview() => $_ensure(91);
 
   /// The answer to PreviewArrange, to the asker only.
   @$pb.TagNumber(97)
-  ArrangePreview get arrangePreview => $_getN(90);
+  ArrangePreview get arrangePreview => $_getN(92);
   @$pb.TagNumber(97)
   set arrangePreview(ArrangePreview value) => $_setField(97, value);
   @$pb.TagNumber(97)
-  $core.bool hasArrangePreview() => $_has(90);
+  $core.bool hasArrangePreview() => $_has(92);
   @$pb.TagNumber(97)
   void clearArrangePreview() => $_clearField(97);
   @$pb.TagNumber(97)
-  ArrangePreview ensureArrangePreview() => $_ensure(90);
+  ArrangePreview ensureArrangePreview() => $_ensure(92);
+
+  /// A file was sealed (the Seal extension), to every client: its seals
+  /// now, and whether it matches the latest, as of the seal. Viewers
+  /// showing the file (by FileContent.seals.path) update; a later change
+  /// to the file comes as a read's FileContent.seals.
+  @$pb.TagNumber(98)
+  FileSeals get fileSeals => $_getN(93);
+  @$pb.TagNumber(98)
+  set fileSeals(FileSeals value) => $_setField(98, value);
+  @$pb.TagNumber(98)
+  $core.bool hasFileSeals() => $_has(93);
+  @$pb.TagNumber(98)
+  void clearFileSeals() => $_clearField(98);
+  @$pb.TagNumber(98)
+  FileSeals ensureFileSeals() => $_ensure(93);
+
+  /// The answer to RequestAddDevice, to the asker only.
+  @$pb.TagNumber(99)
+  AddDeviceRequested get addDeviceRequested => $_getN(94);
+  @$pb.TagNumber(99)
+  set addDeviceRequested(AddDeviceRequested value) => $_setField(99, value);
+  @$pb.TagNumber(99)
+  $core.bool hasAddDeviceRequested() => $_has(94);
+  @$pb.TagNumber(99)
+  void clearAddDeviceRequested() => $_clearField(99);
+  @$pb.TagNumber(99)
+  AddDeviceRequested ensureAddDeviceRequested() => $_ensure(94);
+
+  /// The answer to ListDeviceActivity, to the asker only; while it
+  /// watches, what's new or changed comes the same way, with `live`.
+  @$pb.TagNumber(100)
+  DeviceActivity get deviceActivity => $_getN(95);
+  @$pb.TagNumber(100)
+  set deviceActivity(DeviceActivity value) => $_setField(100, value);
+  @$pb.TagNumber(100)
+  $core.bool hasDeviceActivity() => $_has(95);
+  @$pb.TagNumber(100)
+  void clearDeviceActivity() => $_clearField(100);
+  @$pb.TagNumber(100)
+  DeviceActivity ensureDeviceActivity() => $_ensure(95);
+
+  /// To the connection watching (WatchAgentTab) alone, never in the
+  /// Workspace, to agents, tools or pipes: a frame of the view, and the
+  /// view ending on Claktory's side.
+  @$pb.TagNumber(101)
+  AgentTabFrame get agentTabFrame => $_getN(96);
+  @$pb.TagNumber(101)
+  set agentTabFrame(AgentTabFrame value) => $_setField(101, value);
+  @$pb.TagNumber(101)
+  $core.bool hasAgentTabFrame() => $_has(96);
+  @$pb.TagNumber(101)
+  void clearAgentTabFrame() => $_clearField(101);
+  @$pb.TagNumber(101)
+  AgentTabFrame ensureAgentTabFrame() => $_ensure(96);
+
+  @$pb.TagNumber(102)
+  AgentTabViewEnded get agentTabViewEnded => $_getN(97);
+  @$pb.TagNumber(102)
+  set agentTabViewEnded(AgentTabViewEnded value) => $_setField(102, value);
+  @$pb.TagNumber(102)
+  $core.bool hasAgentTabViewEnded() => $_has(97);
+  @$pb.TagNumber(102)
+  void clearAgentTabViewEnded() => $_clearField(102);
+  @$pb.TagNumber(102)
+  AgentTabViewEnded ensureAgentTabViewEnded() => $_ensure(97);
+
+  /// To the connection with a check's view open: why some of its input
+  /// went nowhere, at most one a second.
+  @$pb.TagNumber(103)
+  AgentTabNote get agentTabNote => $_getN(98);
+  @$pb.TagNumber(103)
+  set agentTabNote(AgentTabNote value) => $_setField(103, value);
+  @$pb.TagNumber(103)
+  $core.bool hasAgentTabNote() => $_has(98);
+  @$pb.TagNumber(103)
+  void clearAgentTabNote() => $_clearField(103);
+  @$pb.TagNumber(103)
+  AgentTabNote ensureAgentTabNote() => $_ensure(98);
 }
 
 class Hello extends $pb.GeneratedMessage {
@@ -9733,6 +10168,7 @@ class Welcome extends $pb.GeneratedMessage {
     $core.String? name,
     $core.String? color,
     $fixnum.Int64? confirmByMs,
+    $core.String? cannotApprove,
   }) {
     final result = Welcome._();
     if (protocolVersion != null) result.protocolVersion = protocolVersion;
@@ -9741,6 +10177,7 @@ class Welcome extends $pb.GeneratedMessage {
     if (name != null) result.name = name;
     if (color != null) result.color = color;
     if (confirmByMs != null) result.confirmByMs = confirmByMs;
+    if (cannotApprove != null) result.cannotApprove = cannotApprove;
     return result;
   }
 
@@ -9764,6 +10201,7 @@ class Welcome extends $pb.GeneratedMessage {
     ..aOS(4, _omitFieldNames ? '' : 'name')
     ..aOS(5, _omitFieldNames ? '' : 'color')
     ..aInt64(6, _omitFieldNames ? '' : 'confirmByMs')
+    ..aOS(7, _omitFieldNames ? '' : 'cannotApprove')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -9806,8 +10244,8 @@ class Welcome extends $pb.GeneratedMessage {
 
   /// Through the tunnel, the paired device this connection is (see
   /// RemoteAccess.devices), so the app can mark it "This device"; "local" for
-  /// this machine's own app (its code from <data folder>/remote/local-pairing);
-  /// empty on the loopback port.
+  /// this machine's own app (on its socket, <data folder>/app.sock, since
+  /// #546 A); "tool" for an agent's command on the loopback port.
   @$pb.TagNumber(3)
   $core.String get deviceId => $_getSZ(2);
   @$pb.TagNumber(3)
@@ -9847,6 +10285,156 @@ class Welcome extends $pb.GeneratedMessage {
   $core.bool hasConfirmByMs() => $_has(5);
   @$pb.TagNumber(6)
   void clearConfirmByMs() => $_clearField(6);
+
+  /// Why this connection can't approve a move or a Claktory joining the
+  /// account here (ProveAllowedDevice refuses it), in words to show in
+  /// place of Approve on those cards; empty when it can: it showed, when it
+  /// connected, the account key of a device signed in to this Claktory's
+  /// account. A device that signs in after it connected can approve once
+  /// it connects again, with its assertion in Hello.
+  @$pb.TagNumber(7)
+  $core.String get cannotApprove => $_getSZ(6);
+  @$pb.TagNumber(7)
+  set cannotApprove($core.String value) => $_setString(6, value);
+  @$pb.TagNumber(7)
+  $core.bool hasCannotApprove() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearCannotApprove() => $_clearField(7);
+}
+
+/// Asks the person to add a device (`factoryd pair`): the device waits for its
+/// code as Add a device makes it, and its card (a DevicePairing with
+/// from_command_line) shows in the admin agent's conversation, where the
+/// person's app gets the code with ShowPairingCode. Never answered with a
+/// code. A request for a name already waiting gets that one again. Refused
+/// when there's no admin agent, or when too many wait.
+class RequestAddDevice extends $pb.GeneratedMessage {
+  factory RequestAddDevice({
+    $core.String? name,
+  }) {
+    final result = RequestAddDevice._();
+    if (name != null) result.name = name;
+    return result;
+  }
+
+  RequestAddDevice._();
+
+  factory RequestAddDevice.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      RequestAddDevice()..mergeFromBuffer(data, registry);
+  factory RequestAddDevice.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      RequestAddDevice()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'RequestAddDevice',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: RequestAddDevice.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'name')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  RequestAddDevice clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  RequestAddDevice copyWith(void Function(RequestAddDevice) updates) =>
+      super.copyWith((message) => updates(message as RequestAddDevice))
+          as RequestAddDevice;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use RequestAddDevice() / RequestAddDevice.new instead')
+  static RequestAddDevice create() => RequestAddDevice._();
+  static $pb.GeneratedMessage $_createMessage() => RequestAddDevice._();
+  @$core.override
+  RequestAddDevice createEmptyInstance() => RequestAddDevice._();
+  @$core.pragma('dart2js:noInline')
+  static RequestAddDevice getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<RequestAddDevice>(
+          RequestAddDevice.$_createMessage);
+  static RequestAddDevice? _defaultInstance;
+
+  /// What to call the device, e.g. "Laptop"; empty: the device names itself.
+  @$pb.TagNumber(1)
+  $core.String get name => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set name($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasName() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearName() => $_clearField(1);
+}
+
+/// The device RequestAddDevice made waiting, with no code: its id in
+/// RemoteAccess.devices and when its code stops working, in ms since 1970.
+class AddDeviceRequested extends $pb.GeneratedMessage {
+  factory AddDeviceRequested({
+    $core.String? deviceId,
+    $fixnum.Int64? expiresMs,
+  }) {
+    final result = AddDeviceRequested._();
+    if (deviceId != null) result.deviceId = deviceId;
+    if (expiresMs != null) result.expiresMs = expiresMs;
+    return result;
+  }
+
+  AddDeviceRequested._();
+
+  factory AddDeviceRequested.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AddDeviceRequested()..mergeFromBuffer(data, registry);
+  factory AddDeviceRequested.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AddDeviceRequested()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'AddDeviceRequested',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: AddDeviceRequested.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'deviceId')
+    ..aInt64(2, _omitFieldNames ? '' : 'expiresMs')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AddDeviceRequested clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AddDeviceRequested copyWith(void Function(AddDeviceRequested) updates) =>
+      super.copyWith((message) => updates(message as AddDeviceRequested))
+          as AddDeviceRequested;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use AddDeviceRequested() / AddDeviceRequested.new instead')
+  static AddDeviceRequested create() => AddDeviceRequested._();
+  static $pb.GeneratedMessage $_createMessage() => AddDeviceRequested._();
+  @$core.override
+  AddDeviceRequested createEmptyInstance() => AddDeviceRequested._();
+  @$core.pragma('dart2js:noInline')
+  static AddDeviceRequested getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<AddDeviceRequested>(
+          AddDeviceRequested.$_createMessage);
+  static AddDeviceRequested? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get deviceId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set deviceId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasDeviceId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearDeviceId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $fixnum.Int64 get expiresMs => $_getI64(1);
+  @$pb.TagNumber(2)
+  set expiresMs($fixnum.Int64 value) => $_setInt64(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasExpiresMs() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearExpiresMs() => $_clearField(2);
 }
 
 /// Pairs a new device with this Factory. Answered with PairingCode. Refused
@@ -10236,6 +10824,278 @@ class DismissAllowNotice extends $pb.GeneratedMessage {
   $core.bool hasDeviceId() => $_has(0);
   @$pb.TagNumber(1)
   void clearDeviceId() => $_clearField(1);
+}
+
+/// After Lock out on one of the person's devices (another one lost, stolen
+/// or given away): every device here that connected with an assertion for
+/// that account key is unpaired at once (its connections close, and it's
+/// turned away from then on, as removed), and the key is remembered, so an
+/// assertion for it never lets a device in again. A Claktory the app can't
+/// reach learns of the removal at its next check-in instead, before it lets
+/// any device in. Only from the person: an agent's command is refused
+/// (ERROR_CODE_PERSON_ONLY). Answered with Ack, also when no device here had
+/// that key.
+class UnpairAccountKey extends $pb.GeneratedMessage {
+  factory UnpairAccountKey({
+    $core.String? accountKey,
+  }) {
+    final result = UnpairAccountKey._();
+    if (accountKey != null) result.accountKey = accountKey;
+    return result;
+  }
+
+  UnpairAccountKey._();
+
+  factory UnpairAccountKey.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      UnpairAccountKey()..mergeFromBuffer(data, registry);
+  factory UnpairAccountKey.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      UnpairAccountKey()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'UnpairAccountKey',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: UnpairAccountKey.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'accountKey')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  UnpairAccountKey clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  UnpairAccountKey copyWith(void Function(UnpairAccountKey) updates) =>
+      super.copyWith((message) => updates(message as UnpairAccountKey))
+          as UnpairAccountKey;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use UnpairAccountKey() / UnpairAccountKey.new instead')
+  static UnpairAccountKey create() => UnpairAccountKey._();
+  static $pb.GeneratedMessage $_createMessage() => UnpairAccountKey._();
+  @$core.override
+  UnpairAccountKey createEmptyInstance() => UnpairAccountKey._();
+  @$core.pragma('dart2js:noInline')
+  static UnpairAccountKey getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<UnpairAccountKey>(
+          UnpairAccountKey.$_createMessage);
+  static UnpairAccountKey? _defaultInstance;
+
+  /// The locked-out device's account key, as the account service and DMs
+  /// name it (base64url without padding: its DM leaf id).
+  @$pb.TagNumber(1)
+  $core.String get accountKey => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set accountKey($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasAccountKey() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearAccountKey() => $_clearField(1);
+}
+
+/// Signs this Claktory in to the account at `email` with no code (#546, the
+/// no-code setup): the account service asks the person's devices to approve
+/// this computer, and the Claktory waits for their answer
+/// (CLAKTORY_ACCOUNT_STATE_AWAITING_APPROVAL, approval_expires_ms) for up to
+/// 10 minutes, then is signed in, and the device that approved gets in at
+/// once. Answered with Ack once the request is made (or already waiting for
+/// the same email); ERROR_CODE_INVALID_REQUEST when the account has no device
+/// that may approve (sign in with the emailed code instead) or another
+/// computer asked at the same time. The one request agents' commands may make
+/// (`factoryd account authorize`), and only while this Claktory has never been
+/// signed in and has no device: otherwise ERROR_CODE_PERSON_ONLY.
+class AccountAuthorize extends $pb.GeneratedMessage {
+  factory AccountAuthorize({
+    $core.String? email,
+  }) {
+    final result = AccountAuthorize._();
+    if (email != null) result.email = email;
+    return result;
+  }
+
+  AccountAuthorize._();
+
+  factory AccountAuthorize.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AccountAuthorize()..mergeFromBuffer(data, registry);
+  factory AccountAuthorize.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AccountAuthorize()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'AccountAuthorize',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: AccountAuthorize.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'email')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AccountAuthorize clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AccountAuthorize copyWith(void Function(AccountAuthorize) updates) =>
+      super.copyWith((message) => updates(message as AccountAuthorize))
+          as AccountAuthorize;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use AccountAuthorize() / AccountAuthorize.new instead')
+  static AccountAuthorize create() => AccountAuthorize._();
+  static $pb.GeneratedMessage $_createMessage() => AccountAuthorize._();
+  @$core.override
+  AccountAuthorize createEmptyInstance() => AccountAuthorize._();
+  @$core.pragma('dart2js:noInline')
+  static AccountAuthorize getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<AccountAuthorize>(
+          AccountAuthorize.$_createMessage);
+  static AccountAuthorize? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get email => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set email($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasEmail() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearEmail() => $_clearField(1);
+}
+
+/// Asks for this Claktory's word that the asking device is allowed on it,
+/// for approving request `request_id` (another computer joining the
+/// account) at the account service. Only a device that's in (the person's),
+/// for the account key its connection proved; answered with
+/// AllowedDeviceWord. ERROR_CODE_SIGN_IN_REQUIRED when this Claktory isn't
+/// signed in or the connection proved no account key.
+class ProveAllowedDevice extends $pb.GeneratedMessage {
+  factory ProveAllowedDevice({
+    $core.String? requestId,
+  }) {
+    final result = ProveAllowedDevice._();
+    if (requestId != null) result.requestId = requestId;
+    return result;
+  }
+
+  ProveAllowedDevice._();
+
+  factory ProveAllowedDevice.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ProveAllowedDevice()..mergeFromBuffer(data, registry);
+  factory ProveAllowedDevice.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ProveAllowedDevice()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ProveAllowedDevice',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: ProveAllowedDevice.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'requestId')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ProveAllowedDevice clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ProveAllowedDevice copyWith(void Function(ProveAllowedDevice) updates) =>
+      super.copyWith((message) => updates(message as ProveAllowedDevice))
+          as ProveAllowedDevice;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ProveAllowedDevice() / ProveAllowedDevice.new instead')
+  static ProveAllowedDevice create() => ProveAllowedDevice._();
+  static $pb.GeneratedMessage $_createMessage() => ProveAllowedDevice._();
+  @$core.override
+  ProveAllowedDevice createEmptyInstance() => ProveAllowedDevice._();
+  @$core.pragma('dart2js:noInline')
+  static ProveAllowedDevice getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<ProveAllowedDevice>(
+          ProveAllowedDevice.$_createMessage);
+  static ProveAllowedDevice? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get requestId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set requestId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasRequestId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearRequestId() => $_clearField(1);
+}
+
+/// The answer to ProveAllowedDevice: `allowed` is the word to send with the
+/// approval (POST /v1/devices/authorizations/<id>'s "allowed"), signed by
+/// this Claktory for the device's account key and the request, working for
+/// 120 seconds. Never shown or kept.
+class AllowedDeviceWord extends $pb.GeneratedMessage {
+  factory AllowedDeviceWord({
+    $core.String? requestId,
+    $core.String? allowed,
+  }) {
+    final result = AllowedDeviceWord._();
+    if (requestId != null) result.requestId = requestId;
+    if (allowed != null) result.allowed = allowed;
+    return result;
+  }
+
+  AllowedDeviceWord._();
+
+  factory AllowedDeviceWord.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AllowedDeviceWord()..mergeFromBuffer(data, registry);
+  factory AllowedDeviceWord.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AllowedDeviceWord()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'AllowedDeviceWord',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: AllowedDeviceWord.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'requestId')
+    ..aOS(2, _omitFieldNames ? '' : 'allowed')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AllowedDeviceWord clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AllowedDeviceWord copyWith(void Function(AllowedDeviceWord) updates) =>
+      super.copyWith((message) => updates(message as AllowedDeviceWord))
+          as AllowedDeviceWord;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use AllowedDeviceWord() / AllowedDeviceWord.new instead')
+  static AllowedDeviceWord create() => AllowedDeviceWord._();
+  static $pb.GeneratedMessage $_createMessage() => AllowedDeviceWord._();
+  @$core.override
+  AllowedDeviceWord createEmptyInstance() => AllowedDeviceWord._();
+  @$core.pragma('dart2js:noInline')
+  static AllowedDeviceWord getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<AllowedDeviceWord>(
+          AllowedDeviceWord.$_createMessage);
+  static AllowedDeviceWord? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get requestId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set requestId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasRequestId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearRequestId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get allowed => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set allowed($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasAllowed() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearAllowed() => $_clearField(2);
 }
 
 /// Turns away a device that's waiting: its code stops working, the device is
@@ -13425,12 +14285,14 @@ class UpdateProject extends $pb.GeneratedMessage {
     $core.String? name,
     $core.bool? archived,
     $core.String? beforeId,
+    $core.String? brief,
   }) {
     final result = UpdateProject._();
     if (projectId != null) result.projectId = projectId;
     if (name != null) result.name = name;
     if (archived != null) result.archived = archived;
     if (beforeId != null) result.beforeId = beforeId;
+    if (brief != null) result.brief = brief;
     return result;
   }
 
@@ -13451,6 +14313,7 @@ class UpdateProject extends $pb.GeneratedMessage {
     ..aOS(2, _omitFieldNames ? '' : 'name')
     ..aOB(3, _omitFieldNames ? '' : 'archived')
     ..aOS(4, _omitFieldNames ? '' : 'beforeId')
+    ..aOS(5, _omitFieldNames ? '' : 'brief')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -13518,6 +14381,17 @@ class UpdateProject extends $pb.GeneratedMessage {
   $core.bool hasBeforeId() => $_has(3);
   @$pb.TagNumber(4)
   void clearBeforeId() => $_clearField(4);
+
+  /// Sets the project's brief (Project.brief), trimmed; "" removes it. Unset
+  /// leaves it as it is.
+  @$pb.TagNumber(5)
+  $core.String get brief => $_getSZ(4);
+  @$pb.TagNumber(5)
+  set brief($core.String value) => $_setString(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasBrief() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearBrief() => $_clearField(5);
 }
 
 /// Changes Factory-wide settings. Unset fields stay as they are. An empty
@@ -16379,6 +17253,8 @@ class ReadFile extends $pb.GeneratedMessage {
     $core.int? previewWidth,
     $core.int? previewHeight,
     $core.int? previewPage,
+    $core.String? sealedSha256,
+    $core.String? unlessSha256,
   }) {
     final result = ReadFile._();
     if (path != null) result.path = path;
@@ -16388,6 +17264,8 @@ class ReadFile extends $pb.GeneratedMessage {
     if (previewWidth != null) result.previewWidth = previewWidth;
     if (previewHeight != null) result.previewHeight = previewHeight;
     if (previewPage != null) result.previewPage = previewPage;
+    if (sealedSha256 != null) result.sealedSha256 = sealedSha256;
+    if (unlessSha256 != null) result.unlessSha256 = unlessSha256;
     return result;
   }
 
@@ -16417,6 +17295,8 @@ class ReadFile extends $pb.GeneratedMessage {
         fieldType: $pb.PbFieldType.OU3)
     ..aI(7, _omitFieldNames ? '' : 'previewPage',
         fieldType: $pb.PbFieldType.OU3)
+    ..aOS(8, _omitFieldNames ? '' : 'sealedSha256')
+    ..aOS(9, _omitFieldNames ? '' : 'unlessSha256')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -16523,6 +17403,38 @@ class ReadFile extends $pb.GeneratedMessage {
   $core.bool hasPreviewPage() => $_has(6);
   @$pb.TagNumber(7)
   void clearPreviewPage() => $_clearField(7);
+
+  /// Read the version of `path` kept when it was sealed with this SHA-256
+  /// (FileSeal.sha256, where FileSeal.kept), not the file as it is now:
+  /// answered as any read (sha256 that version's, mime sniffed with the
+  /// file's name, ranges from `offset`), without a preview, and
+  /// unless_sha256 doesn't apply to it. Only a sealed version of this path
+  /// is read; otherwise `error` is "This sealed version wasn't kept."
+  /// Empty: the file as it is.
+  @$pb.TagNumber(8)
+  $core.String get sealedSha256 => $_getSZ(7);
+  @$pb.TagNumber(8)
+  set sealedSha256($core.String value) => $_setString(7, value);
+  @$pb.TagNumber(8)
+  $core.bool hasSealedSha256() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearSealedSha256() => $_clearField(8);
+
+  /// The SHA-256 of the copy the app kept (an earlier FileContent.sha256),
+  /// to open it again without reading it again: when the file is still that
+  /// version, the answer has FileContent.unchanged, its path, mime, size,
+  /// modified_ms and sha256 (the original's, even when a preview was asked)
+  /// and no data. Changed, or empty: read as asked, from the version there
+  /// now. Either way the answer has the whole file's sha256, even when
+  /// truncated.
+  @$pb.TagNumber(9)
+  $core.String get unlessSha256 => $_getSZ(8);
+  @$pb.TagNumber(9)
+  set unlessSha256($core.String value) => $_setString(8, value);
+  @$pb.TagNumber(9)
+  $core.bool hasUnlessSha256() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearUnlessSha256() => $_clearField(9);
 }
 
 class FileContent extends $pb.GeneratedMessage {
@@ -16543,6 +17455,8 @@ class FileContent extends $pb.GeneratedMessage {
     $core.int? originalPixelWidth,
     $core.int? originalPixelHeight,
     $core.int? pageCount,
+    FileSeals? seals,
+    $core.bool? unchanged,
   }) {
     final result = FileContent._();
     if (path != null) result.path = path;
@@ -16563,6 +17477,8 @@ class FileContent extends $pb.GeneratedMessage {
     if (originalPixelHeight != null)
       result.originalPixelHeight = originalPixelHeight;
     if (pageCount != null) result.pageCount = pageCount;
+    if (seals != null) result.seals = seals;
+    if (unchanged != null) result.unchanged = unchanged;
     return result;
   }
 
@@ -16605,6 +17521,9 @@ class FileContent extends $pb.GeneratedMessage {
     ..aI(15, _omitFieldNames ? '' : 'originalPixelHeight',
         fieldType: $pb.PbFieldType.OU3)
     ..aI(16, _omitFieldNames ? '' : 'pageCount', fieldType: $pb.PbFieldType.OU3)
+    ..aOM<FileSeals>(17, _omitFieldNames ? '' : 'seals',
+        subBuilder: FileSeals.$_createMessage)
+    ..aOB(18, _omitFieldNames ? '' : 'unchanged')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -16706,7 +17625,8 @@ class FileContent extends $pb.GeneratedMessage {
   void clearError() => $_clearField(7);
 
   /// The whole file's SHA-256, in lowercase hex. Text and images read from
-  /// the start leave it empty when `truncated`; videos and reads from an
+  /// the start leave it empty when `truncated` (unless the read had
+  /// ReadFile.unless_sha256); videos and reads from an
   /// offset always have it, the same for every range of one version of the
   /// file. A thread made on this content says it in
   /// CreateThread.version_sha256.
@@ -16804,6 +17724,312 @@ class FileContent extends $pb.GeneratedMessage {
   $core.bool hasPageCount() => $_has(15);
   @$pb.TagNumber(16)
   void clearPageCount() => $_clearField(16);
+
+  /// On every read from offset 0 that found the file: its seals, and whether
+  /// it's still the version its latest seal names (Claktory hashes the whole
+  /// file for that, so a truncated read has it too). `seals` is empty when
+  /// it has none. FileSeals.path is the file's canonical path, the one
+  /// ServerMessage.file_seals names it by.
+  @$pb.TagNumber(17)
+  FileSeals get seals => $_getN(16);
+  @$pb.TagNumber(17)
+  set seals(FileSeals value) => $_setField(17, value);
+  @$pb.TagNumber(17)
+  $core.bool hasSeals() => $_has(16);
+  @$pb.TagNumber(17)
+  void clearSeals() => $_clearField(17);
+  @$pb.TagNumber(17)
+  FileSeals ensureSeals() => $_ensure(16);
+
+  /// The file is still the version ReadFile.unless_sha256 named: no data
+  /// came, and the copy the app kept is the one to show.
+  @$pb.TagNumber(18)
+  $core.bool get unchanged => $_getBF(17);
+  @$pb.TagNumber(18)
+  set unchanged($core.bool value) => $_setBool(17, value);
+  @$pb.TagNumber(18)
+  $core.bool hasUnchanged() => $_has(17);
+  @$pb.TagNumber(18)
+  void clearUnchanged() => $_clearField(18);
+}
+
+/// A seal on a file (the Seal extension): an agent recorded the file's
+/// SHA-256 at a moment, with a note, in Claktory's own records, which
+/// agents' tools can't change or remove.
+class FileSeal extends $pb.GeneratedMessage {
+  factory FileSeal({
+    $core.String? sha256,
+    $core.String? agentId,
+    $core.String? agentName,
+    $fixnum.Int64? sealedMs,
+    $core.String? note,
+    $core.bool? kept,
+  }) {
+    final result = FileSeal._();
+    if (sha256 != null) result.sha256 = sha256;
+    if (agentId != null) result.agentId = agentId;
+    if (agentName != null) result.agentName = agentName;
+    if (sealedMs != null) result.sealedMs = sealedMs;
+    if (note != null) result.note = note;
+    if (kept != null) result.kept = kept;
+    return result;
+  }
+
+  FileSeal._();
+
+  factory FileSeal.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      FileSeal()..mergeFromBuffer(data, registry);
+  factory FileSeal.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      FileSeal()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'FileSeal',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: FileSeal.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'sha256')
+    ..aOS(2, _omitFieldNames ? '' : 'agentId')
+    ..aOS(3, _omitFieldNames ? '' : 'agentName')
+    ..aInt64(4, _omitFieldNames ? '' : 'sealedMs')
+    ..aOS(5, _omitFieldNames ? '' : 'note')
+    ..aOB(6, _omitFieldNames ? '' : 'kept')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  FileSeal clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  FileSeal copyWith(void Function(FileSeal) updates) =>
+      super.copyWith((message) => updates(message as FileSeal)) as FileSeal;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use FileSeal() / FileSeal.new instead')
+  static FileSeal create() => FileSeal._();
+  static $pb.GeneratedMessage $_createMessage() => FileSeal._();
+  @$core.override
+  FileSeal createEmptyInstance() => FileSeal._();
+  @$core.pragma('dart2js:noInline')
+  static FileSeal getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<FileSeal>(FileSeal.$_createMessage);
+  static FileSeal? _defaultInstance;
+
+  /// The file's SHA-256 when sealed, in lowercase hex.
+  @$pb.TagNumber(1)
+  $core.String get sha256 => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set sha256($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasSha256() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearSha256() => $_clearField(1);
+
+  /// The agent that sealed it.
+  @$pb.TagNumber(2)
+  $core.String get agentId => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set agentId($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasAgentId() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearAgentId() => $_clearField(2);
+
+  /// Its name when it sealed it (for an agent since removed or renamed).
+  @$pb.TagNumber(3)
+  $core.String get agentName => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set agentName($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasAgentName() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearAgentName() => $_clearField(3);
+
+  @$pb.TagNumber(4)
+  $fixnum.Int64 get sealedMs => $_getI64(3);
+  @$pb.TagNumber(4)
+  set sealedMs($fixnum.Int64 value) => $_setInt64(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasSealedMs() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearSealedMs() => $_clearField(4);
+
+  /// The agent's note, as it wrote it.
+  @$pb.TagNumber(5)
+  $core.String get note => $_getSZ(4);
+  @$pb.TagNumber(5)
+  set note($core.String value) => $_setString(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasNote() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearNote() => $_clearField(5);
+
+  /// A copy of that version is kept (files up to 64 MB): ReadFile with
+  /// sealed_sha256 opens it. False for a bigger file, sealed by its hash
+  /// alone, and once the person deleted the copy (DeleteSealedCopy).
+  @$pb.TagNumber(6)
+  $core.bool get kept => $_getBF(5);
+  @$pb.TagNumber(6)
+  set kept($core.bool value) => $_setBool(5, value);
+  @$pb.TagNumber(6)
+  $core.bool hasKept() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearKept() => $_clearField(6);
+}
+
+/// Deletes the copy kept of a sealed version (FileSeal.kept), the person's
+/// alone: the seals stay as they were made, and that version no longer
+/// opens ("This sealed version wasn't kept."). The copy is per content, so
+/// every seal of that SHA-256, on any file, loses it; seals made later keep
+/// a copy again. Every client hears each such file's FileSeals
+/// (ServerMessage.file_seals). Refused when no seal of `path` keeps `sha256`.
+class DeleteSealedCopy extends $pb.GeneratedMessage {
+  factory DeleteSealedCopy({
+    $core.String? path,
+    $core.String? sha256,
+  }) {
+    final result = DeleteSealedCopy._();
+    if (path != null) result.path = path;
+    if (sha256 != null) result.sha256 = sha256;
+    return result;
+  }
+
+  DeleteSealedCopy._();
+
+  factory DeleteSealedCopy.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      DeleteSealedCopy()..mergeFromBuffer(data, registry);
+  factory DeleteSealedCopy.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      DeleteSealedCopy()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'DeleteSealedCopy',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: DeleteSealedCopy.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'path')
+    ..aOS(2, _omitFieldNames ? '' : 'sha256')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  DeleteSealedCopy clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  DeleteSealedCopy copyWith(void Function(DeleteSealedCopy) updates) =>
+      super.copyWith((message) => updates(message as DeleteSealedCopy))
+          as DeleteSealedCopy;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use DeleteSealedCopy() / DeleteSealedCopy.new instead')
+  static DeleteSealedCopy create() => DeleteSealedCopy._();
+  static $pb.GeneratedMessage $_createMessage() => DeleteSealedCopy._();
+  @$core.override
+  DeleteSealedCopy createEmptyInstance() => DeleteSealedCopy._();
+  @$core.pragma('dart2js:noInline')
+  static DeleteSealedCopy getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<DeleteSealedCopy>(
+          DeleteSealedCopy.$_createMessage);
+  static DeleteSealedCopy? _defaultInstance;
+
+  /// The file, as FileSeals.path or as read.
+  @$pb.TagNumber(1)
+  $core.String get path => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set path($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasPath() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearPath() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get sha256 => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set sha256($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasSha256() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearSha256() => $_clearField(2);
+}
+
+/// A file's seals.
+class FileSeals extends $pb.GeneratedMessage {
+  factory FileSeals({
+    $core.String? path,
+    $core.Iterable<FileSeal>? seals,
+    FileSealState? state,
+  }) {
+    final result = FileSeals._();
+    if (path != null) result.path = path;
+    if (seals != null) result.seals.addAll(seals);
+    if (state != null) result.state = state;
+    return result;
+  }
+
+  FileSeals._();
+
+  factory FileSeals.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      FileSeals()..mergeFromBuffer(data, registry);
+  factory FileSeals.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      FileSeals()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'FileSeals',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: FileSeals.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'path')
+    ..pPM<FileSeal>(2, _omitFieldNames ? '' : 'seals',
+        subBuilder: FileSeal.$_createMessage)
+    ..aE<FileSealState>(3, _omitFieldNames ? '' : 'state',
+        enumValues: FileSealState.values)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  FileSeals clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  FileSeals copyWith(void Function(FileSeals) updates) =>
+      super.copyWith((message) => updates(message as FileSeals)) as FileSeals;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use FileSeals() / FileSeals.new instead')
+  static FileSeals create() => FileSeals._();
+  static $pb.GeneratedMessage $_createMessage() => FileSeals._();
+  @$core.override
+  FileSeals createEmptyInstance() => FileSeals._();
+  @$core.pragma('dart2js:noInline')
+  static FileSeals getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<FileSeals>(FileSeals.$_createMessage);
+  static FileSeals? _defaultInstance;
+
+  /// Absolute, "~" expanded and links resolved.
+  @$pb.TagNumber(1)
+  $core.String get path => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set path($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasPath() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearPath() => $_clearField(1);
+
+  /// Newest first.
+  @$pb.TagNumber(2)
+  $pb.PbList<FileSeal> get seals => $_getList(1);
+
+  @$pb.TagNumber(3)
+  FileSealState get state => $_getN(2);
+  @$pb.TagNumber(3)
+  set state(FileSealState value) => $_setField(3, value);
+  @$pb.TagNumber(3)
+  $core.bool hasState() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearState() => $_clearField(3);
 }
 
 /// Sets an agent's layout (`Agent.layout`) for every device, answered with
@@ -21003,8 +22229,8 @@ class MovedAway extends $pb.GeneratedMessage {
 /// Deletes the copy a Claktory that moved away left on this computer, for
 /// good: everything of it but the workspace and project folders inside its
 /// home (docs/MOVE.md). Only a Claktory in moved mode takes it, and only from
-/// this computer's own app: on the loopback port, after a Hello with the
-/// local pairing code's token. Answered with Ack, or Error saying why.
+/// this computer's own app, on its socket (<data folder>/app.sock). Answered
+/// with Ack, or Error saying why.
 class DeleteMovedCopy extends $pb.GeneratedMessage {
   factory DeleteMovedCopy({
     $core.String? typedWord,
@@ -21127,6 +22353,7 @@ class Workspace extends $pb.GeneratedMessage {
     $core.Iterable<ProtectedRoot>? protectedRoots,
     $core.Iterable<AgentBrowser>? agentBrowsers,
     $core.bool? attribution,
+    $core.bool? deviceActivity,
   }) {
     final result = Workspace._();
     if (projects != null) result.projects.addAll(projects);
@@ -21185,6 +22412,7 @@ class Workspace extends $pb.GeneratedMessage {
     if (protectedRoots != null) result.protectedRoots.addAll(protectedRoots);
     if (agentBrowsers != null) result.agentBrowsers.addAll(agentBrowsers);
     if (attribution != null) result.attribution = attribution;
+    if (deviceActivity != null) result.deviceActivity = deviceActivity;
     return result;
   }
 
@@ -21294,6 +22522,7 @@ class Workspace extends $pb.GeneratedMessage {
     ..pPM<AgentBrowser>(55, _omitFieldNames ? '' : 'agentBrowsers',
         subBuilder: AgentBrowser.$_createMessage)
     ..aOB(56, _omitFieldNames ? '' : 'attribution')
+    ..aOB(57, _omitFieldNames ? '' : 'deviceActivity')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -21848,6 +23077,18 @@ class Workspace extends $pb.GeneratedMessage {
   $core.bool hasAttribution() => $_has(55);
   @$pb.TagNumber(56)
   void clearAttribution() => $_clearField(56);
+
+  /// This Claktory keeps Device activity (Settings → Device activity,
+  /// ListDeviceActivity). False from one too old to: the app then shows no
+  /// entry for it.
+  @$pb.TagNumber(57)
+  $core.bool get deviceActivity => $_getBF(56);
+  @$pb.TagNumber(57)
+  set deviceActivity($core.bool value) => $_setBool(56, value);
+  @$pb.TagNumber(57)
+  $core.bool hasDeviceActivity() => $_has(56);
+  @$pb.TagNumber(57)
+  void clearDeviceActivity() => $_clearField(57);
 }
 
 /// A place macOS protects (Workspace.protected_places). macOS has no way to
@@ -31480,6 +32721,7 @@ class Project extends $pb.GeneratedMessage {
     $core.bool? archived,
     PipeForward? reportForward,
     $core.bool? collapsed,
+    $core.String? brief,
   }) {
     final result = Project._();
     if (id != null) result.id = id;
@@ -31489,6 +32731,7 @@ class Project extends $pb.GeneratedMessage {
     if (archived != null) result.archived = archived;
     if (reportForward != null) result.reportForward = reportForward;
     if (collapsed != null) result.collapsed = collapsed;
+    if (brief != null) result.brief = brief;
     return result;
   }
 
@@ -31514,6 +32757,7 @@ class Project extends $pb.GeneratedMessage {
     ..aOM<PipeForward>(6, _omitFieldNames ? '' : 'reportForward',
         subBuilder: PipeForward.$_createMessage)
     ..aOB(7, _omitFieldNames ? '' : 'collapsed')
+    ..aOS(8, _omitFieldNames ? '' : 'brief')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -31610,6 +32854,20 @@ class Project extends $pb.GeneratedMessage {
   $core.bool hasCollapsed() => $_has(6);
   @$pb.TagNumber(7)
   void clearCollapsed() => $_clearField(7);
+
+  /// The project's brief: its shared outcome, team and rules, written once.
+  /// It goes into the system prompt of every agent in the project, above each
+  /// agent's own instructions; a change reaches each from its next step, with
+  /// a short Claktory event. Empty: none, and nothing is added. Changed with
+  /// UpdateProject.brief.
+  @$pb.TagNumber(8)
+  $core.String get brief => $_getSZ(7);
+  @$pb.TagNumber(8)
+  set brief($core.String value) => $_setString(7, value);
+  @$pb.TagNumber(8)
+  $core.bool hasBrief() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearBrief() => $_clearField(8);
 }
 
 /// A folder that some of a project's agents work in. It only scopes where they
@@ -33577,9 +34835,9 @@ class Transcript extends $pb.GeneratedMessage {
   @$pb.TagNumber(1)
   void clearAgentId() => $_clearField(1);
 
-  /// The latest entries only: at most 200, and at most about 256 KB encoded
-  /// (at least one, however big), starting at a model response's first entry.
-  /// Older ones come with LoadEntries.
+  /// The latest entries only: at most 50, and at most about 64 KB encoded
+  /// (at least one, however big), starting at a model response's first entry:
+  /// about a screenful. Older ones come with LoadEntries.
   @$pb.TagNumber(2)
   $pb.PbList<Entry> get entries => $_getList(1);
 
@@ -35909,11 +37167,13 @@ class ProposalGrant extends $pb.GeneratedMessage {
     $core.String? summary,
     $core.Iterable<$core.String>? warnings,
     $fixnum.Int64? usedMs,
+    $core.bool? widensPipe,
   }) {
     final result = ProposalGrant._();
     if (summary != null) result.summary = summary;
     if (warnings != null) result.warnings.addAll(warnings);
     if (usedMs != null) result.usedMs = usedMs;
+    if (widensPipe != null) result.widensPipe = widensPipe;
     return result;
   }
 
@@ -35933,6 +37193,7 @@ class ProposalGrant extends $pb.GeneratedMessage {
     ..aOS(1, _omitFieldNames ? '' : 'summary')
     ..pPS(2, _omitFieldNames ? '' : 'warnings')
     ..aInt64(3, _omitFieldNames ? '' : 'usedMs')
+    ..aOB(4, _omitFieldNames ? '' : 'widensPipe')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -35983,6 +37244,19 @@ class ProposalGrant extends $pb.GeneratedMessage {
   $core.bool hasUsedMs() => $_has(2);
   @$pb.TagNumber(3)
   void clearUsedMs() => $_clearField(3);
+
+  /// It changes a pipe's settings (pipes_settings), which only the person
+  /// approves: the Windows app's connection can't (its approval and its
+  /// reply are refused with PERSON_ONLY), so it shows where to approve
+  /// instead. One whose grant can't be read says so too.
+  @$pb.TagNumber(4)
+  $core.bool get widensPipe => $_getBF(3);
+  @$pb.TagNumber(4)
+  set widensPipe($core.bool value) => $_setBool(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasWidensPipe() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearWidensPipe() => $_clearField(4);
 }
 
 /// A device an agent adds for the person (an admin agent's devices_add tool,
@@ -37217,6 +38491,7 @@ class DevicePairing extends $pb.GeneratedMessage {
     $fixnum.Int64? expiresMs,
     $fixnum.Int64? endedMs,
     DeviceKind? kind,
+    $core.bool? fromCommandLine,
   }) {
     final result = DevicePairing._();
     if (id != null) result.id = id;
@@ -37227,6 +38502,7 @@ class DevicePairing extends $pb.GeneratedMessage {
     if (expiresMs != null) result.expiresMs = expiresMs;
     if (endedMs != null) result.endedMs = endedMs;
     if (kind != null) result.kind = kind;
+    if (fromCommandLine != null) result.fromCommandLine = fromCommandLine;
     return result;
   }
 
@@ -37253,6 +38529,7 @@ class DevicePairing extends $pb.GeneratedMessage {
     ..aInt64(7, _omitFieldNames ? '' : 'endedMs')
     ..aE<DeviceKind>(8, _omitFieldNames ? '' : 'kind',
         enumValues: DeviceKind.values)
+    ..aOB(9, _omitFieldNames ? '' : 'fromCommandLine')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -37362,6 +38639,17 @@ class DevicePairing extends $pb.GeneratedMessage {
   $core.bool hasKind() => $_has(7);
   @$pb.TagNumber(8)
   void clearKind() => $_clearField(8);
+
+  /// Started by `factoryd pair` on this computer's command line
+  /// (RequestAddDevice), not by agent_id, whose conversation only shows it.
+  @$pb.TagNumber(9)
+  $core.bool get fromCommandLine => $_getBF(8);
+  @$pb.TagNumber(9)
+  set fromCommandLine($core.bool value) => $_setBool(8, value);
+  @$pb.TagNumber(9)
+  $core.bool hasFromCommandLine() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearFromCommandLine() => $_clearField(9);
 }
 
 class UserText extends $pb.GeneratedMessage {
@@ -43758,6 +45046,8 @@ class ClaktoryAccount extends $pb.GeneratedMessage {
     $fixnum.Int64? lastCheckInMs,
     $core.bool? skippable,
     $core.String? codeFrom,
+    $fixnum.Int64? approvalExpiresMs,
+    $core.Iterable<$core.String>? authorizationsWaiting,
     $core.String? switchingTo,
   }) {
     final result = ClaktoryAccount._();
@@ -43774,6 +45064,9 @@ class ClaktoryAccount extends $pb.GeneratedMessage {
     if (lastCheckInMs != null) result.lastCheckInMs = lastCheckInMs;
     if (skippable != null) result.skippable = skippable;
     if (codeFrom != null) result.codeFrom = codeFrom;
+    if (approvalExpiresMs != null) result.approvalExpiresMs = approvalExpiresMs;
+    if (authorizationsWaiting != null)
+      result.authorizationsWaiting.addAll(authorizationsWaiting);
     if (switchingTo != null) result.switchingTo = switchingTo;
     return result;
   }
@@ -43805,6 +45098,8 @@ class ClaktoryAccount extends $pb.GeneratedMessage {
     ..aInt64(11, _omitFieldNames ? '' : 'lastCheckInMs')
     ..aOB(12, _omitFieldNames ? '' : 'skippable')
     ..aOS(13, _omitFieldNames ? '' : 'codeFrom')
+    ..aInt64(14, _omitFieldNames ? '' : 'approvalExpiresMs')
+    ..pPS(15, _omitFieldNames ? '' : 'authorizationsWaiting')
     ..aOS(16, _omitFieldNames ? '' : 'switchingTo')
     ..hasRequiredFields = false;
 
@@ -43968,6 +45263,24 @@ class ClaktoryAccount extends $pb.GeneratedMessage {
   @$pb.TagNumber(13)
   void clearCodeFrom() => $_clearField(13);
 
+  /// AWAITING_APPROVAL: when the request stops waiting, in ms since 1970.
+  @$pb.TagNumber(14)
+  $fixnum.Int64 get approvalExpiresMs => $_getI64(13);
+  @$pb.TagNumber(14)
+  set approvalExpiresMs($fixnum.Int64 value) => $_setInt64(13, value);
+  @$pb.TagNumber(14)
+  $core.bool hasApprovalExpiresMs() => $_has(13);
+  @$pb.TagNumber(14)
+  void clearApprovalExpiresMs() => $_clearField(14);
+
+  /// A computer asking to join the account, waiting for the person's
+  /// approval (#546), by the account service's request id: the bell. A
+  /// device signed in to the account shows the request's card from the
+  /// service (GET /v1/devices/authorizations), never from here. Empty
+  /// almost always.
+  @$pb.TagNumber(15)
+  $pb.PbList<$core.String> get authorizationsWaiting => $_getList(14);
+
   /// Switch account… (V6): while this Claktory is signed in and a sign-in to
   /// another address waits for its code, the address the code went to. The
   /// state stays SIGNED_IN with the current email, which stays signed in
@@ -43975,11 +45288,11 @@ class ClaktoryAccount extends $pb.GeneratedMessage {
   /// cancels (AccountSignInCancel); a wrong or expired code changes neither.
   /// Empty otherwise: AWAITING_CODE is only for a Claktory not signed in.
   @$pb.TagNumber(16)
-  $core.String get switchingTo => $_getSZ(13);
+  $core.String get switchingTo => $_getSZ(15);
   @$pb.TagNumber(16)
-  set switchingTo($core.String value) => $_setString(13, value);
+  set switchingTo($core.String value) => $_setString(15, value);
   @$pb.TagNumber(16)
-  $core.bool hasSwitchingTo() => $_has(13);
+  $core.bool hasSwitchingTo() => $_has(15);
   @$pb.TagNumber(16)
   void clearSwitchingTo() => $_clearField(16);
 }
@@ -58665,6 +59978,9 @@ class Move extends $pb.GeneratedMessage {
     $core.String? startedByAgentId,
     $core.bool? confirmedHere,
     $core.String? targetAddress,
+    $core.String? approvedByDeviceId,
+    $core.String? approvedByName,
+    $core.String? approvalKey,
   }) {
     final result = Move._();
     if (phase != null) result.phase = phase;
@@ -58688,6 +60004,10 @@ class Move extends $pb.GeneratedMessage {
     if (startedByAgentId != null) result.startedByAgentId = startedByAgentId;
     if (confirmedHere != null) result.confirmedHere = confirmedHere;
     if (targetAddress != null) result.targetAddress = targetAddress;
+    if (approvedByDeviceId != null)
+      result.approvedByDeviceId = approvedByDeviceId;
+    if (approvedByName != null) result.approvedByName = approvedByName;
+    if (approvalKey != null) result.approvalKey = approvalKey;
     return result;
   }
 
@@ -58733,6 +60053,9 @@ class Move extends $pb.GeneratedMessage {
     ..aOS(19, _omitFieldNames ? '' : 'startedByAgentId')
     ..aOB(20, _omitFieldNames ? '' : 'confirmedHere')
     ..aOS(21, _omitFieldNames ? '' : 'targetAddress')
+    ..aOS(22, _omitFieldNames ? '' : 'approvedByDeviceId')
+    ..aOS(23, _omitFieldNames ? '' : 'approvedByName')
+    ..aOS(24, _omitFieldNames ? '' : 'approvalKey')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -58957,6 +60280,43 @@ class Move extends $pb.GeneratedMessage {
   $core.bool hasTargetAddress() => $_has(20);
   @$pb.TagNumber(21)
   void clearTargetAddress() => $_clearField(21);
+
+  /// A move with the account (#546): the other computer asked the account
+  /// service to receive this Claktory (`factoryd receive --email`), and the
+  /// person approved it on one of their devices connected here, in Settings →
+  /// Move, with the device's own signed approval, which this Claktory checked
+  /// against its own devices. Such a move has no code and no digits: it never
+  /// shows MOVE_PHASE_CONFIRM. approved_by_device_id is that paired device's
+  /// id ("local" for this computer's own app), approved_by_name its name as
+  /// Settings → Devices had it, and approval_key the account key (base64url)
+  /// that signed the approval, for History. All empty for a move started
+  /// with a receive code.
+  @$pb.TagNumber(22)
+  $core.String get approvedByDeviceId => $_getSZ(21);
+  @$pb.TagNumber(22)
+  set approvedByDeviceId($core.String value) => $_setString(21, value);
+  @$pb.TagNumber(22)
+  $core.bool hasApprovedByDeviceId() => $_has(21);
+  @$pb.TagNumber(22)
+  void clearApprovedByDeviceId() => $_clearField(22);
+
+  @$pb.TagNumber(23)
+  $core.String get approvedByName => $_getSZ(22);
+  @$pb.TagNumber(23)
+  set approvedByName($core.String value) => $_setString(22, value);
+  @$pb.TagNumber(23)
+  $core.bool hasApprovedByName() => $_has(22);
+  @$pb.TagNumber(23)
+  void clearApprovedByName() => $_clearField(23);
+
+  @$pb.TagNumber(24)
+  $core.String get approvalKey => $_getSZ(23);
+  @$pb.TagNumber(24)
+  set approvalKey($core.String value) => $_setString(23, value);
+  @$pb.TagNumber(24)
+  $core.bool hasApprovalKey() => $_has(23);
+  @$pb.TagNumber(24)
+  void clearApprovalKey() => $_clearField(24);
 }
 
 class MovePath extends $pb.GeneratedMessage {
@@ -60560,6 +61920,7 @@ class NeedsYouRecord extends $pb.GeneratedMessage {
     ErrandHandoff? handoff,
     $core.String? actionError,
     $core.String? codesKeptAs,
+    $core.String? sealedPath,
   }) {
     final result = NeedsYouRecord._();
     if (kind != null) result.kind = kind;
@@ -60602,6 +61963,7 @@ class NeedsYouRecord extends $pb.GeneratedMessage {
     if (handoff != null) result.handoff = handoff;
     if (actionError != null) result.actionError = actionError;
     if (codesKeptAs != null) result.codesKeptAs = codesKeptAs;
+    if (sealedPath != null) result.sealedPath = sealedPath;
     return result;
   }
 
@@ -60672,6 +62034,7 @@ class NeedsYouRecord extends $pb.GeneratedMessage {
         subBuilder: ErrandHandoff.$_createMessage)
     ..aOS(39, _omitFieldNames ? '' : 'actionError')
     ..aOS(40, _omitFieldNames ? '' : 'codesKeptAs')
+    ..aOS(41, _omitFieldNames ? '' : 'sealedPath')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -61157,6 +62520,16 @@ class NeedsYouRecord extends $pb.GeneratedMessage {
   $core.bool hasCodesKeptAs() => $_has(39);
   @$pb.TagNumber(40)
   void clearCodesKeptAs() => $_clearField(40);
+
+  /// SEALED: the file, absolute, to open it. Empty for every other kind.
+  @$pb.TagNumber(41)
+  $core.String get sealedPath => $_getSZ(40);
+  @$pb.TagNumber(41)
+  set sealedPath($core.String value) => $_setString(40, value);
+  @$pb.TagNumber(41)
+  $core.bool hasSealedPath() => $_has(40);
+  @$pb.TagNumber(41)
+  void clearSealedPath() => $_clearField(41);
 }
 
 /// A Mac app can broker for its Chrome. Sent on every connection, and again
@@ -71198,6 +72571,653 @@ class AgentBrowserViewMoved extends $pb.GeneratedMessage {
   void clearDevice() => $_clearField(1);
 }
 
+/// Starts or stops this connection's view. Refused: from anything but the
+/// person's own device; for an agent whose browser isn't open (watch only)
+/// or for a request that isn't an open check (request_seq set).
+class WatchAgentTab extends $pb.GeneratedMessage {
+  factory WatchAgentTab({
+    $core.String? agentId,
+    $fixnum.Int64? requestSeq,
+    $core.bool? on,
+    $core.int? maxWidth,
+  }) {
+    final result = WatchAgentTab._();
+    if (agentId != null) result.agentId = agentId;
+    if (requestSeq != null) result.requestSeq = requestSeq;
+    if (on != null) result.on = on;
+    if (maxWidth != null) result.maxWidth = maxWidth;
+    return result;
+  }
+
+  WatchAgentTab._();
+
+  factory WatchAgentTab.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      WatchAgentTab()..mergeFromBuffer(data, registry);
+  factory WatchAgentTab.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      WatchAgentTab()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'WatchAgentTab',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: WatchAgentTab.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'agentId')
+    ..a<$fixnum.Int64>(
+        2, _omitFieldNames ? '' : 'requestSeq', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..aOB(3, _omitFieldNames ? '' : 'on')
+    ..aI(4, _omitFieldNames ? '' : 'maxWidth', fieldType: $pb.PbFieldType.OU3)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  WatchAgentTab clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  WatchAgentTab copyWith(void Function(WatchAgentTab) updates) =>
+      super.copyWith((message) => updates(message as WatchAgentTab))
+          as WatchAgentTab;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use WatchAgentTab() / WatchAgentTab.new instead')
+  static WatchAgentTab create() => WatchAgentTab._();
+  static $pb.GeneratedMessage $_createMessage() => WatchAgentTab._();
+  @$core.override
+  WatchAgentTab createEmptyInstance() => WatchAgentTab._();
+  @$core.pragma('dart2js:noInline')
+  static WatchAgentTab getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<WatchAgentTab>(
+          WatchAgentTab.$_createMessage);
+  static WatchAgentTab? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get agentId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set agentId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasAgentId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearAgentId() => $_clearField(1);
+
+  /// The check request's seq in the agent's conversation (ErrandHandoff.seq);
+  /// 0 for the watch-only view.
+  @$pb.TagNumber(2)
+  $fixnum.Int64 get requestSeq => $_getI64(1);
+  @$pb.TagNumber(2)
+  set requestSeq($fixnum.Int64 value) => $_setInt64(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasRequestSeq() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearRequestSeq() => $_clearField(2);
+
+  /// False stops this connection's view (agent_id and request_seq aren't
+  /// needed then).
+  @$pb.TagNumber(3)
+  $core.bool get on => $_getBF(2);
+  @$pb.TagNumber(3)
+  set on($core.bool value) => $_setBool(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasOn() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearOn() => $_clearField(3);
+
+  /// The widest frame this device wants, in pixels (about 1280 on a Mac, the
+  /// screen's width times its scale on a phone); 0: 1280. Frames are scaled
+  /// down to it, never up, and never past 2048.
+  @$pb.TagNumber(4)
+  $core.int get maxWidth => $_getIZ(3);
+  @$pb.TagNumber(4)
+  set maxWidth($core.int value) => $_setUnsignedInt32(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasMaxWidth() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearMaxWidth() => $_clearField(4);
+}
+
+/// This connection has frame `frame_seq`: the next can come. Frames come
+/// one at a time, at most 15 a second, only when the page changes.
+class AgentTabFrameAck extends $pb.GeneratedMessage {
+  factory AgentTabFrameAck({
+    $core.String? agentId,
+    $fixnum.Int64? requestSeq,
+    $fixnum.Int64? frameSeq,
+  }) {
+    final result = AgentTabFrameAck._();
+    if (agentId != null) result.agentId = agentId;
+    if (requestSeq != null) result.requestSeq = requestSeq;
+    if (frameSeq != null) result.frameSeq = frameSeq;
+    return result;
+  }
+
+  AgentTabFrameAck._();
+
+  factory AgentTabFrameAck.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AgentTabFrameAck()..mergeFromBuffer(data, registry);
+  factory AgentTabFrameAck.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AgentTabFrameAck()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'AgentTabFrameAck',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: AgentTabFrameAck.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'agentId')
+    ..a<$fixnum.Int64>(
+        2, _omitFieldNames ? '' : 'requestSeq', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..a<$fixnum.Int64>(
+        3, _omitFieldNames ? '' : 'frameSeq', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AgentTabFrameAck clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AgentTabFrameAck copyWith(void Function(AgentTabFrameAck) updates) =>
+      super.copyWith((message) => updates(message as AgentTabFrameAck))
+          as AgentTabFrameAck;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use AgentTabFrameAck() / AgentTabFrameAck.new instead')
+  static AgentTabFrameAck create() => AgentTabFrameAck._();
+  static $pb.GeneratedMessage $_createMessage() => AgentTabFrameAck._();
+  @$core.override
+  AgentTabFrameAck createEmptyInstance() => AgentTabFrameAck._();
+  @$core.pragma('dart2js:noInline')
+  static AgentTabFrameAck getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<AgentTabFrameAck>(
+          AgentTabFrameAck.$_createMessage);
+  static AgentTabFrameAck? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get agentId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set agentId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasAgentId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearAgentId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $fixnum.Int64 get requestSeq => $_getI64(1);
+  @$pb.TagNumber(2)
+  set requestSeq($fixnum.Int64 value) => $_setInt64(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasRequestSeq() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearRequestSeq() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $fixnum.Int64 get frameSeq => $_getI64(2);
+  @$pb.TagNumber(3)
+  set frameSeq($fixnum.Int64 value) => $_setInt64(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasFrameSeq() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearFrameSeq() => $_clearField(3);
+}
+
+/// The person's input to the check's tab, from the connection watching it,
+/// while the request is open; refused otherwise (a watch-only view takes
+/// none). Pointer and wheel positions are fractions of frame `frame_seq`, as
+/// in AgentBrowserPointer and AgentBrowserWheel. Only into the page: paste
+/// is refused (no clipboard either way), the secondary button is dropped
+/// (no menu), and keys held with Control or Command are dropped but for
+/// select all (a) and undo (z). At most 4 KB of
+/// text and 256 events a message, 240 events a second; more are dropped.
+/// Never logged, kept or told to the agent.
+class AgentTabInput extends $pb.GeneratedMessage {
+  factory AgentTabInput({
+    $core.String? agentId,
+    $fixnum.Int64? requestSeq,
+    $core.Iterable<AgentBrowserEvent>? events,
+  }) {
+    final result = AgentTabInput._();
+    if (agentId != null) result.agentId = agentId;
+    if (requestSeq != null) result.requestSeq = requestSeq;
+    if (events != null) result.events.addAll(events);
+    return result;
+  }
+
+  AgentTabInput._();
+
+  factory AgentTabInput.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AgentTabInput()..mergeFromBuffer(data, registry);
+  factory AgentTabInput.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AgentTabInput()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'AgentTabInput',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: AgentTabInput.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'agentId')
+    ..a<$fixnum.Int64>(
+        2, _omitFieldNames ? '' : 'requestSeq', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..pPM<AgentBrowserEvent>(3, _omitFieldNames ? '' : 'events',
+        subBuilder: AgentBrowserEvent.$_createMessage)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AgentTabInput clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AgentTabInput copyWith(void Function(AgentTabInput) updates) =>
+      super.copyWith((message) => updates(message as AgentTabInput))
+          as AgentTabInput;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use AgentTabInput() / AgentTabInput.new instead')
+  static AgentTabInput create() => AgentTabInput._();
+  static $pb.GeneratedMessage $_createMessage() => AgentTabInput._();
+  @$core.override
+  AgentTabInput createEmptyInstance() => AgentTabInput._();
+  @$core.pragma('dart2js:noInline')
+  static AgentTabInput getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<AgentTabInput>(
+          AgentTabInput.$_createMessage);
+  static AgentTabInput? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get agentId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set agentId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasAgentId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearAgentId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $fixnum.Int64 get requestSeq => $_getI64(1);
+  @$pb.TagNumber(2)
+  set requestSeq($fixnum.Int64 value) => $_setInt64(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasRequestSeq() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearRequestSeq() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $pb.PbList<AgentBrowserEvent> get events => $_getList(2);
+}
+
+class AgentTabFrame extends $pb.GeneratedMessage {
+  factory AgentTabFrame({
+    $core.String? agentId,
+    $fixnum.Int64? requestSeq,
+    $fixnum.Int64? frameSeq,
+    $core.List<$core.int>? jpeg,
+    $core.int? width,
+    $core.int? height,
+    $core.String? site,
+    $core.String? origin,
+    $core.String? title,
+  }) {
+    final result = AgentTabFrame._();
+    if (agentId != null) result.agentId = agentId;
+    if (requestSeq != null) result.requestSeq = requestSeq;
+    if (frameSeq != null) result.frameSeq = frameSeq;
+    if (jpeg != null) result.jpeg = jpeg;
+    if (width != null) result.width = width;
+    if (height != null) result.height = height;
+    if (site != null) result.site = site;
+    if (origin != null) result.origin = origin;
+    if (title != null) result.title = title;
+    return result;
+  }
+
+  AgentTabFrame._();
+
+  factory AgentTabFrame.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AgentTabFrame()..mergeFromBuffer(data, registry);
+  factory AgentTabFrame.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AgentTabFrame()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'AgentTabFrame',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: AgentTabFrame.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'agentId')
+    ..a<$fixnum.Int64>(
+        2, _omitFieldNames ? '' : 'requestSeq', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..a<$fixnum.Int64>(
+        3, _omitFieldNames ? '' : 'frameSeq', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..a<$core.List<$core.int>>(
+        4, _omitFieldNames ? '' : 'jpeg', $pb.PbFieldType.OY)
+    ..aI(5, _omitFieldNames ? '' : 'width', fieldType: $pb.PbFieldType.OU3)
+    ..aI(6, _omitFieldNames ? '' : 'height', fieldType: $pb.PbFieldType.OU3)
+    ..aOS(7, _omitFieldNames ? '' : 'site')
+    ..aOS(8, _omitFieldNames ? '' : 'origin')
+    ..aOS(9, _omitFieldNames ? '' : 'title')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AgentTabFrame clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AgentTabFrame copyWith(void Function(AgentTabFrame) updates) =>
+      super.copyWith((message) => updates(message as AgentTabFrame))
+          as AgentTabFrame;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use AgentTabFrame() / AgentTabFrame.new instead')
+  static AgentTabFrame create() => AgentTabFrame._();
+  static $pb.GeneratedMessage $_createMessage() => AgentTabFrame._();
+  @$core.override
+  AgentTabFrame createEmptyInstance() => AgentTabFrame._();
+  @$core.pragma('dart2js:noInline')
+  static AgentTabFrame getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<AgentTabFrame>(
+          AgentTabFrame.$_createMessage);
+  static AgentTabFrame? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get agentId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set agentId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasAgentId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearAgentId() => $_clearField(1);
+
+  /// As on WatchAgentTab: 0 for the watch-only view.
+  @$pb.TagNumber(2)
+  $fixnum.Int64 get requestSeq => $_getI64(1);
+  @$pb.TagNumber(2)
+  set requestSeq($fixnum.Int64 value) => $_setInt64(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasRequestSeq() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearRequestSeq() => $_clearField(2);
+
+  /// Ack it with AgentTabFrameAck.
+  @$pb.TagNumber(3)
+  $fixnum.Int64 get frameSeq => $_getI64(2);
+  @$pb.TagNumber(3)
+  set frameSeq($fixnum.Int64 value) => $_setInt64(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasFrameSeq() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearFrameSeq() => $_clearField(3);
+
+  @$pb.TagNumber(4)
+  $core.List<$core.int> get jpeg => $_getN(3);
+  @$pb.TagNumber(4)
+  set jpeg($core.List<$core.int> value) => $_setBytes(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasJpeg() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearJpeg() => $_clearField(4);
+
+  /// The JPEG's own size, checked: at most max_width wide and 4096 high,
+  /// and at most 1 MB.
+  @$pb.TagNumber(5)
+  $core.int get width => $_getIZ(4);
+  @$pb.TagNumber(5)
+  set width($core.int value) => $_setUnsignedInt32(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasWidth() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearWidth() => $_clearField(5);
+
+  @$pb.TagNumber(6)
+  $core.int get height => $_getIZ(5);
+  @$pb.TagNumber(6)
+  set height($core.int value) => $_setUnsignedInt32(5, value);
+  @$pb.TagNumber(6)
+  $core.bool hasHeight() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearHeight() => $_clearField(6);
+
+  /// The tab's site in Claktory's words, for its frame: the registrable
+  /// domain of the page's address as Chrome reports it, in ASCII (punycode:
+  /// "xn--80ak6aa92e.com"), any hidden character shown as a code
+  /// ("\u{200b}"). Empty on a page with no site (about:blank). Never the
+  /// page's own words.
+  @$pb.TagNumber(7)
+  $core.String get site => $_getSZ(6);
+  @$pb.TagNumber(7)
+  set site($core.String value) => $_setString(6, value);
+  @$pb.TagNumber(7)
+  $core.bool hasSite() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearSite() => $_clearField(7);
+
+  /// The page's origin as Chrome reports it ("https://accounts.x.com"), and
+  /// its title, which is the page's: show it apart from the site, as the
+  /// page's (control and invisible characters taken out, at most 200
+  /// characters).
+  @$pb.TagNumber(8)
+  $core.String get origin => $_getSZ(7);
+  @$pb.TagNumber(8)
+  set origin($core.String value) => $_setString(7, value);
+  @$pb.TagNumber(8)
+  $core.bool hasOrigin() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearOrigin() => $_clearField(8);
+
+  @$pb.TagNumber(9)
+  $core.String get title => $_getSZ(8);
+  @$pb.TagNumber(9)
+  set title($core.String value) => $_setString(8, value);
+  @$pb.TagNumber(9)
+  $core.bool hasTitle() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearTitle() => $_clearField(9);
+}
+
+/// The view ended on Claktory's side: close it on this device.
+class AgentTabViewEnded extends $pb.GeneratedMessage {
+  factory AgentTabViewEnded({
+    $core.String? agentId,
+    $fixnum.Int64? requestSeq,
+    AgentTabViewEnd? reason,
+    $core.String? message,
+    $core.String? device,
+  }) {
+    final result = AgentTabViewEnded._();
+    if (agentId != null) result.agentId = agentId;
+    if (requestSeq != null) result.requestSeq = requestSeq;
+    if (reason != null) result.reason = reason;
+    if (message != null) result.message = message;
+    if (device != null) result.device = device;
+    return result;
+  }
+
+  AgentTabViewEnded._();
+
+  factory AgentTabViewEnded.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AgentTabViewEnded()..mergeFromBuffer(data, registry);
+  factory AgentTabViewEnded.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AgentTabViewEnded()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'AgentTabViewEnded',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: AgentTabViewEnded.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'agentId')
+    ..a<$fixnum.Int64>(
+        2, _omitFieldNames ? '' : 'requestSeq', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..aE<AgentTabViewEnd>(3, _omitFieldNames ? '' : 'reason',
+        enumValues: AgentTabViewEnd.values)
+    ..aOS(4, _omitFieldNames ? '' : 'message')
+    ..aOS(5, _omitFieldNames ? '' : 'device')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AgentTabViewEnded clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AgentTabViewEnded copyWith(void Function(AgentTabViewEnded) updates) =>
+      super.copyWith((message) => updates(message as AgentTabViewEnded))
+          as AgentTabViewEnded;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use AgentTabViewEnded() / AgentTabViewEnded.new instead')
+  static AgentTabViewEnded create() => AgentTabViewEnded._();
+  static $pb.GeneratedMessage $_createMessage() => AgentTabViewEnded._();
+  @$core.override
+  AgentTabViewEnded createEmptyInstance() => AgentTabViewEnded._();
+  @$core.pragma('dart2js:noInline')
+  static AgentTabViewEnded getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<AgentTabViewEnded>(
+          AgentTabViewEnded.$_createMessage);
+  static AgentTabViewEnded? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get agentId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set agentId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasAgentId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearAgentId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $fixnum.Int64 get requestSeq => $_getI64(1);
+  @$pb.TagNumber(2)
+  set requestSeq($fixnum.Int64 value) => $_setInt64(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasRequestSeq() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearRequestSeq() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  AgentTabViewEnd get reason => $_getN(2);
+  @$pb.TagNumber(3)
+  set reason(AgentTabViewEnd value) => $_setField(3, value);
+  @$pb.TagNumber(3)
+  $core.bool hasReason() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearReason() => $_clearField(3);
+
+  /// Claktory's sentence to show ("The page left x.com, so the view
+  /// stopped.").
+  @$pb.TagNumber(4)
+  $core.String get message => $_getSZ(3);
+  @$pb.TagNumber(4)
+  set message($core.String value) => $_setString(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasMessage() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearMessage() => $_clearField(4);
+
+  /// MOVED: that device's name.
+  @$pb.TagNumber(5)
+  $core.String get device => $_getSZ(4);
+  @$pb.TagNumber(5)
+  set device($core.String value) => $_setString(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasDevice() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearDevice() => $_clearField(5);
+}
+
+/// A short line for the check's view, shown a moment over it ("Only the
+/// check takes your clicks here.").
+class AgentTabNote extends $pb.GeneratedMessage {
+  factory AgentTabNote({
+    $core.String? agentId,
+    $fixnum.Int64? requestSeq,
+    $core.String? message,
+  }) {
+    final result = AgentTabNote._();
+    if (agentId != null) result.agentId = agentId;
+    if (requestSeq != null) result.requestSeq = requestSeq;
+    if (message != null) result.message = message;
+    return result;
+  }
+
+  AgentTabNote._();
+
+  factory AgentTabNote.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AgentTabNote()..mergeFromBuffer(data, registry);
+  factory AgentTabNote.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      AgentTabNote()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'AgentTabNote',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: AgentTabNote.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'agentId')
+    ..a<$fixnum.Int64>(
+        2, _omitFieldNames ? '' : 'requestSeq', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..aOS(3, _omitFieldNames ? '' : 'message')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AgentTabNote clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  AgentTabNote copyWith(void Function(AgentTabNote) updates) =>
+      super.copyWith((message) => updates(message as AgentTabNote))
+          as AgentTabNote;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use AgentTabNote() / AgentTabNote.new instead')
+  static AgentTabNote create() => AgentTabNote._();
+  static $pb.GeneratedMessage $_createMessage() => AgentTabNote._();
+  @$core.override
+  AgentTabNote createEmptyInstance() => AgentTabNote._();
+  @$core.pragma('dart2js:noInline')
+  static AgentTabNote getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<AgentTabNote>(
+          AgentTabNote.$_createMessage);
+  static AgentTabNote? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get agentId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set agentId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasAgentId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearAgentId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $fixnum.Int64 get requestSeq => $_getI64(1);
+  @$pb.TagNumber(2)
+  set requestSeq($fixnum.Int64 value) => $_setInt64(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasRequestSeq() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearRequestSeq() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.String get message => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set message($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasMessage() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearMessage() => $_clearField(3);
+}
+
 class ErrandLog extends $pb.GeneratedMessage {
   factory ErrandLog({
     $core.String? errandId,
@@ -71409,6 +73429,1016 @@ class ErrandLogEntry extends $pb.GeneratedMessage {
   $core.bool hasTarget() => $_has(7);
   @$pb.TagNumber(8)
   void clearTarget() => $_clearField(8);
+}
+
+/// Answered with ExtensionView { extension_id "checklist", body checklist }.
+class GetChecklist extends $pb.GeneratedMessage {
+  factory GetChecklist({
+    $core.String? agentId,
+  }) {
+    final result = GetChecklist._();
+    if (agentId != null) result.agentId = agentId;
+    return result;
+  }
+
+  GetChecklist._();
+
+  factory GetChecklist.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      GetChecklist()..mergeFromBuffer(data, registry);
+  factory GetChecklist.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      GetChecklist()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'GetChecklist',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: GetChecklist.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'agentId')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  GetChecklist clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  GetChecklist copyWith(void Function(GetChecklist) updates) =>
+      super.copyWith((message) => updates(message as GetChecklist))
+          as GetChecklist;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use GetChecklist() / GetChecklist.new instead')
+  static GetChecklist create() => GetChecklist._();
+  static $pb.GeneratedMessage $_createMessage() => GetChecklist._();
+  @$core.override
+  GetChecklist createEmptyInstance() => GetChecklist._();
+  @$core.pragma('dart2js:noInline')
+  static GetChecklist getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<GetChecklist>(
+          GetChecklist.$_createMessage);
+  static GetChecklist? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get agentId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set agentId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasAgentId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearAgentId() => $_clearField(1);
+}
+
+/// Answered with ExtensionView { extension_id "tasks", body tasks }: the
+/// agent's tasks, or everyone's for an agent that sees all, as its Tasks
+/// panel shows them.
+class ListTasks extends $pb.GeneratedMessage {
+  factory ListTasks({
+    $core.String? agentId,
+  }) {
+    final result = ListTasks._();
+    if (agentId != null) result.agentId = agentId;
+    return result;
+  }
+
+  ListTasks._();
+
+  factory ListTasks.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ListTasks()..mergeFromBuffer(data, registry);
+  factory ListTasks.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ListTasks()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ListTasks',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: ListTasks.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'agentId')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ListTasks clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ListTasks copyWith(void Function(ListTasks) updates) =>
+      super.copyWith((message) => updates(message as ListTasks)) as ListTasks;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ListTasks() / ListTasks.new instead')
+  static ListTasks create() => ListTasks._();
+  static $pb.GeneratedMessage $_createMessage() => ListTasks._();
+  @$core.override
+  ListTasks createEmptyInstance() => ListTasks._();
+  @$core.pragma('dart2js:noInline')
+  static ListTasks getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<ListTasks>(ListTasks.$_createMessage);
+  static ListTasks? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get agentId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set agentId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasAgentId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearAgentId() => $_clearField(1);
+}
+
+/// Asks for a page of rows, newest first. Answered with DeviceActivity.
+class ListDeviceActivity extends $pb.GeneratedMessage {
+  factory ListDeviceActivity({
+    $core.String? deviceId,
+    $fixnum.Int64? beforeId,
+    $core.int? limit,
+    $core.String? search,
+    $core.bool? watch,
+  }) {
+    final result = ListDeviceActivity._();
+    if (deviceId != null) result.deviceId = deviceId;
+    if (beforeId != null) result.beforeId = beforeId;
+    if (limit != null) result.limit = limit;
+    if (search != null) result.search = search;
+    if (watch != null) result.watch = watch;
+    return result;
+  }
+
+  ListDeviceActivity._();
+
+  factory ListDeviceActivity.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ListDeviceActivity()..mergeFromBuffer(data, registry);
+  factory ListDeviceActivity.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ListDeviceActivity()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ListDeviceActivity',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: ListDeviceActivity.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'deviceId')
+    ..aInt64(2, _omitFieldNames ? '' : 'beforeId')
+    ..aI(3, _omitFieldNames ? '' : 'limit', fieldType: $pb.PbFieldType.OU3)
+    ..aOS(4, _omitFieldNames ? '' : 'search')
+    ..aOB(5, _omitFieldNames ? '' : 'watch')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ListDeviceActivity clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ListDeviceActivity copyWith(void Function(ListDeviceActivity) updates) =>
+      super.copyWith((message) => updates(message as ListDeviceActivity))
+          as ListDeviceActivity;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ListDeviceActivity() / ListDeviceActivity.new instead')
+  static ListDeviceActivity create() => ListDeviceActivity._();
+  static $pb.GeneratedMessage $_createMessage() => ListDeviceActivity._();
+  @$core.override
+  ListDeviceActivity createEmptyInstance() => ListDeviceActivity._();
+  @$core.pragma('dart2js:noInline')
+  static ListDeviceActivity getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<ListDeviceActivity>(
+          ListDeviceActivity.$_createMessage);
+  static ListDeviceActivity? _defaultInstance;
+
+  /// Only this device's rows and sessions (ActivityDevice.id); empty for
+  /// every device.
+  @$pb.TagNumber(1)
+  $core.String get deviceId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set deviceId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasDeviceId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearDeviceId() => $_clearField(1);
+
+  /// Rows older than this one (DeviceActivityRow.id): the next page, from
+  /// the last row of the one before. 0: the newest.
+  @$pb.TagNumber(2)
+  $fixnum.Int64 get beforeId => $_getI64(1);
+  @$pb.TagNumber(2)
+  set beforeId($fixnum.Int64 value) => $_setInt64(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasBeforeId() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearBeforeId() => $_clearField(2);
+
+  /// How many rows; 0 for 200, at most 1000.
+  @$pb.TagNumber(3)
+  $core.int get limit => $_getIZ(2);
+  @$pb.TagNumber(3)
+  set limit($core.int value) => $_setUnsignedInt32(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasLimit() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearLimit() => $_clearField(3);
+
+  /// Only rows whose words, `about`, device name or `bold` names hold every
+  /// word of it, whatever the case. Empty: every row.
+  @$pb.TagNumber(4)
+  $core.String get search => $_getSZ(3);
+  @$pb.TagNumber(4)
+  set search($core.String value) => $_setString(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasSearch() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearSearch() => $_clearField(4);
+
+  /// Keep sending this connection what's new or changed (rows, sessions,
+  /// devices) as DeviceActivity with `live`, for this device_id and search,
+  /// until a ListDeviceActivity with watch false or the connection ends.
+  @$pb.TagNumber(5)
+  $core.bool get watch => $_getBF(4);
+  @$pb.TagNumber(5)
+  set watch($core.bool value) => $_setBool(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasWatch() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearWatch() => $_clearField(5);
+}
+
+class DeviceActivity extends $pb.GeneratedMessage {
+  factory DeviceActivity({
+    $core.Iterable<DeviceActivityRow>? rows,
+    $core.Iterable<DeviceSession>? sessions,
+    $core.Iterable<ActivityDevice>? devices,
+    $core.bool? more,
+    $core.bool? live,
+  }) {
+    final result = DeviceActivity._();
+    if (rows != null) result.rows.addAll(rows);
+    if (sessions != null) result.sessions.addAll(sessions);
+    if (devices != null) result.devices.addAll(devices);
+    if (more != null) result.more = more;
+    if (live != null) result.live = live;
+    return result;
+  }
+
+  DeviceActivity._();
+
+  factory DeviceActivity.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      DeviceActivity()..mergeFromBuffer(data, registry);
+  factory DeviceActivity.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      DeviceActivity()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'DeviceActivity',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: DeviceActivity.$_createMessage)
+    ..pPM<DeviceActivityRow>(1, _omitFieldNames ? '' : 'rows',
+        subBuilder: DeviceActivityRow.$_createMessage)
+    ..pPM<DeviceSession>(2, _omitFieldNames ? '' : 'sessions',
+        subBuilder: DeviceSession.$_createMessage)
+    ..pPM<ActivityDevice>(3, _omitFieldNames ? '' : 'devices',
+        subBuilder: ActivityDevice.$_createMessage)
+    ..aOB(4, _omitFieldNames ? '' : 'more')
+    ..aOB(5, _omitFieldNames ? '' : 'live')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  DeviceActivity clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  DeviceActivity copyWith(void Function(DeviceActivity) updates) =>
+      super.copyWith((message) => updates(message as DeviceActivity))
+          as DeviceActivity;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use DeviceActivity() / DeviceActivity.new instead')
+  static DeviceActivity create() => DeviceActivity._();
+  static $pb.GeneratedMessage $_createMessage() => DeviceActivity._();
+  @$core.override
+  DeviceActivity createEmptyInstance() => DeviceActivity._();
+  @$core.pragma('dart2js:noInline')
+  static DeviceActivity getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<DeviceActivity>(
+          DeviceActivity.$_createMessage);
+  static DeviceActivity? _defaultInstance;
+
+  /// Newest first (by id, which is the order they began).
+  @$pb.TagNumber(1)
+  $pb.PbList<DeviceActivityRow> get rows => $_getList(0);
+
+  /// The sessions the rows fall in, newest first, with what was opened in
+  /// each: the device view's separators.
+  @$pb.TagNumber(2)
+  $pb.PbList<DeviceSession> get sessions => $_getList(1);
+
+  /// Every device with rows or paired now, removed ones too: the Device
+  /// menu. Whole on every answer and every live one.
+  @$pb.TagNumber(3)
+  $pb.PbList<ActivityDevice> get devices => $_getList(2);
+
+  /// Older rows remain: ask again with before_id the last row's id.
+  @$pb.TagNumber(4)
+  $core.bool get more => $_getBF(3);
+  @$pb.TagNumber(4)
+  set more($core.bool value) => $_setBool(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasMore() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearMore() => $_clearField(4);
+
+  /// Sent while watching: rows and sessions that are new, or changed (a
+  /// repeat counted into a row, a session ended, something opened). Merge
+  /// by id; a row or session already held is replaced.
+  @$pb.TagNumber(5)
+  $core.bool get live => $_getBF(4);
+  @$pb.TagNumber(5)
+  set live($core.bool value) => $_setBool(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasLive() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearLive() => $_clearField(5);
+}
+
+/// The two entries for the computer Claktory runs on: its app (and, until
+/// the Mac app has a key of its own, any program on it that doesn't name
+/// itself), and Claktory's own commands there (factoryd …).
+/// ActivityDevice.id "local" and "local:commands".
+class ActivityDevice extends $pb.GeneratedMessage {
+  factory ActivityDevice({
+    $core.String? id,
+    $core.String? name,
+    DeviceKind? kind,
+    $core.String? platform,
+    $fixnum.Int64? addedMs,
+    $fixnum.Int64? removedMs,
+    $core.bool? thisComputer,
+    $core.bool? commands,
+  }) {
+    final result = ActivityDevice._();
+    if (id != null) result.id = id;
+    if (name != null) result.name = name;
+    if (kind != null) result.kind = kind;
+    if (platform != null) result.platform = platform;
+    if (addedMs != null) result.addedMs = addedMs;
+    if (removedMs != null) result.removedMs = removedMs;
+    if (thisComputer != null) result.thisComputer = thisComputer;
+    if (commands != null) result.commands = commands;
+    return result;
+  }
+
+  ActivityDevice._();
+
+  factory ActivityDevice.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ActivityDevice()..mergeFromBuffer(data, registry);
+  factory ActivityDevice.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ActivityDevice()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ActivityDevice',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: ActivityDevice.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'id')
+    ..aOS(2, _omitFieldNames ? '' : 'name')
+    ..aE<DeviceKind>(3, _omitFieldNames ? '' : 'kind',
+        enumValues: DeviceKind.values)
+    ..aOS(4, _omitFieldNames ? '' : 'platform')
+    ..aInt64(5, _omitFieldNames ? '' : 'addedMs')
+    ..aInt64(6, _omitFieldNames ? '' : 'removedMs')
+    ..aOB(7, _omitFieldNames ? '' : 'thisComputer')
+    ..aOB(8, _omitFieldNames ? '' : 'commands')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ActivityDevice clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ActivityDevice copyWith(void Function(ActivityDevice) updates) =>
+      super.copyWith((message) => updates(message as ActivityDevice))
+          as ActivityDevice;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ActivityDevice() / ActivityDevice.new instead')
+  static ActivityDevice create() => ActivityDevice._();
+  static $pb.GeneratedMessage $_createMessage() => ActivityDevice._();
+  @$core.override
+  ActivityDevice createEmptyInstance() => ActivityDevice._();
+  @$core.pragma('dart2js:noInline')
+  static ActivityDevice getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ActivityDevice>(
+          ActivityDevice.$_createMessage);
+  static ActivityDevice? _defaultInstance;
+
+  /// PairedDevice.id, or "local" / "local:commands".
+  @$pb.TagNumber(1)
+  $core.String get id => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set id($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearId() => $_clearField(1);
+
+  /// Its name now, or as last known when removed. A device names itself:
+  /// show it on one line, cut, with hidden characters shown as code.
+  @$pb.TagNumber(2)
+  $core.String get name => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set name($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasName() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearName() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  DeviceKind get kind => $_getN(2);
+  @$pb.TagNumber(3)
+  set kind(DeviceKind value) => $_setField(3, value);
+  @$pb.TagNumber(3)
+  $core.bool hasKind() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearKind() => $_clearField(3);
+
+  /// As PairedDevice.platform; empty when unknown.
+  @$pb.TagNumber(4)
+  $core.String get platform => $_getSZ(3);
+  @$pb.TagNumber(4)
+  set platform($core.String value) => $_setString(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasPlatform() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearPlatform() => $_clearField(4);
+
+  /// When it was added (paired); 0 for the computer's own entries.
+  @$pb.TagNumber(5)
+  $fixnum.Int64 get addedMs => $_getI64(4);
+  @$pb.TagNumber(5)
+  set addedMs($fixnum.Int64 value) => $_setInt64(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasAddedMs() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearAddedMs() => $_clearField(5);
+
+  /// When it was removed; 0 while it's still paired.
+  @$pb.TagNumber(6)
+  $fixnum.Int64 get removedMs => $_getI64(5);
+  @$pb.TagNumber(6)
+  set removedMs($fixnum.Int64 value) => $_setInt64(5, value);
+  @$pb.TagNumber(6)
+  $core.bool hasRemovedMs() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearRemovedMs() => $_clearField(6);
+
+  /// The computer Claktory runs on: its app ("local") or its commands
+  /// ("local:commands").
+  @$pb.TagNumber(7)
+  $core.bool get thisComputer => $_getBF(6);
+  @$pb.TagNumber(7)
+  set thisComputer($core.bool value) => $_setBool(6, value);
+  @$pb.TagNumber(7)
+  $core.bool hasThisComputer() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearThisComputer() => $_clearField(7);
+
+  @$pb.TagNumber(8)
+  $core.bool get commands => $_getBF(7);
+  @$pb.TagNumber(8)
+  set commands($core.bool value) => $_setBool(7, value);
+  @$pb.TagNumber(8)
+  $core.bool hasCommands() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearCommands() => $_clearField(8);
+}
+
+class ActivityPlace extends $pb.GeneratedMessage {
+  factory ActivityPlace({
+    ActivityPlaceKind? kind,
+    $core.String? id,
+    $fixnum.Int64? seq,
+  }) {
+    final result = ActivityPlace._();
+    if (kind != null) result.kind = kind;
+    if (id != null) result.id = id;
+    if (seq != null) result.seq = seq;
+    return result;
+  }
+
+  ActivityPlace._();
+
+  factory ActivityPlace.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ActivityPlace()..mergeFromBuffer(data, registry);
+  factory ActivityPlace.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ActivityPlace()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ActivityPlace',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: ActivityPlace.$_createMessage)
+    ..aE<ActivityPlaceKind>(1, _omitFieldNames ? '' : 'kind',
+        enumValues: ActivityPlaceKind.values)
+    ..aOS(2, _omitFieldNames ? '' : 'id')
+    ..a<$fixnum.Int64>(3, _omitFieldNames ? '' : 'seq', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ActivityPlace clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ActivityPlace copyWith(void Function(ActivityPlace) updates) =>
+      super.copyWith((message) => updates(message as ActivityPlace))
+          as ActivityPlace;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ActivityPlace() / ActivityPlace.new instead')
+  static ActivityPlace create() => ActivityPlace._();
+  static $pb.GeneratedMessage $_createMessage() => ActivityPlace._();
+  @$core.override
+  ActivityPlace createEmptyInstance() => ActivityPlace._();
+  @$core.pragma('dart2js:noInline')
+  static ActivityPlace getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ActivityPlace>(
+          ActivityPlace.$_createMessage);
+  static ActivityPlace? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  ActivityPlaceKind get kind => $_getN(0);
+  @$pb.TagNumber(1)
+  set kind(ActivityPlaceKind value) => $_setField(1, value);
+  @$pb.TagNumber(1)
+  $core.bool hasKind() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearKind() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get id => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set id($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasId() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearId() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $fixnum.Int64 get seq => $_getI64(2);
+  @$pb.TagNumber(3)
+  set seq($fixnum.Int64 value) => $_setInt64(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasSeq() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearSeq() => $_clearField(3);
+}
+
+class DeviceActivityRow extends $pb.GeneratedMessage {
+  factory DeviceActivityRow({
+    $fixnum.Int64? id,
+    $fixnum.Int64? atMs,
+    $fixnum.Int64? untilMs,
+    $core.int? count,
+    $core.String? deviceId,
+    $core.String? deviceName,
+    $core.String? text,
+    $core.Iterable<$core.String>? bold,
+    $core.String? about,
+    ActivityOutcome? outcome,
+    ActivityPlace? place,
+    $core.bool? asked,
+    $core.Iterable<$core.String>? via,
+    $core.bool? folded,
+    $fixnum.Int64? sessionId,
+  }) {
+    final result = DeviceActivityRow._();
+    if (id != null) result.id = id;
+    if (atMs != null) result.atMs = atMs;
+    if (untilMs != null) result.untilMs = untilMs;
+    if (count != null) result.count = count;
+    if (deviceId != null) result.deviceId = deviceId;
+    if (deviceName != null) result.deviceName = deviceName;
+    if (text != null) result.text = text;
+    if (bold != null) result.bold.addAll(bold);
+    if (about != null) result.about = about;
+    if (outcome != null) result.outcome = outcome;
+    if (place != null) result.place = place;
+    if (asked != null) result.asked = asked;
+    if (via != null) result.via.addAll(via);
+    if (folded != null) result.folded = folded;
+    if (sessionId != null) result.sessionId = sessionId;
+    return result;
+  }
+
+  DeviceActivityRow._();
+
+  factory DeviceActivityRow.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      DeviceActivityRow()..mergeFromBuffer(data, registry);
+  factory DeviceActivityRow.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      DeviceActivityRow()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'DeviceActivityRow',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: DeviceActivityRow.$_createMessage)
+    ..aInt64(1, _omitFieldNames ? '' : 'id')
+    ..aInt64(2, _omitFieldNames ? '' : 'atMs')
+    ..aInt64(3, _omitFieldNames ? '' : 'untilMs')
+    ..aI(4, _omitFieldNames ? '' : 'count', fieldType: $pb.PbFieldType.OU3)
+    ..aOS(5, _omitFieldNames ? '' : 'deviceId')
+    ..aOS(6, _omitFieldNames ? '' : 'deviceName')
+    ..aOS(7, _omitFieldNames ? '' : 'text')
+    ..pPS(8, _omitFieldNames ? '' : 'bold')
+    ..aOS(9, _omitFieldNames ? '' : 'about')
+    ..aE<ActivityOutcome>(10, _omitFieldNames ? '' : 'outcome',
+        enumValues: ActivityOutcome.values)
+    ..aOM<ActivityPlace>(11, _omitFieldNames ? '' : 'place',
+        subBuilder: ActivityPlace.$_createMessage)
+    ..aOB(12, _omitFieldNames ? '' : 'asked')
+    ..pPS(13, _omitFieldNames ? '' : 'via')
+    ..aOB(14, _omitFieldNames ? '' : 'folded')
+    ..aInt64(15, _omitFieldNames ? '' : 'sessionId')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  DeviceActivityRow clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  DeviceActivityRow copyWith(void Function(DeviceActivityRow) updates) =>
+      super.copyWith((message) => updates(message as DeviceActivityRow))
+          as DeviceActivityRow;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use DeviceActivityRow() / DeviceActivityRow.new instead')
+  static DeviceActivityRow create() => DeviceActivityRow._();
+  static $pb.GeneratedMessage $_createMessage() => DeviceActivityRow._();
+  @$core.override
+  DeviceActivityRow createEmptyInstance() => DeviceActivityRow._();
+  @$core.pragma('dart2js:noInline')
+  static DeviceActivityRow getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<DeviceActivityRow>(
+          DeviceActivityRow.$_createMessage);
+  static DeviceActivityRow? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $fixnum.Int64 get id => $_getI64(0);
+  @$pb.TagNumber(1)
+  set id($fixnum.Int64 value) => $_setInt64(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearId() => $_clearField(1);
+
+  /// When it happened, by the backend's clock; until_ms is the last action
+  /// counted into it (equal to at_ms for one action).
+  @$pb.TagNumber(2)
+  $fixnum.Int64 get atMs => $_getI64(1);
+  @$pb.TagNumber(2)
+  set atMs($fixnum.Int64 value) => $_setInt64(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasAtMs() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearAtMs() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $fixnum.Int64 get untilMs => $_getI64(2);
+  @$pb.TagNumber(3)
+  set untilMs($fixnum.Int64 value) => $_setInt64(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasUntilMs() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearUntilMs() => $_clearField(3);
+
+  /// How many actions it stands for: 1, or repeats of the same thing within
+  /// about 10 minutes ("Sent 3 messages to Bruno"), or, on a `folded` row,
+  /// everything past the device's bound in its session.
+  @$pb.TagNumber(4)
+  $core.int get count => $_getIZ(3);
+  @$pb.TagNumber(4)
+  set count($core.int value) => $_setUnsignedInt32(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasCount() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearCount() => $_clearField(4);
+
+  /// The device (ActivityDevice.id), and its name as it was then.
+  @$pb.TagNumber(5)
+  $core.String get deviceId => $_getSZ(4);
+  @$pb.TagNumber(5)
+  set deviceId($core.String value) => $_setString(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasDeviceId() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearDeviceId() => $_clearField(5);
+
+  @$pb.TagNumber(6)
+  $core.String get deviceName => $_getSZ(5);
+  @$pb.TagNumber(6)
+  set deviceName($core.String value) => $_setString(5, value);
+  @$pb.TagNumber(6)
+  $core.bool hasDeviceName() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearDeviceName() => $_clearField(6);
+
+  /// The line, in plain words with the count in them: "Approved June's
+  /// request", "Changed settings 40 times", "Tried to delete Rivet". On a
+  /// folded row, "…and 3,412 more actions": show its times after it
+  /// ("14:31–14:36").
+  @$pb.TagNumber(7)
+  $core.String get text => $_getSZ(6);
+  @$pb.TagNumber(7)
+  set text($core.String value) => $_setString(6, value);
+  @$pb.TagNumber(7)
+  $core.bool hasText() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearText() => $_clearField(7);
+
+  /// The names in `text` to show bold, each a substring of it, in order.
+  @$pb.TagNumber(8)
+  $pb.PbList<$core.String> get bold => $_getList(7);
+
+  /// What it was about, shown under the line in quotes, as History shows a
+  /// request's title; empty for nothing. An agent wrote it: show it on one
+  /// line, cut, with hidden characters shown as code.
+  @$pb.TagNumber(9)
+  $core.String get about => $_getSZ(8);
+  @$pb.TagNumber(9)
+  set about($core.String value) => $_setString(8, value);
+  @$pb.TagNumber(9)
+  $core.bool hasAbout() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearAbout() => $_clearField(9);
+
+  @$pb.TagNumber(10)
+  ActivityOutcome get outcome => $_getN(9);
+  @$pb.TagNumber(10)
+  set outcome(ActivityOutcome value) => $_setField(10, value);
+  @$pb.TagNumber(10)
+  $core.bool hasOutcome() => $_has(9);
+  @$pb.TagNumber(10)
+  void clearOutcome() => $_clearField(10);
+
+  /// What a tap opens; unset (or kind UNSPECIFIED) when nothing, or when
+  /// it's gone since.
+  @$pb.TagNumber(11)
+  ActivityPlace get place => $_getN(10);
+  @$pb.TagNumber(11)
+  set place(ActivityPlace value) => $_setField(11, value);
+  @$pb.TagNumber(11)
+  $core.bool hasPlace() => $_has(10);
+  @$pb.TagNumber(11)
+  void clearPlace() => $_clearField(11);
+  @$pb.TagNumber(11)
+  ActivityPlace ensurePlace() => $_ensure(10);
+
+  /// An agent did it, in a run this device's message started: show "Asked
+  /// from <device>", and with `via`, ", via <names>" (the agents it passed
+  /// through first, in order).
+  @$pb.TagNumber(12)
+  $core.bool get asked => $_getBF(11);
+  @$pb.TagNumber(12)
+  set asked($core.bool value) => $_setBool(11, value);
+  @$pb.TagNumber(12)
+  $core.bool hasAsked() => $_has(11);
+  @$pb.TagNumber(12)
+  void clearAsked() => $_clearField(12);
+
+  @$pb.TagNumber(13)
+  $pb.PbList<$core.String> get via => $_getList(12);
+
+  /// The running row past the device's bound in a session: what came after
+  /// the first rows, counted, never written one by one, so a flood can't
+  /// push out what came before it.
+  @$pb.TagNumber(14)
+  $core.bool get folded => $_getBF(13);
+  @$pb.TagNumber(14)
+  set folded($core.bool value) => $_setBool(13, value);
+  @$pb.TagNumber(14)
+  $core.bool hasFolded() => $_has(13);
+  @$pb.TagNumber(14)
+  void clearFolded() => $_clearField(14);
+
+  /// Its session (DeviceSession.id); 0 for none (a command, say).
+  @$pb.TagNumber(15)
+  $fixnum.Int64 get sessionId => $_getI64(14);
+  @$pb.TagNumber(15)
+  set sessionId($fixnum.Int64 value) => $_setInt64(14, value);
+  @$pb.TagNumber(15)
+  $core.bool hasSessionId() => $_has(14);
+  @$pb.TagNumber(15)
+  void clearSessionId() => $_clearField(15);
+}
+
+/// A device's connection, from connecting to leaving: "Connected
+/// 14:02–15:20, directly · Opened Bruno, June and Secrets".
+class DeviceSession extends $pb.GeneratedMessage {
+  factory DeviceSession({
+    $fixnum.Int64? id,
+    $core.String? deviceId,
+    $fixnum.Int64? fromMs,
+    $fixnum.Int64? untilMs,
+    SessionPath? path,
+    $core.Iterable<ActivityOpened>? opened,
+  }) {
+    final result = DeviceSession._();
+    if (id != null) result.id = id;
+    if (deviceId != null) result.deviceId = deviceId;
+    if (fromMs != null) result.fromMs = fromMs;
+    if (untilMs != null) result.untilMs = untilMs;
+    if (path != null) result.path = path;
+    if (opened != null) result.opened.addAll(opened);
+    return result;
+  }
+
+  DeviceSession._();
+
+  factory DeviceSession.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      DeviceSession()..mergeFromBuffer(data, registry);
+  factory DeviceSession.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      DeviceSession()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'DeviceSession',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: DeviceSession.$_createMessage)
+    ..aInt64(1, _omitFieldNames ? '' : 'id')
+    ..aOS(2, _omitFieldNames ? '' : 'deviceId')
+    ..aInt64(3, _omitFieldNames ? '' : 'fromMs')
+    ..aInt64(4, _omitFieldNames ? '' : 'untilMs')
+    ..aE<SessionPath>(5, _omitFieldNames ? '' : 'path',
+        enumValues: SessionPath.values)
+    ..pPM<ActivityOpened>(6, _omitFieldNames ? '' : 'opened',
+        subBuilder: ActivityOpened.$_createMessage)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  DeviceSession clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  DeviceSession copyWith(void Function(DeviceSession) updates) =>
+      super.copyWith((message) => updates(message as DeviceSession))
+          as DeviceSession;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use DeviceSession() / DeviceSession.new instead')
+  static DeviceSession create() => DeviceSession._();
+  static $pb.GeneratedMessage $_createMessage() => DeviceSession._();
+  @$core.override
+  DeviceSession createEmptyInstance() => DeviceSession._();
+  @$core.pragma('dart2js:noInline')
+  static DeviceSession getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<DeviceSession>(
+          DeviceSession.$_createMessage);
+  static DeviceSession? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $fixnum.Int64 get id => $_getI64(0);
+  @$pb.TagNumber(1)
+  set id($fixnum.Int64 value) => $_setInt64(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get deviceId => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set deviceId($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasDeviceId() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearDeviceId() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $fixnum.Int64 get fromMs => $_getI64(2);
+  @$pb.TagNumber(3)
+  set fromMs($fixnum.Int64 value) => $_setInt64(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasFromMs() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearFromMs() => $_clearField(3);
+
+  /// 0 while it's still connected.
+  @$pb.TagNumber(4)
+  $fixnum.Int64 get untilMs => $_getI64(3);
+  @$pb.TagNumber(4)
+  set untilMs($fixnum.Int64 value) => $_setInt64(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasUntilMs() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearUntilMs() => $_clearField(4);
+
+  /// How it reached this Claktory.
+  @$pb.TagNumber(5)
+  SessionPath get path => $_getN(4);
+  @$pb.TagNumber(5)
+  set path(SessionPath value) => $_setField(5, value);
+  @$pb.TagNumber(5)
+  $core.bool hasPath() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearPath() => $_clearField(5);
+
+  /// What it opened, each once, in the order first opened: conversations,
+  /// chats, Settings sections, files. By name, never what was in them.
+  @$pb.TagNumber(6)
+  $pb.PbList<ActivityOpened> get opened => $_getList(5);
+}
+
+class ActivityOpened extends $pb.GeneratedMessage {
+  factory ActivityOpened({
+    ActivityPlaceKind? kind,
+    $core.String? id,
+    $core.String? name,
+  }) {
+    final result = ActivityOpened._();
+    if (kind != null) result.kind = kind;
+    if (id != null) result.id = id;
+    if (name != null) result.name = name;
+    return result;
+  }
+
+  ActivityOpened._();
+
+  factory ActivityOpened.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ActivityOpened()..mergeFromBuffer(data, registry);
+  factory ActivityOpened.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ActivityOpened()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ActivityOpened',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: ActivityOpened.$_createMessage)
+    ..aE<ActivityPlaceKind>(1, _omitFieldNames ? '' : 'kind',
+        enumValues: ActivityPlaceKind.values)
+    ..aOS(2, _omitFieldNames ? '' : 'id')
+    ..aOS(3, _omitFieldNames ? '' : 'name')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ActivityOpened clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ActivityOpened copyWith(void Function(ActivityOpened) updates) =>
+      super.copyWith((message) => updates(message as ActivityOpened))
+          as ActivityOpened;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use ActivityOpened() / ActivityOpened.new instead')
+  static ActivityOpened create() => ActivityOpened._();
+  static $pb.GeneratedMessage $_createMessage() => ActivityOpened._();
+  @$core.override
+  ActivityOpened createEmptyInstance() => ActivityOpened._();
+  @$core.pragma('dart2js:noInline')
+  static ActivityOpened getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ActivityOpened>(
+          ActivityOpened.$_createMessage);
+  static ActivityOpened? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  ActivityPlaceKind get kind => $_getN(0);
+  @$pb.TagNumber(1)
+  set kind(ActivityPlaceKind value) => $_setField(1, value);
+  @$pb.TagNumber(1)
+  $core.bool hasKind() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearKind() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get id => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set id($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasId() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearId() => $_clearField(2);
+
+  /// As it was named when opened (an agent's name, a file's name).
+  @$pb.TagNumber(3)
+  $core.String get name => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set name($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasName() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearName() => $_clearField(3);
 }
 
 const $core.bool _omitFieldNames =

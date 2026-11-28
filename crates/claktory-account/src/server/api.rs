@@ -216,10 +216,30 @@ pub(super) fn sign_in_verify(service: &Service, call: &Call) -> Result<Reply, Ap
     } else {
         holds_key(service, call, request.claktory_id.as_deref().unwrap_or_default())?
     };
+    // Path 4b: once the account has a device that may approve, a
+    // further Claktory waits for the person's approval, code or not.
+    if let Some(waiting) = super::authorize::wait_for_approval(service, call, &request, proven)? {
+        return Err(waiting);
+    }
+    let signed_in = finish_sign_in(service, &request, &eph_pub, proven, &call.ip)?;
+    Ok(Reply::json(&signed_in))
+}
+
+/// Signs in the Claktory a request is for, whose code was right (or which
+/// the person approved): registered, its token made and its share sealed
+/// to `eph_pub`. `proven`: it proved it holds the backend key the
+/// Claktory with that id has now.
+pub(super) fn finish_sign_in(
+    service: &Service,
+    request: &db::Request,
+    eph_pub: &[u8; 32],
+    proven: bool,
+    ip: &str,
+) -> Result<SignedIn, ApiError> {
     let token = b64(*random_32());
     let now = service.now();
-    let registered = db::register(&mut service.db(), &request, &token, now, proven, service.config.user_apps.is_some())?;
-    if let (db::Registered::Done { .. }, Some(location)) = (&registered, service.locate(&call.ip)) {
+    let registered = db::register(&mut service.db(), request, &token, now, proven, service.config.user_apps.is_some())?;
+    if let (db::Registered::Done { .. }, Some(location)) = (&registered, service.locate(ip)) {
         let conn = service.db();
         if let Some(claktory) = db::claktory(&conn, request.claktory_id.as_deref().unwrap_or_default())? {
             db::touch(&conn, &claktory, Some(&location), now)?;
@@ -240,26 +260,26 @@ pub(super) fn sign_in_verify(service: &Service, call: &Call) -> Result<Reply, Ap
             ));
         }
     };
-    let claktory_id = request.claktory_id.unwrap_or_default();
+    let claktory_id = request.claktory_id.clone().unwrap_or_default();
     let share = derive_share(&service.secrets.k_share, &claktory_id, epoch);
     let sealed_share =
-        seal_share(&share, &eph_pub, &claktory_id, epoch).ok_or_else(|| ApiError::invalid("eph_pub isn't a key to seal to."))?;
+        seal_share(&share, eph_pub, &claktory_id, epoch).ok_or_else(|| ApiError::invalid("eph_pub isn't a key to seal to."))?;
     tracing::info!("signed in: Claktory {claktory_id} of account {account_id}, epoch {epoch}");
     let recovery_key = db::recovery_key(&service.db(), &account_id)?;
-    Ok(Reply::json(&SignedIn {
+    Ok(SignedIn {
         recovery_key,
         account_id,
-        email: request.email,
+        email: request.email.clone(),
         claktory_id,
         machine_token: token,
         epoch,
         sealed_share,
         service_key: service.service_key(),
-    }))
+    })
 }
 
 /// A sign-in with a backend key its Claktory signed out with (#524).
-fn key_retired() -> ApiError {
+pub(super) fn key_retired() -> ApiError {
     ApiError::new(StatusCode::CONFLICT, "backend_key_retired", "This Claktory signed out with this key. Sign in again with a new one.")
 }
 
@@ -610,14 +630,43 @@ pub(super) fn check_in(service: &Service, call: &Call) -> Result<Reply, ApiError
     }
     let location = service.locate(&call.ip);
     let recorded = db::check_in(&mut service.db(), &claktory, &body, location.as_ref(), now)?;
+    let (removed_device_keys, removed_cursor) = match &body.removed_since {
+        Some(since) => {
+            let (keys, cursor) = removed_since(service, &claktory.account_id, since, now)?;
+            (keys, Some(cursor))
+        }
+        None => (Vec::new(), None),
+    };
+    // One database lock at a time: each held to its statement's end.
+    let recovery_key = db::recovery_key(&service.db(), &claktory.account_id)?;
+    let authorizations_waiting = db::authorizations_waiting(&service.db(), &claktory.account_id, now)?;
+    let moves_waiting = db::moves_approved(&service.db(), &claktory.id, now)?.into_iter().map(|asked| asked.id).take(10).collect();
     Ok(Reply::json(&CheckedIn {
         relays: service.config.relays.clone(),
         server_time: now,
         epoch: claktory.epoch,
         periods_recorded: recorded,
         periods_ignored: ignored,
-        recovery_key: db::recovery_key(&service.db(), &claktory.account_id)?,
+        recovery_key,
+        authorizations_waiting,
+        moves_waiting,
+        removed_device_keys,
+        removed_cursor,
     }))
+}
+
+/// The account's device keys removed since a check-in's `removed_since`
+/// (E11-8), and the cursor to send next time: `<account id>.<unix seconds
+/// now>`. One it can't read, or one for another account (the Claktory
+/// moved), gets them all.
+fn removed_since(service: &Service, account_id: &str, since: &str, now: i64) -> Result<(Vec<String>, String), ApiError> {
+    let after = since
+        .rsplit_once('.')
+        .filter(|(account, _)| *account == account_id)
+        .and_then(|(_, seconds)| seconds.parse::<i64>().ok())
+        .filter(|seconds| *seconds >= 0);
+    let removed = db::removed_device_keys(&service.db(), account_id, after)?;
+    Ok((removed, format!("{account_id}.{now}")))
 }
 
 /// `GET /v1/stats/public`, for anyone: a minute old at most, and any web

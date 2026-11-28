@@ -34,7 +34,6 @@ void main() {
             explorer: ExplorerStore(),
             extensionView: ExtensionViewStore(),
             localBackend: false,
-            localPairing: () async => null,
           )
           ..deviceKey = ((_) => key)
           ..connectTo(target);
@@ -83,7 +82,10 @@ void main() {
         split: ViewSplit(
           axis: ViewAxis.VIEW_AXIS_ROW,
           children: [
-            ViewNode(id: 'chat', leaf: ViewLeaf(kind: 'chat')),
+            ViewNode(
+              id: 'chat',
+              leaf: ViewLeaf(kind: 'chat'),
+            ),
             ViewNode(
               id: 'files',
               leaf: ViewLeaf(kind: 'files', path: paned.id),

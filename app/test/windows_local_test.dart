@@ -61,7 +61,6 @@ Backend _backend(_Server server, WindowsLocal local) => Backend(
   explorer: ExplorerStore(),
   extensionView: ExtensionViewStore(),
   tunnels: _NoTunnels(),
-  localPairing: () async => null,
   localEndpoint: 'ws://127.0.0.1:${server.server.port}',
   windowsLocal: local,
 );
@@ -267,9 +266,9 @@ void main() {
         explorer: ExplorerStore(),
         extensionView: ExtensionViewStore(),
         tunnels: _NoTunnels(),
-        localPairing: () async => null,
       );
-      expect(Uri.parse(backend.localEndpoint).host, '127.0.0.1');
+      // Unset, it's backend.dart's ws://127.0.0.1 one.
+      expect(backend.localEndpoint, isNull);
       // A name is refused before anything is dialled.
       final listener = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
       var accepted = 0;

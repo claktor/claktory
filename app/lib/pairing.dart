@@ -79,11 +79,6 @@ class PairingDigits extends StatelessWidget {
   }
 }
 
-/// The command that allows this device on a Claktory without a screen
-/// (a server), from its terminal: only if it shows the same number.
-String allowCommand(PairingWait wait) =>
-    'factoryd allow ${wait.pending.deviceId} --number ${wait.number}';
-
 /// [command] in a code block, with Copy.
 class AllowCommand extends StatefulWidget {
   const AllowCommand(this.command, {super.key});
@@ -165,11 +160,6 @@ class PairingWaitView extends StatefulWidget {
 }
 
 class _PairingWaitViewState extends State<PairingWaitView> {
-  /// Whether the person asked for the command that allows this device on
-  /// a Claktory without a screen. Folded away at first: most Claktories
-  /// have their app open, and the number is what they compare.
-  var _commandShown = false;
-
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
@@ -192,7 +182,6 @@ class _PairingWaitViewState extends State<PairingWaitView> {
             : target != null
             ? nameInText(target.label)
             : 'your Mac';
-        final muted = TextStyles.body.copyWith(color: palette.textMuted);
         if (refused != null) {
           return ClaktoryProblemPage(
             title: "Couldn't connect to $machine",
@@ -208,8 +197,9 @@ class _PairingWaitViewState extends State<PairingWaitView> {
         return ClaktoryProblemPage(
           title: 'Waiting for $machine',
           body: [
-            // Since #546 the allowing device is never sent the digits:
-            // the person types what this screen shows there (Trish).
+            // The allowing device is never sent the digits: the person
+            // types what this screen shows there, on a device that's
+            // already in, never from a terminal.
             ProblemText(
               'Allow this $thisDeviceKind on $machine, or on another device '
               'that uses $machine, by typing the number this '
@@ -218,34 +208,12 @@ class _PairingWaitViewState extends State<PairingWaitView> {
             if (wait != null && wait.number.isNotEmpty) ...[
               const SizedBox(height: Space.m),
               PairingDigits(wait.number),
-              // A server has no screen: it's allowed from its terminal,
-              // with the number checked there. Folded away until asked
-              // for.
-              if (wait.pending.deviceId.isNotEmpty) ...[
-                const SizedBox(height: Space.m),
-                if (_commandShown) ...[
-                  Text(
-                    'No screen on $machine? Run this in a terminal there:',
-                    style: muted,
-                  ),
-                  AllowCommand(allowCommand(wait)),
-                  // Without a terminal (ssh without -t), a Claktory that
-                  // has devices refuses it (Matt's case, Fugo's ruling
-                  // 35297).
-                  Text(
-                    'Over SSH, connect with ssh -t so it runs in a terminal.',
-                    style: muted,
-                  ),
-                ] else
-                  Align(
-                    alignment: AlignmentDirectional.centerStart,
-                    child: Button(
-                      label: 'No screen on $machine?',
-                      onPressed: () => setState(() => _commandShown = true),
-                    ),
-                  ),
-              ],
             ],
+            const SizedBox(height: Space.m),
+            const ProblemText(
+              'No other device connected yet? Use one that’s signed in to '
+              'your Claktory account.',
+            ),
           ],
           // Taken back there too, so it leaves that Claktory's list at
           // once rather than when it runs out (#603).

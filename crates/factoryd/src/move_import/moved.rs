@@ -92,30 +92,57 @@ pub async fn serve(listener: tokio::net::TcpListener, home: &Home, moved: Moved)
     let _ = crate::remote::write_private(&pid_path(home), format!("{}\n", std::process::id()).as_bytes());
     #[cfg(unix)]
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
+    // This computer's own app comes on its socket.
+    let app = crate::authority::AppSocket::take(home);
     #[cfg(windows)]
     let mut terminate = crate::windows::stop::listen().inspect_err(|error| tracing::warn!(%error, "can't listen for being stopped")).ok();
     loop {
-        let accepted = tokio::select! {
-            accepted = listener.accept() => accepted,
-            () = async { match terminate.as_mut() { Some(terminate) => { terminate.recv().await; } None => std::future::pending().await } } => break,
+        let app_client = async {
+            match &app {
+                Some(app) => app.accept().await,
+                None => std::future::pending().await,
+            }
         };
-        let Ok((stream, peer)) = accepted else { continue };
-        let home = home.clone();
-        tokio::spawn(async move {
-            let Ok(socket) = tokio_tungstenite::accept_async(stream).await else { return };
-            client(socket, peer.ip().is_loopback(), &home).await;
-        });
+        tokio::select! {
+            accepted = listener.accept() => {
+                let Ok((stream, peer)) = accepted else { continue };
+                let home = home.clone();
+                tokio::spawn(async move {
+                    let Ok(socket) = tokio_tungstenite::accept_async(stream).await else { return };
+                    client(socket, Via::Port { loopback: peer.ip().is_loopback() }, &home).await;
+                });
+            }
+            accepted = app_client => {
+                let Some((stream, checked)) = accepted else { continue };
+                let home = home.clone();
+                tokio::spawn(async move {
+                    let Ok(socket) = tokio_tungstenite::accept_async(stream).await else { return };
+                    client(socket, Via::App { own: checked.is_ok() }, &home).await;
+                });
+            }
+            () = async { match terminate.as_mut() { Some(terminate) => { terminate.recv().await; } None => std::future::pending().await } } => break,
+        }
     }
     let _ = std::fs::remove_file(pid_path(home));
 }
 
-type Socket = tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>;
+/// How a client came: on the port (from this computer or not), or on the
+/// app's socket, `own` if it's Claktory's own app.
+enum Via {
+    Port { loopback: bool },
+    App { own: bool },
+}
+
+type Socket<S> = tokio_tungstenite::WebSocketStream<S>;
 
 /// One client: told it moved, then, if it's this computer's own app, its
 /// DeleteMovedCopy taken. Everything else is answered that it moved.
-async fn client(mut socket: Socket, loopback: bool, home: &Home) {
-    // This computer's own app: on the loopback port, with the token of the
-    // local pairing code the move put aside with the rest of the copy.
+async fn client<S>(mut socket: Socket<S>, via: Via, home: &Home)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    // This computer's own app: on its socket, or, in test and QA builds,
+    // with the person's token on the loopback port.
     let mut own = false;
     loop {
         // Its first message has 10 s; only this computer's own app is then
@@ -132,8 +159,19 @@ async fn client(mut socket: Socket, loopback: bool, home: &Home) {
         };
         let mut done = false;
         let body = match message.body {
+            // A program on the app's socket that isn't this computer's own
+            // app is turned away as in normal mode, so it never offers a
+            // Delete it couldn't make.
+            Some(client_message::Body::Hello(_)) if matches!(via, Via::App { own: false }) => Body::Error(v1::Error {
+                code: ErrorCode::Unauthorized.into(),
+                message: crate::authority::not_the_app().to_owned(),
+                ..Default::default()
+            }),
             Some(client_message::Body::Hello(hello)) => {
-                own = loopback && local_token(home).is_some_and(|token| crate::move_wire::same(&hello.token, &token));
+                own = match via {
+                    Via::App { own } => own,
+                    Via::Port { loopback } => loopback && crate::authority::is_person_token(home, &hello.token),
+                };
                 moved_error(home)
             }
             Some(client_message::Body::DeleteMovedCopy(request)) => {
@@ -151,7 +189,10 @@ async fn client(mut socket: Socket, loopback: bool, home: &Home) {
     let _ = socket.close(None).await;
 }
 
-async fn send(socket: &mut Socket, reply_to: u64, body: Body) -> bool {
+async fn send<S>(socket: &mut Socket<S>, reply_to: u64, body: Body) -> bool
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     let answer = ServerMessage { reply_to, body: Some(body), ..Default::default() };
     socket.send(Message::Binary(answer.encode_to_vec().into())).await.is_ok()
 }
@@ -167,12 +208,6 @@ fn moved_error(home: &Home) -> Body {
         deleted_ms: moved.deleted_ms,
     };
     Body::Error(v1::Error { code: ErrorCode::Moved.into(), message: said(&moved), moved: Some(away), ..Default::default() })
-}
-
-/// The token of this computer's own pairing code, as the move fenced it.
-fn local_token(home: &Home) -> Option<String> {
-    let code = std::fs::read_to_string(home.root().join("moved/remote/local-pairing")).ok()?;
-    crate::remote::code_values(&code, "t").next().filter(|token| !token.is_empty())
 }
 
 /// DeleteMovedCopy: the copy left here, deleted for good (as `factoryd

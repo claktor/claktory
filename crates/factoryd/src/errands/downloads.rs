@@ -68,8 +68,12 @@ pub(crate) const BEGINS: Duration = Duration::from_secs(20);
 /// How long a step waits for downloads to finish before telling the agent
 /// they're still going.
 pub(crate) const FINISHES: Duration = Duration::from_secs(10 * 60);
-/// After a click: how long a download it starts may take to begin.
+/// After a click that started loading something: how long a download it
+/// starts may take to begin.
 pub(crate) const AFTER_CLICK: Duration = Duration::from_secs(3);
+/// After a click: how long it has to show it's loading something before
+/// the step ends with no download.
+pub(crate) const CLICK_LOADS: Duration = Duration::from_millis(500);
 
 /// Where a download is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -155,7 +155,8 @@ String? deliveredLine(
     DmDelivered.delivered => newest ? 'Delivered to $to' : null,
     DmDelivered.notYet || DmDelivered.notTaking when !newest => null,
     DmDelivered.notTaking =>
-      "Not delivered yet: $to isn't taking messages from yours right now.",
+      'Not delivered yet. It goes by itself, usually once '
+          '${friend.isEmpty ? 'they next open' : '$name next opens'} Claktory.',
     DmDelivered.notYet =>
       delivered.sinceMs > 0
           ? 'Not delivered yet: $to has been offline since '

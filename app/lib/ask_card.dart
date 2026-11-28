@@ -14,6 +14,7 @@ import 'card_files.dart';
 import 'characters/character.dart';
 import 'command_card.dart';
 import 'controls.dart';
+import 'errands/tab_screens.dart' show showCheckView;
 import 'decision.dart';
 import 'devices.dart' show thisDeviceKind;
 import 'dictation.dart';
@@ -46,6 +47,7 @@ import 'scope.dart';
 import 'selection.dart' show SelectableArea;
 import 'taint_label.dart';
 import 'visible_codes.dart' show proseCodes;
+import 'needs_you_focus.dart' show focusModeOf, setFocusMode;
 
 /// Why an answer waits, under its card.
 const askWaiting = decisionWaiting;
@@ -423,7 +425,10 @@ class _AskPersonCardState extends State<AskPersonCard> with PublishesAnswer {
     // as its line says, so none are kept that its agent never hears
     // (Abbacchio's row 1640).
     final done =
-        !dismiss && (isGenericHandoff(widget.ask) || isPayment(widget.ask));
+        !dismiss &&
+        (isGenericHandoff(widget.ask) ||
+            isPayment(widget.ask) ||
+            isCheck(widget.ask));
     final text = dismiss
         ? noComment(reason, _text.text)
         : confirmed || done
@@ -737,7 +742,10 @@ class _AskPersonCardState extends State<AskPersonCard> with PublishesAnswer {
         onNo: dismiss,
       );
     }
-    if (isAgreement(ask) || isTwoStep(ask) || isGenericHandoff(ask)) {
+    if (isAgreement(ask) ||
+        isTwoStep(ask) ||
+        isGenericHandoff(ask) ||
+        isCheck(ask)) {
       final name =
           _backend?.workspace.agent(widget.agentId)?.name ?? 'the agent';
       final errand = _errandButtons(name)!;
@@ -750,7 +758,11 @@ class _AskPersonCardState extends State<AskPersonCard> with PublishesAnswer {
         busy: busy,
         error: _waiting ? null : _error,
         status: _waiting ? _error : null,
-        onYes: busy ? null : () => _fromDock(() => _answer(dismiss: false)),
+        onYes: busy
+            ? null
+            : isCheck(ask)
+            ? () async => _solve()
+            : () => _fromDock(() => _answer(dismiss: false)),
         onSubmit: busy || !errand.reply ? null : () => _fromDock(_reply),
         onNo: dismiss,
       );
@@ -919,6 +931,11 @@ class _AskPersonCardState extends State<AskPersonCard> with PublishesAnswer {
                         // showed them.
                         : isRecoveryCodes(ask)
                         ? "$name's browser saved recovery codes"
+                        // Not an OK: the person does it themselves.
+                        : isCheck(ask)
+                        ? (ask.withdrawn || !pending
+                              ? '$name needed your help'
+                              : '$name needs your help')
                         : ask.hasHandoff()
                         ? (ask.withdrawn || !pending
                               ? '$name needed your OK'
@@ -980,6 +997,30 @@ class _AskPersonCardState extends State<AskPersonCard> with PublishesAnswer {
                 proseCodes('$name: “${ask.handoff.what}”'),
                 style: type.body.copyWith(color: palette.textMuted),
               ),
+          ] else if (isCheck(ask)) ...[
+            // Claktory's heading, the site as Claktory read it; the agent's
+            // words under it as its own.
+            Text.rich(
+              TextSpan(
+                children: [
+                  const TextSpan(text: 'Solve a check on '),
+                  TextSpan(
+                    text: checkSite(ask),
+                    style: const TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                ],
+              ),
+              style: type.emphasis.copyWith(
+                color: dismissed ? palette.textMuted : palette.text,
+              ),
+            ),
+            if (ask.handoff.what.isNotEmpty) ...[
+              const SizedBox(height: Space.xs),
+              Text(
+                proseCodes('$name: “${ask.handoff.what}”'),
+                style: type.body.copyWith(color: palette.textMuted),
+              ),
+            ],
           ] else if (ask.hasHandoff()) ...[
             // Claktory's heading for an errand's card ("play.google.com
             // asks you to agree"), the site in bold.
@@ -1066,6 +1107,7 @@ class _AskPersonCardState extends State<AskPersonCard> with PublishesAnswer {
               !ask.hasCommand() &&
               !ask.code &&
               !isPayment(ask) &&
+              !isCheck(ask) &&
               !isRecoveryCodes(ask)) ...[
             const SizedBox(height: Space.xs),
             // Past 8 lines, its middle folds (Lucy's Needs you cards).
@@ -1229,6 +1271,25 @@ class _AskPersonCardState extends State<AskPersonCard> with PublishesAnswer {
     ],
   );
 
+  /// Opens the check's tab, live, for the person to solve.
+  void _solve() {
+    final name =
+        AppScope.of(context).workspace.agent(widget.agentId)?.name ??
+        'the agent';
+    showCheckView(
+      context,
+      (
+        agentId: widget.agentId,
+        seq: widget.seq,
+        site: checkSite(widget.ask),
+        what: widget.ask.handoff.what,
+      ),
+      back: widget.from == AskAnsweredFrom.ASK_ANSWERED_FROM_NEEDS_YOU
+          ? 'Back to Needs you'
+          : 'Back to $name',
+    );
+  }
+
   /// An agreement or two-step card's buttons and line (#435 W8b, Lucy's
   /// §3.6): null for every other card.
   ({String yes, String no, String line, String verbing, bool reply})?
@@ -1251,6 +1312,15 @@ class _AskPersonCardState extends State<AskPersonCard> with PublishesAnswer {
             '$name may turn it on, with codes by text message or email '
             'only.',
         verbing: 'approving',
+        reply: false,
+      );
+    }
+    if (isCheck(ask)) {
+      return (
+        yes: 'Solve check',
+        no: "Can't do this",
+        line: '$name waits until you solve it.',
+        verbing: 'solving',
         reply: false,
       );
     }
@@ -1857,6 +1927,8 @@ class _AskPersonCardState extends State<AskPersonCard> with PublishesAnswer {
                       primary: true,
                       onPressed: _busy || (wantsText && !typed)
                           ? null
+                          : isCheck(widget.ask)
+                          ? _solve
                           : () => _answer(dismiss: false),
                     ),
             );
@@ -2561,6 +2633,7 @@ String askSummary(AskPerson ask) => switch (currentStep(ask)) {
   // And its first line, so cards for one machine can be told apart.
   _ when ask.hasCommand() => commandSummary(ask.command),
   _ when isPayment(ask) => 'Asks you to pay on ${paymentSite(ask)}',
+  _ when isCheck(ask) => 'Solve a check on ${checkSite(ask)}',
   final at? => '${ask.title} · Step ${at + 1} of ${ask.steps.length}',
   null => ask.title,
 };
@@ -2594,6 +2667,16 @@ bool isTwoStep(AskPerson ask) =>
 bool isPayment(AskPerson ask) =>
     ask.hasHandoff() &&
     ask.handoff.kind == ErrandHandoffKind.ERRAND_HANDOFF_KIND_PAYMENT;
+
+/// A check that the person is a person, which the agent couldn't solve:
+/// its tab opens live for them to solve it ([showCheckView]).
+bool isCheck(AskPerson ask) =>
+    ask.hasHandoff() &&
+    ask.handoff.kind == ErrandHandoffKind.ERRAND_HANDOFF_KIND_CAPTCHA;
+
+/// A check's site, in Claktory's words.
+String checkSite(AskPerson ask) =>
+    ask.handoff.domain.isNotEmpty ? ask.handoff.domain : handoffHost(ask);
 
 String paymentSite(AskPerson ask) {
   if (ask.handoff.domain.isNotEmpty) return ask.handoff.domain;
@@ -2629,6 +2712,7 @@ bool isGenericHandoff(AskPerson ask) =>
     !isTwoStep(ask) &&
     !isRecoveryCodes(ask) &&
     !isPayment(ask) &&
+    !isCheck(ask) &&
     ask.handoff.kind != ErrandHandoffKind.ERRAND_HANDOFF_KIND_CODE;
 
 /// A code card's site (#435 W8): the host of the page's origin as Chrome
@@ -2678,6 +2762,11 @@ String askOutcome(AskPerson ask, {required String agent, bool short = false}) {
         : short
         ? 'Paid'
         : 'Paid on ${paymentSite(ask)}';
+  }
+  if (isCheck(ask) && !ask.replied && !ask.resolved) {
+    return ask.state == AskPersonState.ASK_PERSON_STATE_DISMISSED
+        ? "Couldn't do this"
+        : 'Solved';
   }
   // Any other errand step (#435 W10): done, or not.
   if (isGenericHandoff(ask) && !ask.replied && !ask.resolved) {
@@ -2779,6 +2868,9 @@ void openReview(
   ({int seq, int talkSeen})? card,
 }) {
   if (card != null) rememberReviewTalk(agentId, card.seq, card.talkSeen);
+  // From focus mode's stage: the conversation, where the file opens.
+  final claktory = AppScope.of(context);
+  if (focusModeOf(claktory).value) setFocusMode(claktory, false);
   // On a phone, a page over what shows (Needs you stays under it, for
   // Back), with the review's bar at its foot.
   if (PhoneRoutes.of(context)?.showFile(agentId, path) ?? false) return;

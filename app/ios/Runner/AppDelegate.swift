@@ -1,6 +1,7 @@
 import AuthenticationServices
 import CoreImage
 import Flutter
+import LocalAuthentication
 import PhotosUI
 import Security
 import StoreKit
@@ -188,6 +189,11 @@ import UniformTypeIdentifiers
         // "testflight", or nil for a dev build, below iOS 16 or when the
         // App Store can't say. The version rows offer its page from it.
         Self.appSource { result($0) }
+      case "authenticateOwner":
+        // Face ID, Touch ID or the passcode before this device signs an
+        // approval (lib/device_approval.dart, #546; Fugo 51234).
+        let reason = (call.arguments as? [String: Any])?["reason"] as? String ?? ""
+        OwnerAuth.evaluate(reason: reason) { result($0) }
       default: result(FlutterMethodNotImplemented)
       }
     }
@@ -966,6 +972,40 @@ extension AppDelegate {
         try manager.setAttributes(
           protection, ofItemAtPath: (path as NSString).appendingPathComponent(item))
       }
+    }
+  }
+}
+
+/// The device's owner, asked before this device signs an approval (a move,
+/// #546): Face ID, Touch ID or the passcode (deviceOwnerAuthentication),
+/// once per approval, with a fresh context each time and no reuse of an
+/// earlier unlock (Fugo 51234). Answers "ok", "cancelled", "failed" or
+/// "unavailable" (no passcode set, so nothing to ask for: never signed).
+enum OwnerAuth {
+  static func evaluate(reason: String, _ done: @escaping (String) -> Void) {
+    guard !reason.isEmpty else { return done("failed") }
+    let context = LAContext()
+    context.touchIDAuthenticationAllowableReuseDuration = 0
+    var error: NSError?
+    guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &error) else {
+      return done("unavailable")
+    }
+    context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason) { ok, error in
+      let answer = Self.answer(ok: ok, error: error)
+      DispatchQueue.main.async { done(answer) }
+    }
+  }
+
+  /// What an evaluation's outcome says to Dart.
+  static func answer(ok: Bool, error: Error?) -> String {
+    if ok { return "ok" }
+    switch (error as? LAError)?.code {
+    case .userCancel?, .appCancel?, .systemCancel?, .userFallback?:
+      return "cancelled"
+    case .passcodeNotSet?:
+      return "unavailable"
+    default:
+      return "failed"
     }
   }
 }

@@ -159,7 +159,7 @@ impl Page {
     }
 
     /// The page's viewport, CSS pixels.
-    async fn view(&self) -> Result<Point, Error> {
+    pub(super) async fn view(&self) -> Result<Point, Error> {
         let metrics = self.call("Page.getLayoutMetrics", json!({})).await?;
         let viewport = &metrics["cssVisualViewport"];
         let size = |key: &str| viewport[key].as_f64().filter(|n| n.is_finite() && (1.0..1e6).contains(n));

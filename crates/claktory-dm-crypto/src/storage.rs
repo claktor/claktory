@@ -180,7 +180,108 @@ pub struct SqlStorage<'a> {
 /// values went.
 pub fn forget_group(db: &Connection, group_id: &openmls::prelude::GroupId) -> Result<usize> {
     let grp = json(group_id)?;
+    db.execute("DELETE FROM mls_values WHERE key = ?1", params![rejoin_key(&grp)]).map_err(sql)?;
     db.execute("DELETE FROM mls_values WHERE grp = ?1", params![grp]).map_err(sql)
+}
+
+/// Where a rejoin's new state waits for the worker ([`stash_rejoin`]): a row
+/// of no group, so [`forget_group`]'s query by group leaves it be.
+fn rejoin_key(grp: &[u8]) -> Vec<u8> {
+    [b"claktory:rejoin:".as_slice(), grp].concat()
+}
+
+/// A rejoin's new state, put aside: the group's rows as they were sealed
+/// (each under its own key, so they open only back there), the epoch it
+/// reached and the digest (SHA-256) of the external commit that reaches it.
+#[derive(Serialize, serde::Deserialize)]
+struct Stashed {
+    epoch: u64,
+    commit: [u8; 32],
+    rows: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
+/// Puts the state a rejoin just made aside until the worker takes its
+/// external `commit` (E11-8), in the same transaction as the rejoin.
+/// OpenMLS 0.9's external commit merges itself and stores the group at the
+/// new epoch before anyone sequenced it; left so, a commit the worker never
+/// takes (refused, lost in a restart) leaves the endpoint on an epoch of its
+/// own, its floor raised past the group's. So the group's rows leave
+/// `mls_values` (the group has no state here meanwhile) and its floor goes
+/// back to `floor_before` ([`epoch_floor`] before the rejoin).
+/// [`take_rejoin`] once the worker took it, [`drop_rejoin`] if not.
+///
+/// The floor's invariant: it rises only with a state this endpoint merged
+/// after the worker took the commit that reaches it. Every member commit
+/// (`Group::add`, `remove`, `update`, `update_certificate`, `remove_dead`)
+/// stays pending, its epoch unwritten, until `merge_pending`; a rejoin's
+/// waits here.
+pub fn stash_rejoin(db: &Connection, group_id: &[u8], floor_before: u64, commit: &[u8]) -> Result<()> {
+    let grp = json(&openmls::prelude::GroupId::from_slice(group_id))?;
+    let rows: Vec<(Vec<u8>, Vec<u8>)> = {
+        let mut statement = db.prepare("SELECT key, value FROM mls_values WHERE grp = ?1").map_err(sql)?;
+        statement.query_map(params![grp], |row| Ok((row.get(0)?, row.get(1)?))).map_err(sql)?.collect::<rusqlite::Result<_>>().map_err(sql)?
+    };
+    if rows.is_empty() {
+        return Err(Error::Storage("no state of the group to put aside".to_owned()));
+    }
+    let epoch = epoch_floor(db, group_id)?;
+    db.execute("DELETE FROM mls_values WHERE grp = ?1", params![grp]).map_err(sql)?;
+    if floor_before == 0 {
+        db.execute("DELETE FROM mls_floor WHERE grp = ?1", params![grp]).map_err(sql)?;
+    } else {
+        db.execute("UPDATE mls_floor SET epoch = ?2 WHERE grp = ?1", params![grp, floor_before as i64]).map_err(sql)?;
+    }
+    let commit = crate::envelope::digest(commit);
+    db.execute(
+        "INSERT OR REPLACE INTO mls_values (key, grp, value) VALUES (?1, NULL, ?2)",
+        params![rejoin_key(&grp), json(&Stashed { epoch, commit, rows })?],
+    )
+    .map_err(sql)?;
+    Ok(())
+}
+
+/// The worker took the rejoin's commit, the one whose digest (SHA-256, `envelope::digest`)
+/// is `digest`: its state comes back, and the floor rises to its epoch. Whether there was
+/// one to take. Matched by the commit's digest, never by its epoch alone: another commit of
+/// the same epoch is another's, which the worker took instead.
+pub fn take_rejoin(db: &Connection, group_id: &[u8], digest: &[u8]) -> Result<bool> {
+    let grp = json(&openmls::prelude::GroupId::from_slice(group_id))?;
+    let Some(stashed) = stashed(db, &grp)? else { return Ok(false) };
+    if stashed.commit.as_slice() != digest {
+        return Err(Error::Refused("another commit than the rejoin's".to_owned()));
+    }
+    db.execute("DELETE FROM mls_values WHERE grp = ?1", params![grp]).map_err(sql)?;
+    for (key, value) in &stashed.rows {
+        db.execute("INSERT OR REPLACE INTO mls_values (key, grp, value) VALUES (?1, ?2, ?3)", params![key, grp, value]).map_err(sql)?;
+    }
+    db.execute(
+        "INSERT INTO mls_floor (grp, epoch) VALUES (?1, ?2) ON CONFLICT (grp) DO UPDATE SET epoch = MAX(epoch, excluded.epoch)",
+        params![grp, stashed.epoch as i64],
+    )
+    .map_err(sql)?;
+    db.execute("DELETE FROM mls_values WHERE key = ?1", params![rejoin_key(&grp)]).map_err(sql)?;
+    Ok(true)
+}
+
+/// The worker didn't take the rejoin's commit: its state goes for good
+/// (the store deletes securely), and the group stays without one, to
+/// rejoin again. Whether there was one.
+pub fn drop_rejoin(db: &Connection, group_id: &[u8]) -> Result<bool> {
+    let grp = json(&openmls::prelude::GroupId::from_slice(group_id))?;
+    Ok(db.execute("DELETE FROM mls_values WHERE key = ?1", params![rejoin_key(&grp)]).map_err(sql)? > 0)
+}
+
+/// The epoch a rejoin of the group waiting for the worker reaches
+/// ([`stash_rejoin`]), if one waits: its commit is of the epoch before.
+pub fn pending_rejoin(db: &Connection, group_id: &[u8]) -> Result<Option<u64>> {
+    let grp = json(&openmls::prelude::GroupId::from_slice(group_id))?;
+    Ok(stashed(db, &grp)?.map(|stashed| stashed.epoch))
+}
+
+fn stashed(db: &Connection, grp: &[u8]) -> Result<Option<Stashed>> {
+    let value: Option<Vec<u8>> =
+        db.query_row("SELECT value FROM mls_values WHERE key = ?1", params![rejoin_key(grp)], |row| row.get(0)).optional().map_err(sql)?;
+    value.map(|value| unjson(&value)).transpose()
 }
 
 /// Deletes the key packages this endpoint made whose lifetime ended by

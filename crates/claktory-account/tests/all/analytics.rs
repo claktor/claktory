@@ -104,8 +104,12 @@ async fn a_check_in_records_its_periods_once() {
         })
         .unwrap();
     assert_eq!((minutes, runs), (180, 8));
-    let ips: i64 = conn.query_row("SELECT count(*) FROM sqlite_master WHERE sql LIKE '%ip TEXT%'", [], |row| row.get(0)).unwrap();
-    assert_eq!(ips, 1, "only share releases keep an IP");
+    // Share releases, and a computer's request to join (shown on the
+    // person's card, gone 10 minutes after it ends) and how one ended,
+    // kept as long as share releases.
+    let mut statement = conn.prepare("SELECT name FROM sqlite_master WHERE sql LIKE '%ip TEXT%' ORDER BY name").unwrap();
+    let ips: Vec<String> = statement.query_map([], |row| row.get(0)).unwrap().map(Result::unwrap).collect();
+    assert_eq!(ips, ["authorization_log", "authorizations", "share_releases"], "only these keep an IP");
 }
 
 #[tokio::test]

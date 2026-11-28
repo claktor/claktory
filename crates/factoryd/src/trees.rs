@@ -227,7 +227,7 @@ fn same_volume(a: &Path, b: &Path) -> bool {
 /// they are there, a few threads at a time. A tracked file that's missing
 /// there (deleted, not committed) or a submodule is left to git.
 fn clone_tracked(repo: &Path, tree: &Path) -> std::io::Result<()> {
-    let listed = Command::new("git").arg("-C").arg(repo).args(["ls-files", "-z"]).output()?;
+    let listed = git_command(repo).args(["ls-files", "-z"]).output()?;
     if !listed.status.success() {
         return Err(std::io::Error::other("git ls-files failed"));
     }
@@ -352,15 +352,36 @@ fn clear_except_git(tree: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// What factoryd's own git runs with (Gyro's D5): none of what an agent
+/// could plant in a repository's config or `.git` that runs a program
+/// (hooks, an fsmonitor, the ext transport, an ssh command, a credential
+/// helper, a signing program). Until agents' commands are contained (D),
+/// which holds the rest.
+pub(crate) const SAFE_GIT: [&str; 12] = [
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "protocol.ext.allow=never",
+    "-c",
+    "core.sshCommand=",
+    "-c",
+    "credential.helper=",
+    "-c",
+    "gpg.program=",
+];
+
+/// git in `dir`, as factoryd runs it (`SAFE_GIT`).
+pub(crate) fn git_command(dir: &Path) -> Command {
+    let mut command = Command::new("git");
+    command.args(SAFE_GIT).arg("-C").arg(dir);
+    command
+}
+
 /// Runs git in `dir`; its output, trimmed, or what it said went wrong.
 fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .output()
-        .map_err(|error| format!("Can't run git: {error}"))?;
+    let output = git_command(dir).args(args).env("GIT_TERMINAL_PROMPT", "0").output().map_err(|error| format!("Can't run git: {error}"))?;
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
     } else {

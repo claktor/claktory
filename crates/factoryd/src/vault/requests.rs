@@ -427,12 +427,11 @@ pub(crate) async fn new_recovery_key(
 ) -> Result<v1::RecoveryKey, RequestError> {
     open(factory, request.proof.as_ref()).await?;
     // The account's key (#239) is made on the person's device and approved
-    // there (public_key, then PublishRecoveryKey), which needs the device's
-    // own account key on its connection: not in this version yet. Covered
-    // by the account's key, a key of this Claktory's own would only be one
-    // more way in, never shown again.
+    // there (`account::recovery::make`, which the connection sends a
+    // public_key to). Covered by the account's key, a key of this
+    // Claktory's own would only be one more way in, never shown again.
     if !request.public_key.is_empty() || factory.vault.account_covered_now() {
-        return Err(VaultError::Invalid("This version of Claktory can't make a new recovery key for your account yet.".to_owned()).into());
+        return Err(VaultError::Invalid("Make your account's new recovery key on your phone or Mac.".to_owned()).into());
     }
     let key = factory.vault.new_recovery_key()?;
     Ok(v1::RecoveryKey { key, unlocked_until_ms: 0 })

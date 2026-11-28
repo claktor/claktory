@@ -1,4 +1,4 @@
-//! Review items (#209 phase 3, `docs/ipad-phase3-contract.md` §5): ink the
+//! Review items (`docs/ipad-phase3-contract.md` §5): ink the
 //! person drew on a file, carried by one of their comments on a thread. The
 //! comment's body is the question; the item names an ink layer at a frozen
 //! revision, the region on it (or an excerpt's text), and the context image

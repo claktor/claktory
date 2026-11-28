@@ -77,7 +77,7 @@ fn hello(token: &str) -> v1::ClientMessage {
 /// This machine's pairing code's endpoint and addresses.
 async fn local_code(home: &factoryd::home::Home) -> (String, Vec<SocketAddr>) {
     for _ in 0..200 {
-        if let Ok(code) = std::fs::read_to_string(home.root().join("remote/local-pairing"))
+        if let Some(code) = factoryd::remote::local_code_for_test(home.root())
             && code.contains("&a=")
         {
             let query = code.trim().strip_prefix("factory://?").expect("a code").to_owned();
@@ -89,7 +89,7 @@ async fn local_code(home: &factoryd::home::Home) -> (String, Vec<SocketAddr>) {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    panic!("no local pairing code");
+    panic!("no loopback endpoint");
 }
 
 struct Claktory {

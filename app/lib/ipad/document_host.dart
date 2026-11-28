@@ -18,6 +18,7 @@
 // new version shown, the view going) and shows what it says under the
 // page.
 import 'dart:async';
+import 'dart:math' as math;
 import 'dart:io' show Directory, File;
 
 import 'package:flutter/foundation.dart';
@@ -34,14 +35,20 @@ import '../ink_preview.dart' show DrawBar;
 import '../layout.dart' show chatOnly, leaves;
 import '../mobile/device.dart' show Idiom, deviceCapabilities;
 import '../mobile/metrics.dart' show TypeScale;
+import '../mobile/navigation.dart' show PhoneRoute, PhoneRoutes;
 import '../needs_you_focus.dart' show FocusSession;
-import '../pane_chrome.dart' show PaneAction, PaneChrome, PaneScaffold;
+import '../pane_chrome.dart'
+    show PaneAction, PaneChrome, PaneScaffold, PhonePane;
 // The bridge's InkComposite (what the native view exported) is this file's,
 // not the protocol's review-item composite.
 import '../protocol/factory/v1/factory.pb.dart' hide InkComposite;
 import '../scope.dart';
 import '../viewers/file_cache.dart' show FileCache, originalVariant;
-import '../viewers/registry.dart' show HeaderTextButton, ViewerProblem;
+import '../viewers/pdf.dart' show PdfViewer;
+import '../viewers/registry.dart'
+    show HeaderTextButton, ViewerProblem, sealedDetail;
+import '../viewers/seal.dart';
+import '../visible_codes.dart' show shownName;
 import 'ink_bridge.dart';
 import 'ink_surface.dart';
 import 'ink_sync.dart';
@@ -577,6 +584,16 @@ class DocumentSurface extends ChangeNotifier {
   String? get shown => _shown;
   String? _shown;
 
+  /// The file's seals and whether it still matches its latest, as the
+  /// last read from its start found them, or a seal made since; null
+  /// before a read, and from a Claktory that doesn't say.
+  FileSeals? get seals => _seals;
+  FileSeals? _seals;
+  set seals(FileSeals? seals) {
+    _seals = seals;
+    notifyListeners();
+  }
+
   /// The PDF changed while it was open and its new version shows, until
   /// the person draws. Which pages' ink is from the earlier version, the
   /// sync says ([InkOutdated]).
@@ -714,6 +731,7 @@ class DocumentSurface extends ChangeNotifier {
       maxBytes: cache == null ? documentChunk : 1,
     );
     if (first.error.isNotEmpty) throw _Problem(first.error);
+    _seals = first.hasSeals() ? first.seals : null;
     final size = first.size.toInt();
     var sha = first.sha256;
     // What the first read brought is part of the file to keep, unless the
@@ -1090,27 +1108,30 @@ class DocumentHost extends StatelessWidget {
     }
     final surface = focus.documents.of(agent, leaf);
     final store = AppScope.of(context).workspace;
-    return _Host(
-      key: surface.hostKey,
-      agentId: agent,
-      surface: surface,
-      onDone: onDone,
-      session: session,
-      // The pane went: if it left the agent's layout (closed, even the last
-      // one, which leaves no panes to lay out and so nothing else to drop
-      // it), its surface goes, and its last save finishes or gives up.
-      // Focus mode's goes with its card.
-      onGone: () {
-        if (session != null) {
-          focus.documents.release(leaf.leaf.path, agentId: agent, leaf: leaf);
-          return;
-        }
-        final now = store.agent(agent);
-        focus.documents.prune(
-          agent,
-          now != null && now.hasLayout() ? now.layout : chatOnly(),
-        );
-      },
+    return _sealedOr(
+      surface,
+      (context) => _Host(
+        key: surface.hostKey,
+        agentId: agent,
+        surface: surface,
+        onDone: onDone,
+        session: session,
+        // The pane went: if it left the agent's layout (closed, even the last
+        // one, which leaves no panes to lay out and so nothing else to drop
+        // it), its surface goes, and its last save finishes or gives up.
+        // Focus mode's goes with its card.
+        onGone: () {
+          if (session != null) {
+            focus.documents.release(leaf.leaf.path, agentId: agent, leaf: leaf);
+            return;
+          }
+          final now = store.agent(agent);
+          focus.documents.prune(
+            agent,
+            now != null && now.hasLayout() ? now.layout : chatOnly(),
+          );
+        },
+      ),
     );
   }
 
@@ -1121,12 +1142,43 @@ class DocumentHost extends StatelessWidget {
       return const ViewerProblem("Claktory can't show this kind of file here.");
     }
     final surface = focus.documents.ofFile(path);
-    return _Host(
-      key: surface.hostKey,
-      surface: surface,
-      onGone: () => focus.documents.release(path),
+    return _sealedOr(
+      surface,
+      (context) => _Host(
+        key: surface.hostKey,
+        surface: surface,
+        onGone: () => focus.documents.release(path),
+      ),
     );
   }
+
+  /// [host], or in its place the version of [surface]'s PDF a seal kept,
+  /// once Open sealed version asks for it, till Show current version.
+  /// The host stays meanwhile, hidden, with its page, its ink and what's
+  /// typed in it.
+  static Widget _sealedOr(
+    DocumentSurface surface,
+    Widget Function(BuildContext context) host,
+  ) => SealedVersionHost(
+    builder: (context, sealed) => Stack(
+      fit: StackFit.expand,
+      children: [
+        Offstage(
+          offstage: sealed != null,
+          child: ExcludeFocus(
+            excluding: sealed != null,
+            child: TickerMode(enabled: sealed == null, child: host(context)),
+          ),
+        ),
+        if (sealed != null)
+          PdfViewer(
+            key: ValueKey('${surface.path}@${sealed.sha256}'),
+            path: surface.path,
+            sealed: sealed,
+          ),
+      ],
+    ),
+  );
 
   @override
   Widget build(BuildContext context) => const SizedBox.shrink();
@@ -1181,9 +1233,11 @@ class _HostState extends State<_Host> {
     if (scope.backend != _backend) {
       _backend?.connected.removeListener(_connectedChanged);
       _backend?.fileChanged.removeListener(_fileChanged);
+      _backend?.fileSeals.removeListener(_sealsChanged);
       _backend = scope.backend
         ..connected.addListener(_connectedChanged)
-        ..fileChanged.addListener(_fileChanged);
+        ..fileChanged.addListener(_fileChanged)
+        ..fileSeals.addListener(_sealsChanged);
     }
     _review?.follow(scope.backend);
     // After the frame: the name republishes what's kept.
@@ -1222,10 +1276,87 @@ class _HostState extends State<_Host> {
     );
   }
 
+  /// A seal was made: this file's, by its canonical path, shows it now.
+  void _sealsChanged() {
+    final made = _backend?.fileSeals.value;
+    final shown = surface.seals;
+    if (made == null || shown == null || made.path != shown.path) return;
+    surface.seals = made;
+  }
+
+  /// The line under the header once the PDF changed since its latest
+  /// seal, with Open sealed version, and Delete kept copy… beside it
+  /// where the header isn't a phone's (whose More has it). An image says
+  /// so in its viewer, outside Draw.
+  Widget? _sealNotice({required bool phone}) {
+    final seals = surface.seals;
+    if (surface.image || surface.problem != null) return null;
+    if (!changedSinceSealed(seals)) return null;
+    final seal = latestSeal(seals)!;
+    return SealNotice(
+      kind: SealNoticeKind.changed,
+      seal: seal,
+      // A version too big to keep was sealed by its hash alone.
+      onAction: seal.kept ? () => _openSealed(seal) : null,
+      onDelete: seal.kept && !phone
+          ? () => unawaited(_deleteKeptCopy(seal))
+          : null,
+      error: _sealError,
+    );
+  }
+
+  /// A phone's More for the seal: Delete kept copy…, while there's one.
+  List<PaneAction> _sealActions() {
+    final seal = latestSeal(surface.seals);
+    if (surface.image || seal == null || !seal.kept) return const [];
+    if (!changedSinceSealed(surface.seals)) return const [];
+    return [
+      PaneAction(deleteKeptCopyLabel, () => unawaited(_deleteKeptCopy(seal))),
+    ];
+  }
+
+  /// Why the kept copy of a sealed version couldn't be deleted.
+  String? _sealError;
+
+  Future<void> _deleteKeptCopy(FileSeal seal) async {
+    if (!await confirmDeleteKeptCopy(context) || !mounted) return;
+    setState(() => _sealError = null);
+    try {
+      await AppScope.of(context).deleteSealedCopy(surface.path, seal.sha256);
+    } on RequestFailure catch (failure) {
+      if (mounted) setState(() => _sealError = failure.message);
+    }
+  }
+
+  /// Shows [seal]'s version: in the pane's place, or on the phone's
+  /// routes as a page over this one, so Back comes back.
+  void _openSealed(FileSeal seal) {
+    final routes = PhoneRoutes.of(context);
+    if (routes == null) {
+      SealedVersions.of(context)?.show(seal);
+      return;
+    }
+    final title =
+        PaneChrome.of(context)?.phone?.title ??
+        shownName(surface.path.split('/').where((p) => p.isNotEmpty).last);
+    unawaited(
+      routes.push<void>(
+        PhoneRoute(
+          id: 'sealed:${surface.path}@${seal.sha256}',
+          builder: (context) => PaneChrome(
+            phone: PhonePane(title: title, onBack: routes.pop),
+            child: PdfViewer(path: surface.path, sealed: seal),
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   void dispose() {
     _backend?.connected.removeListener(_connectedChanged);
     _backend?.fileChanged.removeListener(_fileChanged);
+    _backend?.fileSeals.removeListener(_sealsChanged);
     _review?.dispose();
     surface.hidden();
     final gone = widget.onGone;
@@ -1344,8 +1475,11 @@ class _HostState extends State<_Host> {
             session: widget.session,
           ),
       ];
+      final pages = page == null ? '' : 'Page ${page.page} of ${page.count}';
       return PaneScaffold(
-        details: page == null ? '' : 'Page ${page.page} of ${page.count}',
+        details: !surface.image && stillSealed(surface.seals)
+            ? [sealedDetail, pages].where((part) => part.isNotEmpty).join(' · ')
+            : pages,
         controls: [
           if (onDone != null)
             HeaderTextButton(
@@ -1387,35 +1521,44 @@ class _HostState extends State<_Host> {
               () => surface.openPanel(DocumentPanel.contents),
               active: surface.panel == DocumentPanel.contents,
             ),
+          ..._sealActions(),
         ],
+        notice: _sealNotice(phone: phone),
         body: LayoutBuilder(
-          builder: (context, box) => Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Expanded(child: body),
-              // The page runs on under the home indicator; what's under it
-              // stays above. At the largest text in a short pane it takes
-              // at most [footShare] of it, and scrolls, so the page stays.
-              if (foot.isNotEmpty)
-                ConstrainedBox(
-                  constraints: BoxConstraints(
-                    maxHeight: box.maxHeight * footShare,
-                  ),
-                  child: SingleChildScrollView(
-                    child: Padding(
-                      padding: EdgeInsets.only(
-                        bottom: MediaQuery.paddingOf(context).bottom,
-                      ),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: foot,
+          builder: (context, box) {
+            final height = math.max(box.maxHeight, documentBodyMin);
+            final column = Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Expanded(child: body),
+                // The page runs on under the home indicator; what's under it
+                // stays above. At the largest text in a short pane it takes
+                // at most [footShare] of it, and scrolls, so the page stays.
+                if (foot.isNotEmpty)
+                  ConstrainedBox(
+                    constraints: BoxConstraints(maxHeight: height * footShare),
+                    child: SingleChildScrollView(
+                      child: Padding(
+                        padding: EdgeInsets.only(
+                          bottom: MediaQuery.paddingOf(context).bottom,
+                        ),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: foot,
+                        ),
                       ),
                     ),
                   ),
-                ),
-            ],
-          ),
+              ],
+            );
+            if (box.maxHeight >= documentBodyMin) return column;
+            // A pane shorter still, under its header and a seal's line: the
+            // tools, some of the page and what's under it, scrolled to.
+            return SingleChildScrollView(
+              child: SizedBox(height: height, child: column),
+            );
+          },
         ),
       );
     },
@@ -1425,6 +1568,10 @@ class _HostState extends State<_Host> {
 /// The most of a document's pane what's under the page (the link offer,
 /// the status, the review) takes; past it, that scrolls.
 const footShare = 0.6;
+
+/// The least height the tools, the page and what's under it are laid out
+/// in; a pane with less scrolls.
+const documentBodyMin = 200.0;
 
 /// Opens a link from a document (tests replace it).
 @visibleForTesting

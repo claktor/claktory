@@ -39,6 +39,8 @@ bool FlutterWindow::OnCreate() {
   notifications_channel_ =
       std::make_unique<NotificationsChannel>(messenger, GetHandle(), *presence_);
   sight_channel_ = std::make_unique<SightChannel>(messenger, *presence_);
+  setup_channel_ = std::make_unique<SetupChannel>(messenger, GetHandle());
+  engine_channel_ = std::make_unique<EngineChannel>(messenger, GetHandle());
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
     this->Show();
@@ -65,6 +67,8 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
+  engine_channel_ = nullptr;
+  setup_channel_ = nullptr;
   sight_channel_ = nullptr;
   notifications_channel_ = nullptr;
   presence_ = nullptr;
@@ -89,6 +93,13 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
     if (sight_channel_) sight_channel_->Changed();
   }
 
+  // Closing asks the app first, and the system menu has Stop or Start
+  // Claktory.
+  if (engine_channel_ &&
+      engine_channel_->OnWindowMessage(message, wparam, lparam)) {
+    return 0;
+  }
+
   // Give Flutter, including plugins, an opportunity to handle window messages.
   if (flutter_controller_) {
     std::optional<LRESULT> result =
@@ -110,6 +121,9 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
       if (notifications_channel_) notifications_channel_->ToastsActivated();
       return 0;
     case kPresenceChangedMessage:
+      return 0;
+    case kSetupDoneMessage:
+      if (setup_channel_) setup_channel_->Done(wparam);
       return 0;
   }
 

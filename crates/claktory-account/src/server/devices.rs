@@ -260,6 +260,7 @@ pub(super) fn claktories(service: &Service, call: &Call) -> Result<Reply, ApiErr
             version: claktory.version,
             relays: claktory.relays,
             last_contact_ms: claktory.last_seen.saturating_mul(1000),
+            fingerprint: crate::protocol::key_fingerprint(&claktory.backend_key),
             claktory_id: claktory.id,
         });
     }

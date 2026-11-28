@@ -30,11 +30,26 @@ pub(crate) enum Engine {
     Ecosia,
     Brave,
     Marginalia,
+    /// Brave's official API, with the person's key (`brave_api`): asked
+    /// first when there's one, never ranked with the public engines.
+    BraveApi,
 }
 
 /// Every engine, in the order they're preferred when all are equally
 /// healthy: the largest indexes first, Marginalia's small one last.
 pub(crate) const ORDER: [Engine; 7] = [
+    Engine::DuckDuckGo,
+    Engine::Bing,
+    Engine::Yahoo,
+    Engine::DuckDuckGoLite,
+    Engine::Ecosia,
+    Engine::Brave,
+    Engine::Marginalia,
+];
+
+/// Every engine whose health is kept: the public ones and the API.
+pub(crate) const ALL: [Engine; 8] = [
+    Engine::BraveApi,
     Engine::DuckDuckGo,
     Engine::Bing,
     Engine::Yahoo,
@@ -57,6 +72,8 @@ pub(crate) struct Policy {
     pub(crate) challenge_max_ms: i64,
     /// The longest a rate limit's cooldown grows to, doubling from an hour.
     pub(crate) limited_max_ms: i64,
+    /// Requests in any 31 days, for an API whose free credits are monthly.
+    pub(crate) per_month: Option<usize>,
 }
 
 const HOUR: i64 = 3_600_000;
@@ -89,7 +106,13 @@ impl Engine {
             Engine::Ecosia => "Ecosia",
             Engine::Brave => "Brave",
             Engine::Marginalia => "Marginalia",
+            Engine::BraveApi => "Brave Search API",
         }
+    }
+
+    /// An official API, asked with a key rather than as a browser.
+    pub(crate) fn api(self) -> bool {
+        self == Engine::BraveApi
     }
 
     /// Each engine's own browser, pinned: DuckDuckGo challenges Chrome's
@@ -99,12 +122,25 @@ impl Engine {
         let browser = match self {
             Engine::DuckDuckGo | Engine::DuckDuckGoLite | Engine::Marginalia => Impersonate::FirefoxV151,
             Engine::Bing => Impersonate::EdgeV153,
-            Engine::Yahoo | Engine::Ecosia | Engine::Brave => Impersonate::ChromeV153,
+            Engine::Yahoo | Engine::Ecosia | Engine::Brave | Engine::BraveApi => Impersonate::ChromeV153,
         };
         Profile { browser, os: host_os() }
     }
 
     pub(crate) fn policy(self) -> Policy {
+        // Its free plan takes a request a second; its free credits about
+        // 1,000 a month. A 429 that isn't the month's is the second's: a
+        // minute's rest.
+        if self == Engine::BraveApi {
+            return Policy {
+                gap_ms: 1_100,
+                jitter_ms: 0,
+                per_hour: 200,
+                challenge_max_ms: HOUR,
+                limited_max_ms: 60_000,
+                per_month: Some(1_000),
+            };
+        }
         let (gap_ms, jitter_ms, per_hour, limited_max_ms) = match self {
             Engine::DuckDuckGo | Engine::DuckDuckGoLite => (3_000, 2_000, 60, HOUR),
             Engine::Bing => (4_000, 3_000, 60, 6 * HOUR),
@@ -114,9 +150,9 @@ impl Engine {
             Engine::Ecosia => (5_000, 3_000, 40, 6 * HOUR),
             Engine::Brave => (20_000, 5_000, 15, 6 * HOUR),
             // A one-person project: asked least.
-            Engine::Marginalia => (10_000, 5_000, 20, 6 * HOUR),
+            Engine::Marginalia | Engine::BraveApi => (10_000, 5_000, 20, 6 * HOUR),
         };
-        Policy { gap_ms, jitter_ms, per_hour, challenge_max_ms: 24 * HOUR, limited_max_ms }
+        Policy { gap_ms, jitter_ms, per_hour, challenge_max_ms: 24 * HOUR, limited_max_ms, per_month: None }
     }
 
     /// Whether it can answer `options` as asked: an engine with no date
@@ -146,7 +182,8 @@ impl Engine {
             Engine::Bing => bing::request(client, query, options),
             Engine::Yahoo => yahoo::request(client, query, options),
             Engine::Ecosia => client.get("https://www.ecosia.org/search").query(&[("method", "index"), ("q", query.as_str())]),
-            Engine::Brave => brave::request(client, query, options),
+            // The API is asked by `brave_api`, never as a browser.
+            Engine::Brave | Engine::BraveApi => brave::request(client, query, options),
             Engine::Marginalia => client.get("https://marginalia-search.com/search").query(&[("query", query.as_str())]),
         }
     }
@@ -179,7 +216,7 @@ impl Engine {
             Engine::Bing => bing::hits(&page),
             Engine::Yahoo => yahoo::hits(&page),
             Engine::Ecosia => ecosia::hits(&page),
-            Engine::Brave => brave::hits(&page),
+            Engine::Brave | Engine::BraveApi => brave::hits(&page),
             Engine::Marginalia => marginalia::hits(&page),
         }
         .into_iter()
@@ -192,7 +229,7 @@ impl Engine {
         let challenged = challenge_page(&lower)
             || match self {
                 Engine::DuckDuckGo | Engine::DuckDuckGoLite => duckduckgo::challenged(&lower),
-                Engine::Brave => lower.contains("captcha") || title(&page).trim() == "Brave Search",
+                Engine::Brave | Engine::BraveApi => lower.contains("captcha") || title(&page).trim() == "Brave Search",
                 _ => false,
             };
         if challenged {
@@ -203,7 +240,7 @@ impl Engine {
             Engine::Bing => lower.contains("class=\"b_no\"") || lower.contains("there are no results for"),
             Engine::Yahoo => lower.contains("we did not find results for"),
             Engine::Ecosia => lower.contains("no results found"),
-            Engine::Brave => lower.contains("no results found") || lower.contains("not many great matches"),
+            Engine::Brave | Engine::BraveApi => lower.contains("no results found") || lower.contains("not many great matches"),
             Engine::Marginalia => lower.contains("no search results found") || lower.contains("no results"),
         };
         if none { Outcome::NoResults } else { Outcome::Broken(body.chars().take(300).collect()) }
@@ -241,7 +278,7 @@ fn challenge_page(lower: &str) -> bool {
 }
 
 impl Recency {
-    fn letter(self) -> &'static str {
+    pub(crate) fn letter(self) -> &'static str {
         match self {
             Recency::Day => "d",
             Recency::Week => "w",
@@ -254,7 +291,7 @@ impl Recency {
 /// The query with its domain filters as operators: one domain to keep as
 /// `site:`, and each to leave out as `-site:`. Several to keep are filtered
 /// afterwards (see `search::keep`).
-fn with_domains(query: &str, domains: &[String]) -> String {
+pub(crate) fn with_domains(query: &str, domains: &[String]) -> String {
     let mut query = query.trim().to_owned();
     let keep: Vec<&String> = domains.iter().filter(|domain| !domain.starts_with('-')).collect();
     if let [only] = keep.as_slice() {

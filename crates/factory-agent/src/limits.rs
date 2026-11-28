@@ -496,7 +496,7 @@ pub fn anthropic_reset(base_url: String, auth: RequestAuth, reset: UsageReset) -
         let posted = post_reset(request).await;
         // The count people see comes from a fresh usage read: the claim's
         // own resets_left counts only the grant it used, and another grant
-        // of the same kind may hold more (#230).
+        // of the same kind may hold more.
         let fresh_left = match &posted {
             Posted::Answer(claim, _) => fresh_resets_left(&base_url, read_auth, &reset, claim).await,
             _ => None,
@@ -626,8 +626,8 @@ pub fn parse_anthropic_plan(profile: &Value) -> String {
 /// Whether an Anthropic subscription's organization is the person's own: a
 /// Pro or Max plan (`organization_type`, whatever name the plan shows,
 /// "Ultra" included). A Team's or an Enterprise's is shared with others,
-/// and so is one it doesn't say (#382: images kept as files are reachable
-/// to everyone with access to the organization's workspace).
+/// and so is one it doesn't say (images kept as files are reachable to
+/// everyone with access to the organization's workspace).
 pub fn parse_anthropic_personal(profile: &Value) -> bool {
     matches!(profile["organization"]["organization_type"].as_str(), Some("claude_max" | "claude_pro"))
 }
@@ -967,7 +967,7 @@ pub fn parse_codex(usage: &Value, now: u64) -> Vec<UsageLimit> {
     limits
 }
 
-/// Grok's plan meter (#493): the proxy's `billing?format=credits`, which
+/// Grok's plan meter: the proxy's `billing?format=credits`, which
 /// xAI's command-line tool reads, asked as the tool's sign-in. Its usage
 /// pool for the period (weekly on SuperGrok) and when the period ends.
 pub fn grok(base_url: String, auth: RequestAuth) -> BoxFuture<'static, Result<AccountUsage, Error>> {

@@ -1,10 +1,11 @@
 // The account's recovery key in Settings → Secrets (main's half):
 // covered, made on which Claktory and when; a new key on the account to
 // use here only if the person made it (UseRecoveryKey); Account's Show
-// recovery key… gone once no Claktory keeps the key; and never Make a new
-// recovery key.
+// recovery key… gone once no Claktory keeps the key, and Make a new
+// recovery key… there instead.
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/recovery_key.dart';
+import 'package:factory_app/recovery_key_make.dart' show MakeRecoveryKeyForm;
 import 'package:factory_app/scope.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/foundation.dart';
@@ -70,7 +71,9 @@ void main() {
   });
 
   testWidgets('covered: Secrets says by the account, made where and when; '
-      'Account has no Show recovery key…', (tester) async {
+      'Account has no Show recovery key…, but Make a new recovery key…', (
+    tester,
+  ) async {
     final harness = await _open(tester, _workspace(used: true));
     expect(find.text("Covered by your account's recovery key"), findsOneWidget);
     expect(
@@ -86,7 +89,9 @@ void main() {
     await settle(tester);
     expect(find.text('Manage account at claktory.com'), findsOneWidget);
     expect(find.text('Show recovery key…'), findsNothing);
-    expect(find.textContaining('Make a new recovery key'), findsNothing);
+    await tester.tap(find.text('Make a new recovery key…'));
+    await settle(tester);
+    expect(find.byType(MakeRecoveryKeyForm), findsOneWidget);
   });
 
   testWidgets('covered but still kept here: Show recovery key… stays', (

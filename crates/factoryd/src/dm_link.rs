@@ -8,7 +8,11 @@
 //!   devices gave this home (`DmRoutes`): the gate turns
 //!   any other key away before a frame, and each frame is checked again, so
 //!   a route taken away ends that peer's next frame. A peer sends only in
-//!   the groups its route lists.
+//!   the groups its route lists. Every friend's home routed, a route with
+//!   no groups too, may also leave messages for a conversation not routed
+//!   to it yet: kept pending, answered "pending" (never as taken), and taken
+//!   in once the person's device routes that conversation to that home
+//!   (`home::pend`), which is then knocked on so it sends again.
 //! - **What a frame is.** One request on a stream of its own, JSON after its
 //!   length (4 bytes, big-endian), answered the same way: deliver a message
 //!   (its id is the SHA-256 of its bytes), hint that a group has a new
@@ -145,6 +149,11 @@ pub(crate) trait Mailbox: Send + Sync {
         envelope: &[u8],
         account: &str,
     ) -> Result<Took, Refused>;
+    /// A friend's home delivers for a group not routed to it yet.
+    fn pend(&self, factory: &Factory, endpoint: &str, group: &[u8], envelope: &[u8]) -> Result<(), Refused>;
+    /// What was pending and is routed now, taken in: the endpoints it came
+    /// from.
+    fn release(&self, factory: &Factory) -> Vec<String>;
     /// A peer says the group has a commit at `epoch`: pull from claktory.com.
     fn hint(&self, factory: &Factory, group: &[u8], epoch: u64);
     fn outbox(&self, factory: &Factory, endpoint: &str, limit: usize) -> Vec<Outgoing>;
@@ -267,6 +276,8 @@ pub(crate) fn set_offline_for_test(factory: &Arc<Factory>, offline: bool) {
 struct Worker {
     wake: tokio::sync::Notify,
     connection: Mutex<Option<Connection>>,
+    /// Knock again: what it left pending here was taken in.
+    knock: std::sync::atomic::AtomicBool,
 }
 
 /// The home's mailbox.
@@ -319,6 +330,31 @@ impl Mailbox for HomeMailbox {
     ) -> Result<Took, Refused> {
         let source = home::Source::PassOn { endpoint: endpoint.to_owned(), message_id: message_id.to_owned(), account: account.to_owned() };
         took(home::take(factory, home::Intake { group_id: group.to_vec(), envelope: envelope.to_vec(), source }))
+    }
+
+    fn pend(&self, factory: &Factory, endpoint: &str, group: &[u8], envelope: &[u8]) -> Result<(), Refused> {
+        took(home::pend(factory, endpoint, group, envelope).map(|()| home::Taken::Held)).map(|_| ())
+    }
+
+    fn release(&self, factory: &Factory) -> Vec<String> {
+        let pending = match home::release_pending(factory) {
+            Ok(pending) => pending,
+            Err(refusal) => {
+                tracing::warn!(?refusal, "couldn't read what friends' homes left pending");
+                return Vec::new();
+            }
+        };
+        let mut from = Vec::new();
+        for each in pending {
+            if let Err(refused) = self.take(factory, &each.endpoint, &each.message_id, &each.group_id, &each.envelope) {
+                // Its sender still holds it, and sends it again.
+                tracing::debug!(endpoint = %each.endpoint, ?refused, "a pending message wasn't taken");
+            }
+            if !from.contains(&each.endpoint) {
+                from.push(each.endpoint);
+            }
+        }
+        from
     }
 
     fn hint(&self, factory: &Factory, group: &[u8], epoch: u64) {
@@ -426,7 +462,7 @@ enum Request {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 struct Reply {
-    /// took, held, too_old, not_routed, waiting, full, bad, ok.
+    /// took, held, pending, too_old, not_routed, waiting, full, bad, ok.
     code: String,
     #[serde(skip_serializing_if = "is_zero")]
     epoch: u64,
@@ -462,6 +498,7 @@ pub(crate) fn reload(factory: &Arc<Factory>) {
     let state = &factory.dm_link;
     *lock(&state.admitted) = routes.clone();
     *lock(&state.gate.routed) = routes.keys().cloned().collect();
+    let released = mailbox.release(factory);
     let is_home = home::is_home(factory);
     let moved = state.gate.hellos.swap(is_home, std::sync::atomic::Ordering::Relaxed) != is_home;
     let mut workers = lock(&state.workers);
@@ -483,6 +520,9 @@ pub(crate) fn reload(factory: &Arc<Factory>) {
             if let Some(connection) = lock(&worker.connection).take() {
                 connection.close(0u32.into(), b"no longer routed");
             }
+        } else if released.contains(endpoint) {
+            worker.knock.store(true, std::sync::atomic::Ordering::Relaxed);
+            worker.wake.notify_one();
         } else if moved {
             // The home now, or no longer: a peer that turned away its knock
             // (no hello, no list yet) is knocked again now, with them, not
@@ -554,6 +594,9 @@ async fn work(factory: Weak<Factory>, endpoint: String, worker: Arc<Worker>) {
         let Some(strong) = factory.upgrade() else { return };
         if !strong.dm_link.admits(&endpoint) {
             return;
+        }
+        if worker.knock.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            knocked = false;
         }
         let Some(mailbox) = mailbox(&strong) else { return };
         let queued = mailbox.outbox(&strong, &endpoint, BATCH);
@@ -702,6 +745,9 @@ async fn flush(
                 set_status(factory, endpoint, |status| status.refused = "full".to_owned());
                 return Ok(Flushed::Wait(Duration::from_millis(reply.retry_after_ms.clamp(1000, 3_600_000) as u64)));
             }
+            // Kept by a friend's home until its person's device routes the
+            // conversation, then knocked on: kept here until then.
+            "pending" => kept = true,
             "busy" => return Ok(Flushed::Wait(Duration::from_millis(reply.retry_after_ms.clamp(1000, 3_600_000) as u64))),
             // It doesn't route this group (yet), the friend has no device
             // in it yet, or it refused this one: kept, tried again later,
@@ -1000,14 +1046,17 @@ fn answer(factory: &Arc<Factory>, peer: &str, request: Request, now: i64) -> Rep
             if message_id(&envelope) != id {
                 return Reply::code("bad");
             }
-            if !route.groups.contains(&group) {
-                return Reply::code("not_routed");
-            }
             if let Err(wait) = within_rate(lock(&factory.dm_link.taken).entry(peer.to_owned()).or_default(), now) {
                 return Reply { code: "busy".to_owned(), retry_after_ms: wait.max(1000), ..Reply::default() };
             }
             // A frame from the peer: it's there, so send it what's queued.
             wake(factory, peer);
+            if !route.groups.contains(&group) {
+                return match mailbox.pend(factory, peer, &group, &envelope) {
+                    Ok(()) => Reply::code("pending"),
+                    Err(refused) => reply(Err(refused), peer),
+                };
+            }
             reply(mailbox.take(factory, peer, &id, &group, &envelope), peer)
         }
     }

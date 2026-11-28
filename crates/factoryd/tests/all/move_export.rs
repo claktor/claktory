@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::common::{Client, View, apply_request, create_agent, create_project, send_message, start, temp_dir};
+use crate::common::{Client, View, apply_request, create_agent, create_project, ps_runs, send_message, start, temp_dir};
 use factory_protocol::v1::AgentStatus;
 use factoryd::home::Home;
 use factoryd::move_bundle;
@@ -287,6 +287,10 @@ async fn the_service_is_turned_off_for_the_move_and_on_again_when_it_fails_or_is
 
 #[tokio::test]
 async fn restore_stops_a_backend_in_moved_mode_so_the_claktory_can_have_its_port() {
+    if !ps_runs() {
+        eprintln!("skipped: ps can't start here, and restore checks with it that the process it stops is factoryd");
+        return;
+    }
     let dir = temp_dir();
     let (factory, _addr, _repo) = claktory(&dir).await;
     drop(factory);

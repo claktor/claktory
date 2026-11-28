@@ -295,7 +295,6 @@ void main() {
         explorer: ExplorerStore(),
         extensionView: ExtensionViewStore(),
         tunnels: FakeTunnels(FakeTunnel(0)),
-        localPairing: () async => null,
         localEndpoint: 'ws://127.0.0.1:${far.server.port}',
       );
       unawaited(backend.run());
@@ -583,6 +582,46 @@ void main() {
       await until(() => backend.signInRequired.value != null);
       expect(far.hellos, 0);
       await backend.close();
+      await far.close();
+    });
+
+    test("this Mac's own Claktory is shown one on its socket, signed in; "
+        'none signed out', () async {
+      final far = _Far();
+      await far.start();
+      final api = FakeAccountApi();
+      final backend = Backend(
+        workspace: WorkspaceStore(),
+        transcript: TranscriptStore(),
+        explorer: ExplorerStore(),
+        extensionView: ExtensionViewStore(),
+        tunnels: FakeTunnels(FakeTunnel(0)),
+        localEndpoint: 'ws://127.0.0.1:${far.server.port}',
+      )..account = signedIn(api);
+      unawaited(backend.run());
+      await until(() => backend.connected.value);
+      // Any tunnel key does: its backend takes only the account key.
+      expect(api.asked.single, matches(RegExp(r'^[0-9a-f]{64}$')));
+      expect(far.assertions.single, 'assertion-for-${api.asked.single}');
+      // Signed out meanwhile, it says so in a Hello afresh.
+      await backend.account!.signOut();
+      await until(() => far.hellos == 2 && backend.connected.value);
+      expect(far.assertions.last, isEmpty);
+      await backend.close();
+
+      final signedOut = Backend(
+        workspace: WorkspaceStore(),
+        transcript: TranscriptStore(),
+        explorer: ExplorerStore(),
+        extensionView: ExtensionViewStore(),
+        tunnels: FakeTunnels(FakeTunnel(0)),
+        localEndpoint: 'ws://127.0.0.1:${far.server.port}',
+      );
+      unawaited(signedOut.run());
+      await until(() => signedOut.connected.value);
+      expect(far.hellos, 3);
+      expect(far.assertions.last, isEmpty);
+      await signedOut.close();
       await far.close();
     });
 

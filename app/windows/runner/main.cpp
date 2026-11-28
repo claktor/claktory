@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 
+#include "app_paths.h"
 #include "flavor.h"
 #include "flutter_window.h"
 #include "toast_activator.h"
@@ -43,26 +44,8 @@ bool AnotherIsRunning(HANDLE* mutex) {
 // version's own exe, which a later update deletes. Anywhere else (a build,
 // an unzipped bundle), the window is left as Windows makes it.
 void PinTheLauncher(HWND window) {
-  wchar_t module[MAX_PATH * 4];
-  DWORD length = ::GetModuleFileNameW(nullptr, module,
-                                      static_cast<DWORD>(std::size(module)));
-  if (length == 0 || length >= std::size(module)) return;
-  std::wstring path(module, length);
-  // ...\Claktory\app\<version>\Claktory.exe: up three for the launcher.
-  auto up = [](std::wstring& folder) {
-    size_t slash = folder.find_last_of(L'\\');
-    if (slash == std::wstring::npos) return std::wstring();
-    std::wstring name = folder.substr(slash + 1);
-    folder.resize(slash);
-    return name;
-  };
-  up(path);
-  up(path);
-  if (_wcsicmp(up(path).c_str(), L"app") != 0) return;
-  std::wstring launcher = path + L"\\Claktory.exe";
-  DWORD attributes = ::GetFileAttributesW(launcher.c_str());
-  if (attributes == INVALID_FILE_ATTRIBUTES ||
-      (attributes & FILE_ATTRIBUTE_DIRECTORY)) {
+  std::wstring launcher = InstalledLauncher();
+  if (launcher.empty()) {
     Log("no launcher beside app\\: the taskbar pins this exe");
     return;
   }

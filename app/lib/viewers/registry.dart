@@ -9,7 +9,9 @@ import 'package:flutter/widgets.dart';
 import '../annotations.dart';
 import '../backend.dart';
 import '../controls.dart';
+import '../diagnostics_record.dart';
 import '../identity.dart';
+import '../mobile/navigation.dart' show PhoneRoute, PhoneRoutes;
 import '../pane_chrome.dart';
 import '../protocol/factory/v1/factory.pb.dart';
 import '../resources.dart' show formatBytes;
@@ -21,6 +23,7 @@ import 'loading_progress.dart';
 import 'pdf.dart';
 import 'preview_badge.dart';
 import 'previews.dart';
+import 'seal.dart';
 import '../paced.dart' show FilePreviews, lostWhileReading;
 import 'text.dart';
 import 'video.dart';
@@ -48,7 +51,9 @@ class Viewer {
   /// Its 14px glyph, in the pane's header and the phone's list.
   final Widget Function(Color color) icon;
 
-  final Widget Function(BuildContext context, ViewLeaf leaf) build;
+  /// The viewer for [leaf]'s file, or for its version kept by a seal.
+  final Widget Function(BuildContext context, ViewLeaf leaf, FileSeal? sealed)
+  build;
 }
 
 final _viewers = <Viewer>[
@@ -56,16 +61,16 @@ final _viewers = <Viewer>[
     kind: 'text',
     label: 'Text',
     icon: (color) => FileGlyph(color: color),
-    build: (context, leaf) =>
-        TextViewer(key: ValueKey(leaf.path), path: leaf.path),
+    build: (context, leaf, sealed) =>
+        TextViewer(key: _key(leaf, sealed), path: leaf.path, sealed: sealed),
   ),
   Viewer(
     kind: 'image',
     label: 'Image',
     icon: (color) =>
         ExtensionGlyph(icon: 'image', name: 'Image', color: color, size: 14),
-    build: (context, leaf) =>
-        ImageViewer(key: ValueKey(leaf.path), path: leaf.path),
+    build: (context, leaf, sealed) =>
+        ImageViewer(key: _key(leaf, sealed), path: leaf.path, sealed: sealed),
   ),
   // A PDF: an iPad shows one in its document host, where the person draws
   // on it (ipad/document_host.dart, ahead of this registry); a Mac and an
@@ -75,10 +80,10 @@ final _viewers = <Viewer>[
     kind: 'pdf',
     label: 'PDF',
     icon: (color) => FileGlyph(color: color),
-    build: (context, leaf) =>
+    build: (context, leaf, sealed) =>
         defaultTargetPlatform == TargetPlatform.macOS ||
             defaultTargetPlatform == TargetPlatform.iOS
-        ? PdfViewer(key: ValueKey(leaf.path), path: leaf.path)
+        ? PdfViewer(key: _key(leaf, sealed), path: leaf.path, sealed: sealed)
         // In a pane all the same: on a phone its header, with Back, and
         // Share… to save it or open it in another app.
         : _problemPane(
@@ -92,10 +97,15 @@ final _viewers = <Viewer>[
     label: 'Video',
     icon: (color) =>
         ExtensionGlyph(icon: 'film', name: 'Video', color: color, size: 14),
-    build: (context, leaf) =>
-        VideoViewer(key: ValueKey(leaf.path), path: leaf.path),
+    build: (context, leaf, sealed) =>
+        VideoViewer(key: _key(leaf, sealed), path: leaf.path, sealed: sealed),
   ),
 ];
+
+/// A viewer's key: its file, and the sealed version it shows, so showing
+/// one starts a viewer of its own.
+Key _key(ViewLeaf leaf, FileSeal? sealed) =>
+    ValueKey(sealed == null ? leaf.path : '${leaf.path}@${sealed.sha256}');
 
 /// The viewer for [kind]; null for "chat" and kinds this app doesn't know.
 Viewer? viewerFor(String kind) {
@@ -106,13 +116,23 @@ Viewer? viewerFor(String kind) {
 }
 
 /// [leaf]'s viewer, or a line saying this app can't show its kind yet.
-Widget viewerBody(BuildContext context, ViewLeaf leaf) =>
-    viewerFor(leaf.kind)?.build(context, leaf) ??
-    _problemPane(
+Widget viewerBody(BuildContext context, ViewLeaf leaf) {
+  final viewer = viewerFor(leaf.kind);
+  if (viewer == null) {
+    return _problemPane(
       context,
       leaf.path,
       "Claktory can't show this kind of file here yet.",
     );
+  }
+  // A sealed version of the file shows in the pane's place, until Show
+  // current version.
+  return SealedVersionHost(
+    builder: (context, sealed) => sealed == null
+        ? viewer.build(context, leaf, null)
+        : viewer.build(context, leaf, sealed),
+  );
+}
 
 /// A pane for a file this app can't show: why, in a pane with its header
 /// (Back on a phone), and Share… so it can still go to an app that can
@@ -184,10 +204,34 @@ mixin FileLoading<T extends StatefulWidget> on State<T> {
 
   FileContent? file;
 
-  /// What Share… sends: the file, once a read of it worked.
+  /// The seal whose kept version this viewer shows, rather than the file
+  /// as it is: read as it was sealed, never changing, without comments;
+  /// null for the file.
+  FileSeal? get sealed => null;
+
+  /// [sealed]'s SHA-256, for a read of that version; empty for the file.
+  String get sealedSha256 => sealed?.sha256 ?? '';
+
+  /// A viewer of [sealed]'s version of this file, for a phone's page.
+  @protected
+  Widget sealedViewer(FileSeal sealed);
+
+  /// The file's seals and whether it still matches its latest, as the last
+  /// read found them, or a seal made since; null before a read, and from
+  /// a Claktory that doesn't say.
+  FileSeals? seals;
+
+  /// The copies of files this device keeps for [backend]'s Claktory, where
+  /// this viewer's file may be kept: none for a sealed version, which is
+  /// never the file's.
+  FileCache? keptCopies(Backend backend) =>
+      sealed == null ? FileCache.of(backend) : null;
+
+  /// What Share… sends: the file, once a read of it worked; nothing for a
+  /// sealed version, which isn't the file.
   String? get sharePath {
     final file = this.file;
-    return file != null && file.error.isEmpty ? path : null;
+    return file != null && file.error.isEmpty && sealed == null ? path : null;
   }
 
   /// The request failed outright (rather than the file being unreadable).
@@ -218,6 +262,24 @@ mixin FileLoading<T extends StatefulWidget> on State<T> {
   String? _updatedBy;
   Timer? _updatedFor;
 
+  /// Nothing came within [loadingShowsAfter]: the body says it's loading.
+  var _slow = false;
+  Timer? _slowFor;
+
+  /// Since this viewer asked for its file, till it first shows
+  /// (diagnostics).
+  final _opening = Stopwatch()..start();
+
+  /// Whether the file has shown in this viewer, and diagnostics said so.
+  var _shownNoted = false;
+
+  /// How long the first read waited for the connection, when it did.
+  Duration? _waited;
+
+  /// Whether another file's bulk read was on its way when this one's read
+  /// was asked for.
+  bool? _bulkWhenAsked;
+
   @override
   void initState() {
     super.initState();
@@ -235,13 +297,18 @@ mixin FileLoading<T extends StatefulWidget> on State<T> {
     final backend = AppScope.of(context);
     if (backend != _backend) {
       _backend?.fileChanged.removeListener(_fileChanged);
+      _backend?.fileSeals.removeListener(_sealsChanged);
       _backend?.connected.removeListener(_connectedChanged);
       comments?.dispose();
       _backend = backend
         ..fileChanged.addListener(_fileChanged)
+        ..fileSeals.addListener(_sealsChanged)
         ..connected.addListener(_connectedChanged);
       _wasConnected = backend.connected.value;
-      comments = CommentsController(backend: backend, path: path);
+      // Comments are on the file as it is, never on a sealed version.
+      comments = sealed == null
+          ? CommentsController(backend: backend, path: path)
+          : null;
     }
   }
 
@@ -249,10 +316,12 @@ mixin FileLoading<T extends StatefulWidget> on State<T> {
   void dispose() {
     _reloads?.removeListener(reload);
     _backend?.fileChanged.removeListener(_fileChanged);
+    _backend?.fileSeals.removeListener(_sealsChanged);
     _backend?.connected.removeListener(_connectedChanged);
     comments?.dispose();
     _updatedFor?.cancel();
     _giveUp?.cancel();
+    _slowFor?.cancel();
     super.dispose();
   }
 
@@ -262,6 +331,7 @@ mixin FileLoading<T extends StatefulWidget> on State<T> {
     final connecting = now && !_wasConnected;
     final dropped = !now && _wasConnected;
     _wasConnected = now;
+    if (connecting && !_shownNoted) _waited = _opening.elapsed;
     // Dropped: a read lost with it waits for it, as a read in pieces does,
     // up to [lostReadWaits], then says it failed. A read made of one piece
     // (a video's next part) fails with its request, so this is what holds
@@ -300,7 +370,7 @@ mixin FileLoading<T extends StatefulWidget> on State<T> {
   /// The file changed on the machine: read it again, and say who did it.
   void _fileChanged() {
     final changed = _backend?.fileChanged.value;
-    if (changed == null || changed.path != path) return;
+    if (changed == null || changed.path != path || sealed != null) return;
     if (changed.sha256.isNotEmpty && changed.sha256 == file?.sha256) return;
     unawaited(reload());
     if (changed.byAgentId.isEmpty) return;
@@ -311,20 +381,116 @@ mixin FileLoading<T extends StatefulWidget> on State<T> {
     });
   }
 
+  /// A seal was made: this file's, by its canonical path, shows it now.
+  void _sealsChanged() {
+    final made = _backend?.fileSeals.value;
+    final shown = seals;
+    if (made == null || shown == null || sealed != null) return;
+    if (made.path != shown.path) return;
+    setState(() => seals = made);
+  }
+
   /// The header's details: [usual], or for a few seconds after an agent
-  /// changed the file, who did.
+  /// changed the file, who did. A sealed version says so first, and a
+  /// file still as it was sealed says "Sealed".
   String details(String usual) {
+    String and(String first, String then) =>
+        then.isEmpty ? first : '$first · $then';
+    if (sealed != null) return and(sealedVersionDetail, usual);
     final by = _updatedBy;
     if (by != null) {
       for (final agent in _backend?.workspace.workspace.agents ?? <Agent>[]) {
         if (agent.id == by) return '${agent.name} just updated this file';
       }
     }
+    final shown = stillSealed(seals) ? and(sealedDetail, usual) : usual;
     // The copy kept on this device, offline.
-    if (_unchecked) {
-      return usual.isEmpty ? mayBeOutOfDate : '$mayBeOutOfDate · $usual';
+    if (_unchecked) return and(mayBeOutOfDate, shown);
+    return shown;
+  }
+
+  /// The line under the header about the file's seal: what changed since
+  /// it was sealed, with Open sealed version; for a sealed version, whose
+  /// it is. Null when there's nothing to say.
+  Widget? sealNotice() {
+    if (sealed case final seal?) {
+      final versions = SealedVersions.of(context);
+      return SealNotice(
+        kind: SealNoticeKind.version,
+        seal: seal,
+        // In the pane's place: back to the file. A page has Back.
+        onAction: versions != null && versions.shown == seal
+            ? () => versions.show(null)
+            : null,
+      );
     }
-    return usual;
+    final file = this.file;
+    if (file == null || file.error.isNotEmpty) return null;
+    if (!changedSinceSealed(seals)) return null;
+    final seal = latestSeal(seals)!;
+    return SealNotice(
+      kind: SealNoticeKind.changed,
+      seal: seal,
+      // A version too big to keep was sealed by its hash alone.
+      onAction: seal.kept ? () => openSealed(seal) : null,
+      // On a phone it's in More, apart from the line's one action, as
+      // iOS keeps what destroys out of the way.
+      onDelete: seal.kept && PaneChrome.of(context)?.phone == null
+          ? () => unawaited(_deleteKeptCopy(seal))
+          : null,
+      error: _sealError,
+    );
+  }
+
+  /// A phone's More for the seal: Delete kept copy…, while there's one to
+  /// delete.
+  List<PaneAction> sealActions() {
+    final seal = latestSeal(seals);
+    if (sealed != null || seal == null || !seal.kept) return const [];
+    if (!changedSinceSealed(seals)) return const [];
+    return [
+      PaneAction(deleteKeptCopyLabel, () => unawaited(_deleteKeptCopy(seal))),
+    ];
+  }
+
+  /// Why the kept copy of a sealed version couldn't be deleted.
+  String? _sealError;
+
+  /// Deletes the copy kept of [seal]'s version, once the person says so;
+  /// the file's seals come again without it.
+  Future<void> _deleteKeptCopy(FileSeal seal) async {
+    if (!await confirmDeleteKeptCopy(context) || !mounted) return;
+    setState(() => _sealError = null);
+    try {
+      await AppScope.of(context).deleteSealedCopy(path, seal.sha256);
+    } on RequestFailure catch (failure) {
+      if (mounted) setState(() => _sealError = failure.message);
+    }
+  }
+
+  /// Shows [seal]'s version of the file: on a phone as a page over this
+  /// one, so Back comes back; elsewhere in this pane's place.
+  void openSealed(FileSeal seal) {
+    final routes = PhoneRoutes.of(context);
+    if (routes == null) {
+      SealedVersions.of(context)?.show(seal);
+      return;
+    }
+    final title =
+        PaneChrome.of(context)?.phone?.title ??
+        shownName(path.split('/').where((part) => part.isNotEmpty).last);
+    unawaited(
+      routes.push<void>(
+        PhoneRoute(
+          id: 'sealed:$path@${seal.sha256}',
+          edgeToEdge: deviceIdiom(context) != Idiom.pad,
+          builder: (context) => PaneChrome(
+            phone: PhonePane(title: title, onBack: routes.pop),
+            child: sealedViewer(seal),
+          ),
+        ),
+      ),
+    );
   }
 
   /// What shows is the copy this device kept, and whether the file
@@ -337,15 +503,21 @@ mixin FileLoading<T extends StatefulWidget> on State<T> {
   @protected
   set showingUnchecked(bool unchecked) => _unchecked = unchecked;
 
-  /// The copy of [variants] of the file this device keeps, if any and
-  /// still the file's version, or offline: shown, and true; false
-  /// when it has to be read.
-  Future<bool> _showKept(Backend backend, List<String> variants) async {
-    final cache = FileCache.of(backend);
+  /// The copy of [variants] of the file this device keeps, if any: shown
+  /// at once, then checked against the file. True when it's still the
+  /// file's version, or that can't be asked (offline); false when there's
+  /// none, or the file changed since, for it to be read (the copy stays
+  /// shown till then).
+  Future<bool> _showKept(
+    Backend backend,
+    List<String> variants, {
+    Future<FileContent> Function(String unless)? fetch,
+  }) async {
+    final cache = keptCopies(backend);
     if (cache == null) return false;
-    final found = await cache.lookup(backend, path, variants);
+    final found = await cache.firstOf(path, variants);
     if (!mounted || found == null) return false;
-    final kept = found.kept.content;
+    final kept = found.content;
     final shown = file;
     final FileContent read;
     if (shown != null &&
@@ -358,27 +530,124 @@ mixin FileLoading<T extends StatefulWidget> on State<T> {
       read = shown;
     } else {
       try {
-        read = await found.kept.read();
+        read = await found.read();
       } on FileSystemException {
         await cache.drop(path);
         return false;
       }
       if (!mounted) return false;
     }
+    // Before asking whether it's still the file: on a far link that's a
+    // round trip, most of a second, and the copy is almost always it.
     setState(() {
       file = read;
       failure = null;
       _progress = null;
-      _unchecked = !found.current;
+      if (read.hasSeals()) seals = read.seals;
       if (!read.isPreview) originalLoad = const OriginalNotLoaded();
     });
     if (!identical(read, shown)) loaded(read);
+    noteShown(read, from: ViewedFrom.kept);
+    if (fetch != null) return _askKept(backend, cache, found, read, fetch);
+    final bulk = backend.bulkReading;
+    final checking = Stopwatch()..start();
+    final checked = await cache.check(backend, found);
+    backend.noteViewer(ViewerKind.checked, {
+      ViewerKey.file: viewedFile(read.mime),
+      ViewerKey.kept: switch (checked?.current) {
+        null => KeptCheck.changed,
+        true => KeptCheck.current,
+        false => KeptCheck.unasked,
+      },
+      ViewerKey.bulk: bulk,
+    }, checking.elapsed);
+    if (!mounted) return true;
+    if (checked == null) return false;
+    setState(() {
+      _unchecked = !checked.current;
+      if (checked.seals case final now?) seals = now;
+    });
     return true;
+  }
+
+  /// Asks for the file the way the viewer reads it, unless it's still
+  /// [found]'s version ([shown] from it): one round trip either way, the
+  /// new version coming with the answer when it changed.
+  Future<bool> _askKept(
+    Backend backend,
+    FileCache cache,
+    KeptFile found,
+    FileContent shown,
+    Future<FileContent> Function(String unless) fetch,
+  ) async {
+    void noteChecked(KeptCheck kept, bool bulk, Duration took) =>
+        backend.noteViewer(ViewerKind.checked, {
+          ViewerKey.file: viewedFile(shown.mime),
+          ViewerKey.kept: kept,
+          ViewerKey.bulk: bulk,
+        }, took);
+    final bulk = backend.bulkReading;
+    final checking = Stopwatch()..start();
+    FileContent? answer;
+    if (backend.connected.value) {
+      try {
+        answer = await fetch(found.sha256);
+      } on RequestFailure {
+        answer = null;
+      }
+    }
+    if (answer == null) {
+      noteChecked(KeptCheck.unasked, bulk, checking.elapsed);
+      await cache.touch(found);
+      if (mounted) setState(() => _unchecked = true);
+      return true;
+    }
+    // A Claktory from before says so by its hash.
+    final current =
+        answer.unchanged ||
+        answer.error.isEmpty && answer.sha256 == found.sha256;
+    noteChecked(
+      current ? KeptCheck.current : KeptCheck.changed,
+      bulk,
+      checking.elapsed,
+    );
+    if (current) {
+      await cache.touch(found);
+      if (!mounted) return true;
+      setState(() {
+        _unchecked = false;
+        if (answer!.hasSeals()) seals = answer.seals;
+      });
+      return true;
+    }
+    // Gone: its copies go. Changed: the new version takes the copy's place.
+    if (answer.error.isNotEmpty) await cache.drop(path);
+    if (!mounted) {
+      _keep(backend, answer);
+      return true;
+    }
+    _showRead(backend, answer);
+    return true;
+  }
+
+  /// [read] came over the connection: shown, and kept for next time.
+  void _showRead(Backend backend, FileContent read) {
+    setState(() {
+      file = read;
+      failure = null;
+      _progress = null;
+      _unchecked = false;
+      seals = read.hasSeals() ? read.seals : null;
+      if (!read.isPreview) originalLoad = const OriginalNotLoaded();
+    });
+    loaded(read);
+    noteShown(read, from: ViewedFrom.read, bytes: read.data.length);
+    _keep(backend, read);
   }
 
   /// Keeps [read] on this device, for next time.
   void _keep(Backend backend, FileContent read) {
-    final cache = FileCache.of(backend);
+    final cache = keptCopies(backend);
     if (cache == null || read.truncated || read.error.isNotEmpty) return;
     if (!keeps(read)) return;
     final variant = read.isPreview
@@ -429,15 +698,13 @@ mixin FileLoading<T extends StatefulWidget> on State<T> {
   }
 
   Future<void> reload() async {
+    if (file == null && !_slow) {
+      _slowFor ??= Timer(loadingShowsAfter, () {
+        if (mounted && file == null) setState(() => _slow = true);
+      });
+    }
     try {
       final backend = AppScope.of(context);
-      // Kept on this device and still the file: the original if
-      // it's here, else the preview made for this screen.
-      final kept = await _showKept(backend, [
-        originalVariant,
-        if (previews && !wantOriginal) previewVariant(previewScreen()),
-      ]);
-      if (kept || !mounted) return;
       void progress(int through, int size) {
         if (!mounted) return;
         setState(() => _progress = (through: through, size: size));
@@ -448,44 +715,58 @@ mixin FileLoading<T extends StatefulWidget> on State<T> {
       // original would be slow to come (previews.dart).
       // An image too big to open whole comes as a preview too, rather
       // than its first 20 MB to no use.
-      final ask = previews && !wantOriginal;
+      // A sealed version comes whole, never as a preview.
+      final ask = previews && !wantOriginal && sealed == null;
       bool tooBig(int size) => size > wholeImageLimit;
       final slow = stopWhenSlow(backend);
-      var read = await backend.readFile(
-        path,
-        preview: ask && touchDevice ? previewScreen() : null,
-        carryOn: !ask
-            ? null
-            : touchDevice
-            ? (through, size) => !tooBig(size)
-            : (through, size) => !tooBig(size) && slow(through, size),
-        onProgress: progress,
-      );
-      if (!mounted) return;
-      final size = read.size.toInt();
-      if (ask &&
-          !touchDevice &&
-          read.error.isEmpty &&
-          read.truncated &&
-          (tooBig(size) ||
-              size >= previewFrom &&
-                  slowFor(backend, size - read.data.length))) {
-        read = await backend.readFile(
+      // With [unless], the version kept here: nothing comes while it's
+      // still that one.
+      Future<FileContent> fetch({String unless = ''}) async {
+        var read = await backend.readFile(
           path,
-          preview: previewScreen(),
+          sealedSha256: sealedSha256,
+          unlessSha256: unless,
+          preview: ask && touchDevice ? previewScreen() : null,
+          carryOn: !ask
+              ? null
+              : touchDevice
+              ? (through, size) => !tooBig(size)
+              : (through, size) => !tooBig(size) && slow(through, size),
+          // A Claktory from before reads it as asked: its first piece's
+          // hash says whether it's still the kept version.
+          onFirst: unless.isEmpty ? null : (first) => first.sha256 != unless,
           onProgress: progress,
         );
-        if (!mounted) return;
+        if (read.unchanged || !mounted) return read;
+        final size = read.size.toInt();
+        if (ask &&
+            !touchDevice &&
+            read.error.isEmpty &&
+            read.truncated &&
+            (tooBig(size) ||
+                size >= previewFrom &&
+                    slowFor(backend, size - read.data.length))) {
+          read = await backend.readFile(
+            path,
+            preview: previewScreen(),
+            onProgress: progress,
+          );
+        }
+        return read;
       }
-      setState(() {
-        file = read;
-        failure = null;
-        _progress = null;
-        _unchecked = false;
-        if (!read.isPreview) originalLoad = const OriginalNotLoaded();
-      });
-      loaded(read);
-      _keep(backend, read);
+
+      askingFor(backend);
+      // Kept on this device: the original if it's here, else the preview
+      // made for this screen, shown at once while asked about.
+      final kept = await _showKept(backend, [
+        originalVariant,
+        if (previews && !wantOriginal) previewVariant(previewScreen()),
+      ], fetch: (unless) => fetch(unless: unless));
+      if (kept || !mounted) return;
+      final read = await fetch();
+      // Closed before it came: kept all the same, for next time.
+      if (!mounted) return _keep(backend, read);
+      _showRead(backend, read);
     } on RequestFailure catch (error) {
       if (mounted) {
         setState(() {
@@ -501,6 +782,35 @@ mixin FileLoading<T extends StatefulWidget> on State<T> {
   /// After a read, for what the viewer works out from the bytes.
   void loaded(FileContent file) {}
 
+  /// [read] is on screen, from [from], [bytes] of it having come over the
+  /// connection: diagnostics say how long it took, the first time in this
+  /// viewer, once the frame it's in is drawn.
+  @protected
+  void noteShown(FileContent read, {required ViewedFrom from, int bytes = 0}) {
+    if (_shownNoted || read.error.isNotEmpty) return;
+    _shownNoted = true;
+    final backend = _backend;
+    if (backend == null) return;
+    final bulk = _bulkWhenAsked ?? false;
+    final waited = _waited;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      backend.noteViewer(ViewerKind.shown, {
+        ViewerKey.file: viewedFile(read.mime),
+        ViewerKey.from: from,
+        ViewerKey.preview: read.isPreview,
+        if (waited != null) ViewerKey.waitMs: waited.inMilliseconds,
+        ViewerKey.bytes: bytes,
+        ViewerKey.size: read.size.toInt(),
+        ViewerKey.bulk: bulk,
+      }, _opening.elapsed);
+    });
+  }
+
+  /// Notes, before a viewer reading its file its own way asks for it,
+  /// whether another file's bulk read is on its way ([noteShown]).
+  @protected
+  void askingFor(Backend backend) => _bulkWhenAsked ??= backend.bulkReading;
+
   /// The original in place of the preview shown, with how much has come;
   /// the preview stays until it's here, and if it can't come, says so.
   Future<void> loadOriginal() async {
@@ -513,6 +823,7 @@ mixin FileLoading<T extends StatefulWidget> on State<T> {
       if (await _showKept(backend, [originalVariant]) || !mounted) return;
       final read = await backend.readFile(
         path,
+        sealedSha256: sealedSha256,
         onProgress: (through, size) {
           if (!mounted || originalLoad is! OriginalLoading) return;
           setState(() => originalLoad = OriginalLoading(through, size));
@@ -575,6 +886,16 @@ mixin FileLoading<T extends StatefulWidget> on State<T> {
         label: loadingLabel,
         received: progress.through,
         size: progress.size,
+        connected: connected,
+      );
+    }
+    // Nothing yet, past the moment a file on a near link takes: it's
+    // loading, rather than a blank page.
+    if (file == null && _slow && connected != null) {
+      return LoadingProgress(
+        label: loadingLabel,
+        received: 0,
+        size: 0,
         connected: connected,
       );
     }
@@ -650,9 +971,19 @@ class HeaderTextButton extends StatelessWidget {
   }
 }
 
+/// The header's word on a file still the version its latest seal names.
+const sealedDetail = 'Sealed';
+
+/// The header's word on a sealed version of a file, shown in its place.
+const sealedVersionDetail = 'Sealed version';
+
 /// The header's word on a copy kept on this device that couldn't be
 /// checked against the file, offline.
 const mayBeOutOfDate = 'Saved copy, may be out of date';
+
+/// How long a viewer shows nothing while its file comes: past it, that
+/// it's loading. A file that comes sooner never flashes the loading state.
+const loadingShowsAfter = Duration(milliseconds: 150);
 
 /// How long after a drop a read lost with it waits for the connection
 /// before it says it failed: as long as a read in pieces waits.

@@ -314,7 +314,7 @@ async fn agents_are_arranged_and_nested_in_the_sidebar_and_folded_for_every_devi
     apply_request(&mut client, &mut view, arrange("frontend", "coordinator", "backend", None)).await;
     assert_eq!(tree(&view), ["rivet@", "coordinator@web", "frontend@web>coordinator", "backend@web>coordinator", "lead@app"]);
     let config = Config::parse(&std::fs::read_to_string(dir.join("home/config.json")).expect("config"), &dir.join("home")).expect("valid");
-    // Nested is led (#234): the nesting is the lead, kept as `lead`.
+    // Nested is led: the nesting is the lead, kept as `lead`.
     assert_eq!(config.agent("backend").and_then(|agent| agent.lead.as_deref()), Some("coordinator"));
     assert_eq!(view.agent("backend").lead_id, "coordinator");
 
@@ -428,7 +428,7 @@ async fn each_device_keeps_its_own_zoom() {
     assert!(Config::parse(r#"{"display": {"zoom": {"phone": 3}}}"#, std::path::Path::new("/claktory")).is_err());
 }
 
-/// #446: how much of the files each device keeps, its own, as zoom is.
+/// How much of the files each device keeps, its own, as zoom is.
 #[tokio::test]
 async fn each_device_keeps_its_own_file_cache() {
     let dir = temp_dir();
@@ -496,7 +496,7 @@ async fn the_vaults_unlock_window_is_a_setting() {
     }
 }
 
-/// #249: the sidebar's Projects and Chats sections fold away the same on
+/// The sidebar's Projects and Chats sections fold away the same on
 /// every device and after a restart, without touching config.json.
 #[tokio::test]
 async fn the_sidebar_sections_fold_on_every_device() {
@@ -577,12 +577,12 @@ async fn a_file_with_relative_paths_keeps_that_form_and_old_absolute_settings_st
 
 #[tokio::test]
 async fn claktorys_own_writes_after_an_update_keep_old_settings_readable_by_the_version_before() {
-    // Abbacchio's chain: an updated Claktory with a pipe from before #250.
-    // Its first start fills in colors and renames the pipe's "Liaison",
-    // two settings writes; the person changes a setting too. If any of
-    // them flipped paths to the relative form, going back to the version
-    // before (the supervisor's rollback, during the update's trial or
-    // after) would leave it a file it can't read.
+    // An updated Claktory with a pipe from an older version. Its first start
+    // fills in colors and renames the pipe's "Liaison", two settings
+    // writes; the person changes a setting too. If any of them flipped
+    // paths to the relative form, going back to the version before (the
+    // supervisor's rollback, during the update's trial or after) would
+    // leave it a file it can't read.
     let dir = temp_dir();
     std::fs::create_dir_all(dir.join("home/workspace/site")).expect("home");
     std::fs::create_dir_all(dir.join("home/bin")).expect("bin");

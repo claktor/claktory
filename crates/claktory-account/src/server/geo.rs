@@ -35,6 +35,11 @@ impl Location {
 /// What finds a place from an IP.
 pub trait Locator: Send + Sync {
     fn locate(&self, ip: IpAddr) -> Option<Location>;
+    /// Who owns the network an IP is in (its ASN's organisation, such as
+    /// "Hetzner Online GmbH"), from an ASN file; None from a city file.
+    fn network(&self, _ip: IpAddr) -> Option<String> {
+        None
+    }
 }
 
 /// A GeoIP file in the MaxMind DB format.
@@ -62,6 +67,12 @@ impl Locator for GeoIp {
             city: owned(city.city.names.english),
         };
         location.describe().map(|_| location)
+    }
+
+    fn network(&self, ip: IpAddr) -> Option<String> {
+        let found = self.0.lookup(ip).ok()?;
+        let asn: maxminddb::geoip2::Asn = found.decode().ok()??;
+        asn.autonomous_system_organization.filter(|owner| !owner.is_empty()).map(str::to_owned)
     }
 }
 

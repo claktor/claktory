@@ -10,6 +10,7 @@
 
 #include "core/connection_store.h"
 #include "core/json.h"
+#include "core/command_line.h"
 #include "core/launcher_plan.h"
 #include "core/window_geometry.h"
 
@@ -372,6 +373,43 @@ void LauncherTakesTheProcessToWaitFor() {
   CHECK(claktory::TakeAfter(&arguments) == 4294967295ul);
 }
 
+void TheAppFindsItsLauncherTwoFoldersUp() {
+  CHECK(claktory::LauncherFor(
+            L"C:\\Users\\ann\\AppData\\Local\\Programs\\Claktory\\app\\0.1.27\\Claktory.exe") ==
+        L"C:\\Users\\ann\\AppData\\Local\\Programs\\Claktory\\Claktory.exe");
+  CHECK(claktory::LauncherFor(L"D:\\Claktory\\APP\\0.1.27\\Claktory.exe") ==
+        L"D:\\Claktory\\Claktory.exe");
+  for (const wchar_t* elsewhere :
+       {L"C:\\build\\app\\build\\windows\\x64\\runner\\Release\\Claktory.exe",
+        L"C:\\Claktory\\app\\v0.1.27\\Claktory.exe",
+        L"C:\\Claktory\\app\\0.1.27.partial\\Claktory.exe",
+        L"C:\\Claktory\\apps\\0.1.27\\Claktory.exe",
+        L"app\\0.1.27\\Claktory.exe", L"Claktory.exe", L""}) {
+    CHECK(claktory::LauncherFor(elsewhere).empty());
+  }
+}
+
+void CommandLinesQuoteAsWindowsReadsThem() {
+  CHECK(claktory::CommandLine(L"C:\\Claktory\\factoryd.exe",
+                              {L"install", L"--check"}) ==
+        L"\"C:\\Claktory\\factoryd.exe\" install --check");
+  CHECK(claktory::CommandLine(L"C:\\Program Files\\f.exe", {}) ==
+        L"\"C:\\Program Files\\f.exe\"");
+  CHECK(claktory::CommandLine(L"f.exe", {L""}) == L"\"f.exe\" \"\"");
+  CHECK(claktory::CommandLine(L"f.exe", {L"a b"}) == L"\"f.exe\" \"a b\"");
+  CHECK(claktory::CommandLine(L"f.exe", {L"say \"hi\""}) ==
+        L"\"f.exe\" \"say \\\"hi\\\"\"");
+  // Backslashes are literal unless a quote follows them.
+  CHECK(claktory::CommandLine(L"f.exe", {L"C:\\a\\b"}) ==
+        L"\"f.exe\" C:\\a\\b");
+  CHECK(claktory::CommandLine(L"f.exe", {L"C:\\my dir\\"}) ==
+        L"\"f.exe\" \"C:\\my dir\\\\\"");
+  CHECK(claktory::CommandLine(L"f.exe", {L"a\\\"b"}) ==
+        L"\"f.exe\" \"a\\\\\\\"b\"");
+  CHECK(claktory::CommandLine(L"f.exe", {L"tab\there"}) ==
+        L"\"f.exe\" \"tab\there\"");
+}
+
 void LauncherDeletesOnlyVersionsNeitherPointerNames() {
   auto stale = claktory::StaleVersions(
       {"0.1.25", "0.1.26", "0.1.27", "launcher.log", "..", "x", "0.1.28.tmp"},
@@ -408,6 +446,8 @@ int main() {
   LauncherReadsOnlyAVersionFromItsPointer();
   LauncherCountsOnlyAFailedExitAsFailing();
   LauncherTakesTheProcessToWaitFor();
+  TheAppFindsItsLauncherTwoFoldersUp();
+  CommandLinesQuoteAsWindowsReadsThem();
   LauncherDeletesOnlyVersionsNeitherPointerNames();
   std::printf("%d checks, %d failed\n", checks, failures);
   return failures == 0 ? 0 : 1;

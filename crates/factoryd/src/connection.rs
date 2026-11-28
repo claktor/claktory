@@ -42,10 +42,14 @@ pub enum ConnectionError {
     Io(#[from] std::io::Error),
 }
 
-/// Accepts clients forever, serving each connection on its own task.
+/// Accepts clients forever, serving each connection on its own task: on
+/// the loopback port, and this computer's app on its socket.
 pub async fn serve(listener: TcpListener, factory: Arc<Factory>) {
     if let Ok(addr) = listener.local_addr() {
         factory.remote.set_listener_port(addr.port());
+    }
+    if let Some(socket) = crate::authority::AppSocket::take(&factory.home) {
+        tokio::spawn(serve_app(socket, factory.clone()));
     }
     loop {
         match listener.accept().await {
@@ -89,16 +93,16 @@ fn loopback_host(host: Option<&str>, port: Option<u16>) -> bool {
 /// Whether `given` (a Hello's token) is the app's token held for this start
 /// of the backend, compared in constant time. None held, or an empty one on
 /// either side, never matches.
-#[cfg_attr(not(test), allow(dead_code, reason = "the authority half (v2) checks Hello.token with it"))]
+#[cfg(any(windows, feature = "test-hooks", test))]
 fn app_token_matches(held: Option<&str>, given: &str) -> bool {
     held.is_some_and(|held| !held.is_empty() && !given.is_empty() && crate::encoding::same(held, given))
 }
 
 /// The app's token on Windows (windows.md Part I B; Jotaro 49761): written
 /// once the port is bound and before it's served (`windows::app_token::rotate`),
-/// held here in memory only. Until LocalUncontained lands (v2) it grants
-/// nothing: a Hello with it is treated exactly as one without (Giorno 49758).
-#[cfg(windows)]
+/// held here in memory only. A Hello with it is the Windows app,
+/// `Authority::LocalUncontained` (windows-constraints.md §14).
+#[cfg(any(windows, feature = "test-hooks"))]
 impl Factory {
     /// Holds this start's token; None when it couldn't be written.
     pub fn set_app_token(&self, token: Option<zeroize::Zeroizing<String>>) {
@@ -106,10 +110,24 @@ impl Factory {
     }
 
     /// Whether `given` is this start's token.
-    #[allow(dead_code, reason = "the authority half (v2) checks Hello.token with it")]
     pub(crate) fn is_app_token(&self, given: &str) -> bool {
         let held = self.app_token.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         app_token_matches(held.as_ref().map(|token| token.as_str()), given)
+    }
+
+    /// Tests: holds `token` as this start's app token, as on Windows.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn set_app_token_for_test(&self, token: &str) {
+        self.set_app_token(Some(zeroize::Zeroizing::new(token.to_owned())));
+    }
+}
+
+/// No app token on a Mac or Linux release: nothing is the Windows app.
+#[cfg(not(any(windows, feature = "test-hooks")))]
+impl Factory {
+    pub(crate) fn is_app_token(&self, _given: &str) -> bool {
+        false
     }
 }
 
@@ -120,10 +138,85 @@ enum Frame {
     Skip,
 }
 
+/// How often the app's socket is checked for a file that took its place.
+const APP_SOCKET_CHECK: Duration = Duration::from_secs(5);
+/// The person is told of it at most this often.
+const APP_SOCKET_TOLD_GAP: Duration = Duration::from_secs(3600);
+
+/// This computer's app's clients, each on its own task: the app itself
+/// gets person authority; anything else is turned away at its Hello.
+/// Meanwhile its socket is watched: one removed or replaced (by any
+/// program running as this user) is logged, recorded and told, and taken
+/// back, so the app's next connection reaches this Claktory again (Fugo
+/// 44342).
+async fn serve_app(mut socket: crate::authority::AppSocket, factory: Arc<Factory>) {
+    let mut watch = tokio::time::interval(APP_SOCKET_CHECK);
+    watch.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut told: Option<std::time::Instant> = None;
+    loop {
+        let accepted = tokio::select! {
+            accepted = socket.accept() => Some(accepted),
+            _ = watch.tick() => None,
+        };
+        let Some(accepted) = accepted else {
+            if let Some(why) = socket.replaced() {
+                tracing::error!(why, "the app's socket was taken from this Claktory; taking it back");
+                crate::diagnostics::record(&factory, crate::diagnostics::CONNECTION_AREA, "app_socket_taken", &format!("why={why}"), 0);
+                if told.is_none_or(|told| told.elapsed() > APP_SOCKET_TOLD_GAP) {
+                    told = Some(std::time::Instant::now());
+                    socket_taken(&factory);
+                }
+                socket.rebind();
+            }
+            continue;
+        };
+        let Some((stream, checked)) = accepted else { continue };
+        let factory = factory.clone();
+        tokio::spawn(async move {
+            if let Err(error) = serve_via(stream, factory, Via::App(checked)).await {
+                tracing::warn!(%error, "an app connection failed");
+            }
+        });
+    }
+}
+
+/// Tells the person the app's socket was taken: the connected apps and
+/// the devices notifications are pushed to.
+fn socket_taken(factory: &Factory) {
+    let config = factory.lock().config.clone();
+    let name = config.claktory_name();
+    let now = crate::transcript::now_ms();
+    let notify = v1::Notify {
+        id: format!("{now}-app-socket"),
+        kind: v1::NotifyKind::Alert.into(),
+        title: format!("A program on this Mac tried to stand in for {name}"),
+        body: format!(
+            "Claktory stopped it, so the Claktory app connects only to {name}. If you didn't expect this, check what's running on this Mac."
+        ),
+        collapse: "app-socket".to_owned(),
+        thread: "app-socket".to_owned(),
+        sent_ms: now,
+        ..Default::default()
+    };
+    factory.send(Body::Notify(notify.clone()));
+    let settings = crate::notify::settings(factory);
+    crate::notify::push::queue(factory, &config, &settings, &notify, now, crate::notify::push::Reach::UnlessInUse);
+}
+
 async fn serve_connection(stream: TcpStream, factory: Arc<Factory>) -> Result<(), ConnectionError> {
     // Protocol messages are small and latency-sensitive; don't let Nagle batch them.
     stream.set_nodelay(true)?;
-    serve_stream(stream, factory, None).await
+    serve_via(stream, factory, Via::Port).await
+}
+
+/// How a client reached this Claktory.
+enum Via {
+    /// The loopback port: an agent's command with the tool token.
+    Port,
+    /// The private tunnel, from a paired device's key.
+    Tunnel(crate::remote::Peer),
+    /// The app's socket: Ok when its peer is Claktory's own app, or why not.
+    App(Result<(), String>),
 }
 
 /// Serves one client: on the loopback port, or a device through the
@@ -133,11 +226,15 @@ pub(crate) async fn serve_stream<S: Stream>(
     factory: Arc<Factory>,
     peer: Option<crate::remote::Peer>,
 ) -> Result<(), ConnectionError> {
+    serve_via(stream, factory, peer.map_or(Via::Port, Via::Tunnel)).await
+}
+
+async fn serve_via<S: Stream>(stream: S, factory: Arc<Factory>, via: Via) -> Result<(), ConnectionError> {
     // On Windows the loopback port is how the person's app reaches the
     // backend (`windows::app_token`), so a page that rebinds a name of its
     // own to 127.0.0.1 is turned away by its Host as well as its Origin.
     let port = factory.remote.listener_port();
-    let checks_host = cfg!(windows) && peer.is_none();
+    let checks_host = cfg!(windows) && matches!(via, Via::Port);
     #[allow(clippy::result_large_err)] // The shape tungstenite's callback takes.
     let handshake = move |request: &Request, response: Response| {
         let response = refuse_web_pages(request, response)?;
@@ -159,14 +256,24 @@ pub(crate) async fn serve_stream<S: Stream>(
         }
     };
 
+    let peer = match &via {
+        Via::Tunnel(peer) => Some(peer.clone()),
+        Via::Port | Via::App(_) => None,
+    };
     // How it reached this Claktory, for diagnostics.
-    let via = match &peer {
-        None => "port",
-        Some(peer) if peer.loopback => "this_computer",
-        Some(peer) if peer.address.is_some() => "direct",
-        Some(_) => "relay",
+    let via_name = match &via {
+        Via::Port => "port",
+        Via::App(_) => "app",
+        Via::Tunnel(peer) if peer.loopback => "this_computer",
+        Via::Tunnel(peer) if peer.address.is_some() => "direct",
+        Via::Tunnel(_) => "relay",
     };
     let device;
+    let authority;
+    // The account key its app is signed in with, as its assertion showed
+    // (E11-8 point 6): a paired device's, as recorded when it was let in;
+    // this computer's app's, from its Hello. None for a tool, or without.
+    let mut account_key = None;
     let kind;
     let workspace_patches;
     let workspace_revision;
@@ -222,47 +329,92 @@ pub(crate) async fn serve_stream<S: Stream>(
                     }
                 }
                 Authorized::Refused => {
-                    crate::diagnostics::turned_away(&factory, via, "unpaired");
+                    crate::diagnostics::turned_away(&factory, via_name, "unpaired");
                     let reason = "This device is no longer allowed to connect. Add it again in Settings → Devices on the computer that runs Claktory.";
                     return reject(socket, message.id, ErrorCode::Unauthorized, reason).await;
                 }
                 Authorized::Turned(refusal) => {
                     let why = refusal.code().as_str_name().trim_start_matches("ERROR_CODE_").to_lowercase();
-                    crate::diagnostics::turned_away(&factory, via, &why);
+                    crate::diagnostics::turned_away(&factory, via_name, &why);
                     return refuse(socket, message.id, refusal).await;
                 }
             };
             tracing::info!(client_version = %hello.client_version, kind = ?kind, device = %connected.device.id, endpoint = %peer.endpoint_id, "device connected");
+            account_key = Some(connected.device.account_key.clone()).filter(|key| !key.is_empty());
             device = connected;
-        } else {
-            // The loopback port, which any user of this machine can reach:
-            // only this machine's app's token (from its local pairing code,
-            // which only this user can read) lets a client in.
-            let local = crate::remote::Peer { endpoint_id: String::new(), loopback: true, address: None };
-            let Authorized::Connected(connected) = factory.authorize(&knock, &local).await else {
-                // Another user's program, or one of this user's without the
-                // token: an app build or test made without FACTORY_PORT, say.
-                tracing::info!(client_version = %hello.client_version, kind = ?kind, token = !hello.token.is_empty(), "refused a client on the loopback port without this machine's token");
-                crate::diagnostics::turned_away(&factory, via, if hello.token.is_empty() { "no_token" } else { "wrong_token" });
-                // Any account of this computer reaches this port: the answer
-                // names nothing of the home's path, and on Windows, where the app connects with its
-                // token rather than a pairing code, no pairing hint either.
-                let reason = if cfg!(windows) {
-                    "This port needs this account's own Claktory app.".to_owned()
-                } else {
-                    "This port wants a token: connect with this computer's local pairing code (remote/local-pairing in Claktory's folder).".to_owned()
-                };
-                return reject(socket, message.id, ErrorCode::Unauthorized, reason).await;
+            authority = crate::authority::Authority::Person;
+        } else if let Via::App(checked) = &via {
+            // The app's socket: this computer's own app, by its code
+            // signature, is the person. Why is in the log (the socket's
+            // accept): the app shows these words as they are, so they say
+            // what to do.
+            if checked.is_err() {
+                crate::diagnostics::turned_away(&factory, via_name, "not_the_app");
+                return reject(socket, message.id, ErrorCode::Unauthorized, crate::authority::not_the_app()).await;
+            }
+            device = match factory.connect_local(&knock) {
+                Ok(connected) => connected,
+                Err((code, reason)) => return reject(socket, message.id, code, reason).await,
             };
-            tracing::info!(client_version = %hello.client_version, kind = ?kind, "client connected with this machine's token");
-            device = connected;
+            tracing::info!(client_version = %hello.client_version, kind = ?kind, "this computer's app connected");
+            account_key = crate::account::app_account_key(&factory, &hello.assertion);
+            authority = crate::authority::Authority::Person;
+        } else if crate::authority::is_tool_token(&factory.home, &hello.token) {
+            // The loopback port, which any user of this machine can reach:
+            // the tool token (which only this user can read) lets an
+            // agent's command in, held to Tool authority.
+            tracing::info!(client_version = %hello.client_version, "a command connected with the tool token");
+            device = crate::remote::tool_session();
+            authority = crate::authority::Authority::Tool;
+        } else if factory.is_app_token(&hello.token) {
+            // The Windows app (position B): this computer's app, but held
+            // to what `local_may` allows, since the same user's programs
+            // can read its token. Its Hello's assertion is left out, so
+            // nothing it shows is kept as the local device's account key
+            // (a move's approver, `remote::approver`).
+            let knock = crate::remote::Knock { assertion: "", ..knock };
+            device = match factory.connect_local(&knock) {
+                Ok(connected) => connected,
+                Err((code, reason)) => return reject(socket, message.id, code, reason).await,
+            };
+            tracing::info!(client_version = %hello.client_version, kind = ?kind, "the Windows app connected with its token");
+            authority = crate::authority::Authority::LocalUncontained;
+        } else if crate::authority::is_person_token(&factory.home, &hello.token) {
+            // Test and QA builds only: their client as this computer's app.
+            device = match factory.connect_local(&knock) {
+                Ok(connected) => connected,
+                Err((code, reason)) => return reject(socket, message.id, code, reason).await,
+            };
+            account_key = crate::account::app_account_key(&factory, &hello.assertion);
+            authority = crate::authority::Authority::Person;
+        } else {
+            // Another user's program, or one of this user's without the
+            // token: an app from before the app's socket, with the old pairing code's.
+            tracing::info!(client_version = %hello.client_version, kind = ?kind, token = !hello.token.is_empty(), "refused a client on the loopback port without the tool token");
+            crate::diagnostics::turned_away(&factory, via_name, if hello.token.is_empty() { "no_token" } else { "wrong_token" });
+            if crate::cli::is_cli(&hello.client_version) {
+                // Any account of this computer reaches this port: the answer
+                // names nothing of the home's path.
+                let reason = "This port wants the token in tool-token, in Claktory's folder.";
+                return reject(socket, message.id, ErrorCode::Unauthorized, reason).await;
+            }
+            if hello.token.is_empty() {
+                return welcome_outdated_app(socket, message.id).await;
+            }
+            return reject(socket, message.id, ErrorCode::Unauthorized, UPDATE_THE_APP).await;
         }
         break message.id;
     };
-    // Only a client let in counts as an app trying an updated backend: one
-    // turned away (another user's, say) can't make an update roll back.
-    factory.health.connecting();
-    crate::account::analytics::device_connected(&factory.store.db(), &device.device.id);
+    let person = authority == crate::authority::Authority::Person;
+    // The person's app, or the Windows app (which is theirs, held to less).
+    let app = authority != crate::authority::Authority::Tool;
+    // Only an app let in counts as an app trying an updated backend: one
+    // turned away (another user's, say), or an agent's command, can't make
+    // an update roll back.
+    if app {
+        factory.health.connecting();
+        crate::account::analytics::device_connected(&factory.store.db(), &device.device.id);
+    }
     let claktory = factory.identity();
     let welcome = Welcome {
         protocol_version: PROTOCOL_VERSION,
@@ -272,10 +424,16 @@ pub(crate) async fn serve_stream<S: Stream>(
         color: claktory.color,
         // No deadlines to confirm any more (#527 S3).
         confirm_by_ms: 0,
+        cannot_approve: match authority {
+            crate::authority::Authority::Person => crate::account::cannot_approve(&factory, account_key.as_deref(), !device.device.local),
+            crate::authority::Authority::LocalUncontained => crate::authority::not_on_windows().1.to_owned(),
+            crate::authority::Authority::Tool => crate::authority::person_only().1.to_owned(),
+        },
     };
     send(&mut socket, hello_id, Body::Welcome(welcome)).await?;
-    // This machine's own app may do what the loopback port's may.
-    let remote = !device.device.local;
+    // A device on another machine; this computer's app and its commands
+    // aren't.
+    let remote = person && !device.device.local;
     // Where the person's messages come from: a paired device by its name,
     // this computer's own app by the computer's.
     let from = if remote { device.device.name.clone() } else { crate::remote::machine_name().to_owned() };
@@ -289,7 +447,8 @@ pub(crate) async fn serve_stream<S: Stream>(
         binding: device.device.id.clone(),
         zoom_device: device.device.id.clone(),
         endpoint_id: peer.as_ref().map(|peer| peer.endpoint_id.clone()).unwrap_or_default(),
-        tool: !remote && app_version.starts_with(crate::cli::CLIENT_NAME),
+        account_key,
+        authority,
         workspace_patches,
         workspace_revision,
         held_transcript,
@@ -297,7 +456,8 @@ pub(crate) async fn serve_stream<S: Stream>(
         views: crate::apps::Viewer::new(&factory, &device.device.id),
         browser: crate::browser::Port::new(&factory, &device.device.id),
         agent_browser: crate::browser_host::Port::new(&factory, &from),
-        presence: factory.notify.connect(&device.device.id, &platform),
+        // An agent's command never stands for the person using Claktory.
+        presence: factory.notify.connect(&device.device.id, if app { &platform } else { "" }),
         presentation: crate::presentation::Port::new(&factory, &device.device.id),
         dictations: crate::speech::dictation::Port::new(),
         dms: crate::dm_device::Port::new(),
@@ -306,9 +466,20 @@ pub(crate) async fn serve_stream<S: Stream>(
         diagnostics: crate::diagnostics::Source::device(&device.device.id, from, kind as i32, platform, app_version),
     };
     let (id, since) = (device.device.id.clone(), std::time::Instant::now());
-    crate::diagnostics::record(&factory, crate::diagnostics::CONNECTION_AREA, "connected", &format!("device={id} via={via} app={version}"), 0);
-    let mut sent =
-        Workspaces::resuming(connection.workspace_patches, factory.resumes.clone(), &connection.binding, &connection.workspace_revision);
+    crate::diagnostics::record(
+        &factory,
+        crate::diagnostics::CONNECTION_AREA,
+        "connected",
+        &format!("device={id} via={via_name} app={version}"),
+        0,
+    );
+    let mut sent = if person {
+        Workspaces::resuming(connection.workspace_patches, factory.resumes.clone(), &connection.binding, &connection.workspace_revision)
+    } else {
+        // Its Workspaces without the codes and digits, never kept to
+        // resume from.
+        Workspaces::new(connection.workspace_patches).stripped(connection.authority)
+    };
     // A device on another machine gets the Workspace at most once a second,
     // and what a model writes at most every 0.1 s.
     if remote {
@@ -325,12 +496,12 @@ pub(crate) async fn serve_stream<S: Stream>(
     };
     let stayed = i64::try_from(since.elapsed().as_millis()).unwrap_or(i64::MAX);
     let tally = sent.tally.words();
-    tracing::info!(device = %id, via, %tally, "what a connection was sent");
+    tracing::info!(device = %id, via = via_name, %tally, "what a connection was sent");
     crate::diagnostics::record(
         &factory,
         crate::diagnostics::CONNECTION_AREA,
         "disconnected",
-        &format!("device={id} via={via} end={how} {tally}"),
+        &format!("device={id} via={via_name} end={how} {tally}"),
         stayed,
     );
     ended?;
@@ -353,9 +524,17 @@ struct Connection {
     zoom_device: String,
     /// The tunnel key it connected with; empty on the loopback port.
     endpoint_id: String,
-    /// `factoryd`'s own commands on this computer (`factoryd allow`), not
-    /// an app: its Hello's client_version says so.
-    tool: bool,
+    /// The account key its app is signed in with (E11-8 point 6), which a
+    /// device's DM leaf must be: a paired device's from the assertion it
+    /// was let in with (`Device.account_key`), this computer's app's from
+    /// the assertion its Hello showed. None for an agent's command, or a
+    /// device that never showed one.
+    /// Read by ProveAllowedDevice, and by the DM requests' binding check
+    /// (Mista's, E11-8 point 6).
+    account_key: Option<String>,
+    /// The person's (a paired device, this computer's app), or an agent's
+    /// command's, held to the tool allowlist.
+    authority: crate::authority::Authority,
     /// The app applies WorkspacePatch.
     workspace_patches: bool,
     /// The Workspace it holds (Hello.workspace_revision), to resume from.
@@ -440,6 +619,24 @@ async fn session<S: Stream>(
                     Frame::Skip => continue,
                     Frame::Closed => return Ok(()),
                 };
+                // An agent's command sends only what its allowlist names, and
+                // the Windows app what `local_may` allows; the rest is
+                // refused before it's handled (windows-constraints.md §14).
+                let refused = match connection.authority {
+                    crate::authority::Authority::Person => None,
+                    crate::authority::Authority::Tool => {
+                        message.body.as_ref().is_some_and(crate::authority::needs_person).then(crate::authority::person_only)
+                    }
+                    crate::authority::Authority::LocalUncontained => message
+                        .body
+                        .as_ref()
+                        .is_some_and(|body| !crate::authority::local_may(factory, body))
+                        .then(crate::authority::not_on_windows),
+                };
+                if let Some((code, reason)) = refused {
+                    out(socket, sent, message.id, error(code, reason)).await?;
+                    continue;
+                }
                 // A file is read on its own and answered when it's ready.
                 // It changes nothing, so nothing goes before its answer.
                 let body = match message.body {
@@ -472,12 +669,22 @@ async fn session<S: Stream>(
                 }
                 // What it decides is noted as decided from this device (#514).
                 let deciding = crate::answered_on::before(factory, body.as_ref());
+                let reconnect = connection.remote
+                    && crate::dm_device::reconnect_signed_in(factory, &connection.endpoint_id, connection.account_key.as_deref(), body.as_ref());
                 let reply = handle(factory, body, &connection, &mut vault_session).await;
                 crate::answered_on::after(factory, deciding, &connection.zoom_device, &connection.sent_from.device);
                 // Deliver what the request changed before answering it, so a
                 // client that sees the ack also sees the new state.
                 flush(socket, sent, &mut events, factory).await?;
                 out(socket, sent, message.id, reply).await?;
+                // Only the WebSocket closes, never the tunnel under it: an
+                // app reads a tunnel closed with a reason as its device
+                // removed, and a closed socket as one to open again.
+                if reconnect {
+                    tracing::info!(device = %connection.binding, endpoint = %connection.endpoint_id, "closing a device's connection so it connects again with the account it signed in to");
+                    socket.close(None).await?;
+                    return Ok(());
+                }
             }
             (id, body) = reads.next() => out(socket, sent, id, body).await?,
             body = connection.views.next() => out(socket, sent, 0, body).await?,
@@ -603,16 +810,6 @@ async fn handle(
         Some(Request::CreateProject(request)) => factory.create_project(&request.name, &request.path).await,
         Some(Request::CreateAgent(request)) => factory.create_agent(&request).await,
         Some(Request::UpdateAgent(request)) => {
-            // Refuses turning the browser on from a connection that says it's
-            // factoryd's own command line, which any agent's shell runs. It
-            // can't stop a program that connects with this machine's own
-            // pairing token under another name: that token is the person's
-            // app, with the person's authority, until devices on this machine
-            // get keys of their own. The settings file is the same: anything
-            // running as the person can edit it.
-            if connection.tool && crate::errands::turns_browser_on(&request) {
-                return error(ErrorCode::InvalidRequest, "Only the person, in Agent settings, or an admin agent such as Rivet turns on the browser.");
-            }
             // `folder` (an absolute path) is deprecated and ignored.
             let v1::UpdateAgent {
                 agent_id,
@@ -684,9 +881,7 @@ async fn handle(
         ),
         Some(Request::StopAgent(request)) => factory.stop_agent(&request.agent_id),
         Some(Request::DeleteAgent(request)) => factory.delete_agent(&request.agent_id).await,
-        Some(Request::UpdateProject(request)) => {
-            factory.update_project(&request.project_id, request.name.as_deref(), request.archived, request.before_id.as_deref()).await
-        }
+        Some(Request::UpdateProject(request)) => factory.update_project(&request).await,
         Some(Request::DeleteProject(request)) => {
             let deleted = factory.delete_project(&request.project_id).await;
             if deleted.is_ok() {
@@ -720,7 +915,8 @@ async fn handle(
         }
         // Direct messages end to end (dms-e2ee.md §2): this Claktory's leaf,
         // given only to the person's own devices, which are all that connect
-        // here (a paired device, or this computer's app with its token).
+        // here (a paired device, or this computer's app over its socket;
+        // never an agent's command, which the allowlist refuses).
         Some(Request::DmLeafOffer(_) | Request::DmEnrollLeaf(_)) if !crate::user_apps::dms::preview() => {
             return error(ErrorCode::InvalidRequest, "Direct messages aren't available in this Claktory yet.");
         }
@@ -744,6 +940,11 @@ async fn handle(
         }
         Some(Request::ShowAllFiles(request)) => factory.show_all_files(&request.project_id, request.show_all).await,
         Some(Request::OpenPanel(request)) => factory.open_panel(&request.agent_id, &request.extension_id).await,
+        Some(Request::GetChecklist(request)) => {
+            return answer(crate::extensions::panel_of(factory, &request.agent_id, "checklist"), Body::ExtensionView);
+        }
+        Some(Request::ListTasks(request)) => return answer(crate::extensions::panel_of(factory, &request.agent_id, "tasks"), Body::ExtensionView),
+        Some(Request::ListDeviceActivity(_)) => return error(ErrorCode::InvalidRequest, "Device activity isn't in this version yet."),
         Some(Request::ArrangeAgent(request)) => {
             let v1::ArrangeAgent { agent_id, parent_id, before_id, project_id, folder_id, undoable } = request;
             if undoable {
@@ -798,6 +999,12 @@ async fn handle(
         Some(Request::ShowPairingCode(request)) => {
             return match crate::extensions::devices::code(factory, &request.pairing_id).await {
                 Ok(code) => Body::PairingCode(code),
+                Err(problem) => error(problem.code(), problem.to_string()),
+            };
+        }
+        Some(Request::RequestAddDevice(request)) => {
+            return match crate::extensions::devices::request(factory, &request.name).await {
+                Ok(requested) => Body::AddDeviceRequested(requested),
                 Err(problem) => error(problem.code(), problem.to_string()),
             };
         }
@@ -949,6 +1156,14 @@ async fn handle(
         Some(Request::RevealSecret(request)) => {
             return answer(vault::reveal_secret(factory, vault_session, &request).await, Body::SecretValue);
         }
+        // The account's key, made on the device asking: the statement
+        // for it to sign.
+        Some(Request::NewRecoveryKey(request)) if !request.public_key.is_empty() => {
+            return answer(
+                crate::account::recovery::make(factory, connection.account_key.as_deref(), connection.remote, &request),
+                Body::RecoveryKeyToSign,
+            );
+        }
         Some(Request::NewRecoveryKey(request)) => {
             return answer(vault::new_recovery_key(factory, vault_session, &request).await, Body::RecoveryKey);
         }
@@ -959,18 +1174,44 @@ async fn handle(
         Some(Request::AccountSignIn(request)) => crate::account::sign_in(factory, &request.email).await,
         Some(Request::AccountVerify(request)) => crate::account::verify(factory, &request.code).await.map(|account_id| {
             // Signed in on a paired device, it's that device's owner's (#365 R5).
-            factory.confirm_signed_in_device(&connection.zoom_device, &connection.endpoint_id, &account_id);
+            if let Some(account_id) = account_id {
+                factory.confirm_signed_in_device(&connection.zoom_device, &connection.endpoint_id, &account_id);
+            }
         }),
+        // The no-code setup: agents' commands, and the Windows app whose
+        // token they can read, may ask only while this Claktory is being
+        // set up (`tools_may_authorize`).
+        Some(Request::AccountAuthorize(request)) => {
+            if connection.authority != crate::authority::Authority::Person && !crate::account::tools_may_authorize(factory) {
+                let (code, why) = crate::authority::person_only();
+                return error(code, why);
+            }
+            crate::account::authorize(factory, &request.email).await
+        }
+        Some(Request::ProveAllowedDevice(request)) => {
+            // It may be for approving a move from here: the service is
+            // asked for approved moves often for a while.
+            crate::account::moves::look_soon(factory);
+            return answer(
+                crate::account::allowed_device_word(factory, connection.account_key.as_deref(), connection.remote, &request.request_id),
+                |allowed| Body::AllowedDeviceWord(v1::AllowedDeviceWord { request_id: request.request_id.clone(), allowed }),
+            );
+        }
         Some(Request::AccountResend(_)) => crate::account::resend(factory).await,
         Some(Request::AccountSignInCancel(_)) => crate::account::cancel_sign_in(factory).await,
-        // The account's recovery key (#239). A new key made on a device needs
-        // the device's account key on its connection, which this version
-        // doesn't have yet.
-        Some(Request::PublishRecoveryKey(_)) => Err(RequestError::Account(
-            ErrorCode::InvalidRequest,
-            "This version of Claktory can't make a new recovery key for your account yet.".to_owned(),
-        )),
-        Some(Request::UseRecoveryKey(_)) => crate::account::recovery::use_new(factory, &connection.zoom_device, &connection.device, connection.tool).await,
+        // The account's recovery key, signed on the device that made it.
+        Some(Request::PublishRecoveryKey(request)) => {
+            crate::account::recovery::publish(factory, connection.account_key.as_deref(), &request).await
+        }
+        Some(Request::UseRecoveryKey(_)) => {
+            crate::account::recovery::use_new(
+                factory,
+                &connection.zoom_device,
+                &connection.device,
+                connection.authority != crate::authority::Authority::Person,
+            )
+            .await
+        }
         Some(Request::AccountSignOut(_)) => crate::account::sign_out(factory).await,
         Some(Request::SkipAccountSignIn(_)) => crate::account::skip(factory),
         // Pipes (#196): `crate::pipes`.
@@ -1086,6 +1327,8 @@ async fn handle(
         Some(Request::ReadAlerts(request)) => {
             crate::notify::alerts::read(factory, &request.ids, &connection.zoom_device, &connection.sent_from.device)
         }
+        // A sealed version's copy (rivet_reach: Person).
+        Some(Request::DeleteSealedCopy(request)) => crate::seals::delete_copy(factory, &request),
         // Pinned agents (rivet_reach: the settings file's pinned_agents).
         Some(Request::PinAgent(request)) => crate::pins::pin(factory, &request).await,
         Some(Request::UnpinAgent(request)) => crate::pins::unpin(factory, &request).await,
@@ -1117,6 +1360,9 @@ async fn handle(
         Some(Request::HandBackAgentBrowser(_)) => connection.agent_browser.hand_back(),
         Some(Request::StopAgentBrowser(request)) => connection.agent_browser.stop(&request.agent_id),
         Some(Request::OpenAgentBrowser(request)) => connection.agent_browser.open(&request),
+        Some(Request::WatchAgentTab(request)) => connection.agent_browser.watch_tab(&request),
+        Some(Request::AgentTabFrameAck(request)) => connection.agent_browser.tab_ack(&request),
+        Some(Request::AgentTabInput(request)) => connection.agent_browser.tab_input(&request),
         Some(Request::DeleteAgentBrowserData(request)) => connection.agent_browser.delete_data(&request.agent_id),
         Some(Request::SetAgentBrowserLocale(request)) => crate::browser_host::locale::set(factory, &request).await,
         Some(Request::SignOutAgentBrowserAccount(request)) => crate::errands::code::sign_out_request(factory, &request).await,
@@ -1143,10 +1389,23 @@ async fn handle(
             return error(ErrorCode::InvalidRequest, "Agents aren't kept apart for the browser any more: turn on Browser in the agent's settings.");
         }
         // Direct messages through the home (#451): `crate::dm_device`.
-        Some(Request::DmSend(request)) => return crate::dm_device::send(factory, request),
-        Some(Request::DmFollow(request)) => return crate::dm_device::follow(factory, request, &connection.dms),
-        Some(Request::DmAck(request)) => crate::dm_device::ack(factory, request),
-        Some(Request::DmRoutes(request)) => return crate::dm_device::routes(factory, request),
+        // Each under the connection's own leaf only (E11-8 point 6).
+        Some(Request::DmSend(request)) => match crate::dm_device::bound(connection.account_key.as_deref(), &request.leaf_id) {
+            Ok(()) => return crate::dm_device::send(factory, request),
+            Err(refused) => Err(refused),
+        },
+        Some(Request::DmFollow(request)) => match crate::dm_device::bound(connection.account_key.as_deref(), &request.leaf_id) {
+            Ok(()) => return crate::dm_device::follow(factory, request, &connection.dms),
+            Err(refused) => Err(refused),
+        },
+        Some(Request::DmAck(request)) => {
+            crate::dm_device::bound(connection.account_key.as_deref(), &request.leaf_id).and_then(|()| crate::dm_device::ack(factory, request))
+        }
+        // Only for a connection signed in with an account key.
+        Some(Request::DmRoutes(request)) => match crate::dm_device::signed_in(connection.account_key.as_deref()) {
+            Ok(()) => return crate::dm_device::routes(factory, request),
+            Err(refused) => Err(refused),
+        },
         // Only this Mac's own app (its own device, either way in) turns it on.
         Some(Request::SetLidClosed(request)) => {
             crate::lid_closed::set(factory, !connection.remote, &request)
@@ -1229,14 +1488,19 @@ async fn handle(
         Some(Request::DeleteMovedCopy(_)) => return error(ErrorCode::InvalidRequest, "This Claktory hasn't moved to another computer."),
         Some(Request::UnpairDevice(request)) => factory.unpair_device(&request.device_id).await,
         Some(Request::ApproveDevice(request)) => {
-            let asker = crate::remote::Asker {
-                device: connection.zoom_device.clone(),
-                tool: connection.tool,
-                from_terminal: connection.tool && request.from_terminal,
-            };
+            let tool = connection.authority == crate::authority::Authority::Tool;
+            let asker = crate::remote::Asker { device: connection.zoom_device.clone(), tool, from_terminal: tool && request.from_terminal };
             factory.approve_device(&asker, &request.device_id, &request.number).await
         }
         Some(Request::DismissAllowNotice(request)) => factory.dismiss_allow_notice(&request.device_id).await,
+        Some(Request::UnpairAccountKey(request)) => {
+            if crate::remote::is_account_key(&request.account_key) {
+                factory.unpair_account_key(&request.account_key, crate::remote::Removal::LockOut).await;
+                Ok(())
+            } else {
+                Err(RequestError::Account(ErrorCode::InvalidRequest, "That isn't a device's account key.".to_owned()))
+            }
+        }
         Some(Request::DenyDevice(request)) => factory.deny_device(&request.device_id).await,
         Some(Request::CancelPairing(request)) => factory.cancel_pairing(&request.device_id).await,
         // Remote access is on while devices are paired: only the relays are set here.
@@ -1360,7 +1624,7 @@ impl Reads {
 
 /// ReadFile's answer, read on a thread of its own.
 async fn read_file(data: PathBuf, request: v1::ReadFile) -> Body {
-    match tokio::task::spawn_blocking(move || crate::previews::read_requested(&data, &request)).await {
+    match tokio::task::spawn_blocking(move || crate::seals::read_requested(&data, &request)).await {
         Ok(content) => Body::FileContent(content),
         Err(problem) => error(ErrorCode::Internal, problem.to_string()),
     }
@@ -1493,6 +1757,32 @@ async fn refuse<S: Stream>(mut socket: Socket<S>, reply_to: u64, refusal: v1::Er
     send(&mut socket, reply_to, Body::Error(refusal)).await?;
     socket.close(None).await?;
     Ok(())
+}
+
+/// What an app from before the app's socket on this Mac hears.
+const UPDATE_THE_APP: &str = "This copy of Claktory is out of date. Quit it, then open Claktory from your Applications folder.";
+
+/// An app from before the app's socket on this Mac's loopback port, which knocks with
+/// no token at all now that its pairing code is gone: welcomed with nothing
+/// but Claktory's version, so it shows its own screen saying it's
+/// too old for this Claktory (with no update offered: it couldn't carry one
+/// out), then every request refused. Nothing in it is more than any program
+/// on this computer can read.
+async fn welcome_outdated_app<S: Stream>(mut socket: Socket<S>, reply_to: u64) -> Result<(), ConnectionError> {
+    // Not even this Claktory's name or color: any user of this computer
+    // can knock here.
+    let welcome = Welcome { protocol_version: PROTOCOL_VERSION, server_version: SERVER_VERSION.to_owned(), ..Welcome::default() };
+    send(&mut socket, reply_to, Body::Welcome(welcome)).await?;
+    let workspace = v1::Workspace { version: crate::update::VERSION.to_owned(), ..v1::Workspace::default() };
+    send(&mut socket, 0, Body::Workspace(workspace)).await?;
+    loop {
+        let frame = socket.next().await;
+        match read(&mut socket, frame).await? {
+            Frame::Message(message) => send(&mut socket, message.id, error(ErrorCode::Unauthorized, UPDATE_THE_APP)).await?,
+            Frame::Skip => {}
+            Frame::Closed => return Ok(()),
+        }
+    }
 }
 
 /// A request's answer, or why it failed.

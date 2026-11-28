@@ -53,6 +53,12 @@ abstract class PhoneRoutes {
   /// oldest card waiting for the person), else where it was.
   void openConversation(String agentId, {int? seq});
 
+  /// Shows [agentId]'s conversation as a page over what shows (Back returns
+  /// to it), with [panel]'s sheet (an extension id: 'checklist', 'tasks')
+  /// up over it when given. True when it's done here; false where these
+  /// routes can't (no such agent), for the caller to open it its own way.
+  bool pushConversation(String agentId, {String panel = ''});
+
   /// Shows [path] in a viewer over [agentId]'s conversation, as a page:
   /// a review the agent asked for, say. The agent is chosen and the
   /// file opened in its layout (its `show`), if it isn't already, then the

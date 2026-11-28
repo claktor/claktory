@@ -17,6 +17,7 @@ import 'identity.dart';
 import 'markdown.dart';
 import 'recovery_key.dart'
     show RecoveryKeyBox, RecoveryKeyDownload, canSaveRecoveryKey;
+import 'recovery_key_make.dart' show MakeRecoveryKeyForm;
 import 'mobile/drawer.dart' show largeText;
 import 'mobile/input.dart' show InputKind;
 import 'mobile/metrics.dart' show Metrics, Touch, TypeScale;
@@ -1001,6 +1002,19 @@ class _AccountSettingsState extends State<AccountSettings>
                 onPressed: () => showModal(
                   context,
                   (context, close) => _RecoveryKey(close: close),
+                ),
+              ),
+            // The account's own key, made on this device: no Claktory
+            // keeps it.
+            if (state ==
+                    ClaktoryAccountState.CLAKTORY_ACCOUNT_STATE_SIGNED_IN &&
+                !approvesElsewhere &&
+                vault.exists)
+              Button(
+                label: 'Make a new recovery key…',
+                onPressed: () => showModal(
+                  context,
+                  (context, close) => MakeRecoveryKeyForm(close: close),
                 ),
               ),
             // Switching would take this Claktory, and the devices that

@@ -1,9 +1,9 @@
-// Friend bug #11: a procedure (ask_person's steps) answered in Needs you,
+// A procedure (ask_person's steps) answered in Needs you,
 // its agent's conversation not open, moves on to its next step there, as it
 // does in the conversation: on the Mac's page, in the chip's drop-down and
 // on a phone, without closing and opening it again.
 import 'package:factory_app/ask_card.dart';
-import 'package:factory_app/needs_you_focus.dart' show FocusStage;
+import 'package:factory_app/inbox.dart' show NeedsYouChip;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart';
 import 'package:fixnum/fixnum.dart';
@@ -117,7 +117,7 @@ int _fetches(Harness harness) => harness.backend.sent
     .length;
 
 void main() {
-  // Polpo's needs-you-refetch.md: every waiting procedure was fetched again
+  // Every waiting procedure was fetched again
   // on every change to the Workspace, several a second on a busy Claktory.
   testWidgets('a procedure is fetched again only once its agent changes', (
     tester,
@@ -187,8 +187,8 @@ void main() {
     expect(find.textContaining('All 7 steps done'), findsOneWidget);
   }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
 
-  testWidgets("from the chip over another conversation, focus mode's stage "
-      'shows the next step once Done is pressed', (tester) async {
+  testWidgets("in the chip's drop-down over another conversation, Done shows "
+      'the next step', (tester) async {
     final harness = Harness(_workspace(selected: 'june'));
     harness.backend.transcript.load(Transcript(agentId: 'june'));
     harness.backend.entriesById['kai/9'] = _procedure(5);
@@ -197,10 +197,12 @@ void main() {
     await tester.tap(find.text('1 needs you'));
     await settle(tester);
     await settle(tester);
+    await tester.tap(find.text('Allow the helper · Step 6 of 7').first);
+    await settle(tester);
     await tester.pump(const Duration(seconds: 1));
     expect(
       find.descendant(
-        of: find.byType(FocusStage),
+        of: find.byType(NeedsYouChip),
         matching: find.byType(AskPersonCard),
       ),
       findsOneWidget,
@@ -224,13 +226,13 @@ void main() {
     harness.page.value = AppPage.inbox;
     await pumpFrames(tester);
     await settle(tester);
-    // An iPhone's Needs you lists it first (#599); tapped, it alone.
+    // An iPhone's Needs you lists it first; tapped, it alone.
     await tester.tap(find.text('Allow the helper · Step 6 of 7'));
     await pumpFrames(tester);
     await settle(tester);
     expect(find.text('Step 6 of 7'), findsOneWidget);
 
-    // Still waiting on step 7: it stays (Squalo L4).
+    // Still waiting on step 7: it stays.
     await _done(tester, harness, 6);
     await tester.pump(const Duration(seconds: 1));
     await settle(tester);

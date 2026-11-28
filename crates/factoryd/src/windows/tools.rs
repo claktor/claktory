@@ -102,20 +102,24 @@ pub fn restore(home: &Home) -> std::io::Result<()> {
     }
 }
 
+/// The Git `release` carries, put in and pointed at, when the home names
+/// none yet: at start, and as `factoryd install` sets a home up.
+pub fn put_in_unless_named(home: &Home, release: &Path) -> std::io::Result<()> {
+    if named(&tools(home).join(GIT_POINTER)).is_some() {
+        return Ok(());
+    }
+    match put_in(home, release)? {
+        Some(name) => point(&tools(home).join(GIT_POINTER), &name),
+        None => Ok(()),
+    }
+}
+
 /// At start: the running release's Git, when the home has none named (an
 /// update from a backend that knew of none); then every Git folder named
 /// by neither pointer deleted, skipping one still in use.
 pub fn heal_and_sweep(home: &Home, release: &Path) {
-    if named(&tools(home).join(GIT_POINTER)).is_none() {
-        match put_in(home, release) {
-            Ok(Some(name)) => {
-                if let Err(error) = point(&tools(home).join(GIT_POINTER), &name) {
-                    tracing::error!(%error, "could not point at the release's Git");
-                }
-            }
-            Ok(None) => {}
-            Err(error) => tracing::error!(%error, "could not put in the release's Git"),
-        }
+    if let Err(error) = put_in_unless_named(home, release) {
+        tracing::error!(%error, "could not put in the release's Git");
     }
     let kept = [named(&tools(home).join(GIT_POINTER)), named(&previous_pointer(home))];
     let Ok(entries) = std::fs::read_dir(tools(home)) else { return };

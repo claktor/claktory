@@ -1,4 +1,4 @@
-//! Execute on command cards (Fugo 35295 and 35326). An agent asks the
+//! Execute on command cards. An agent asks the
 //! person to run a command on this computer with ask_person's `command`
 //! instead of a fenced block they'd copy into a terminal. The card is an
 //! action card: Claktory's heading, the command byte for byte, the
@@ -237,7 +237,7 @@ pub(crate) fn refused(command: &str) -> Option<String> {
 /// character (but a line break or a tab), a line or paragraph separator, or
 /// one that shows nothing or reorders what's around it (`text::hidden`:
 /// bidi controls, zero widths, fillers, variation selectors, tag
-/// characters), and every other invisible format character (Fugo 36500).
+/// characters), and every other invisible format character.
 fn hiding(c: char) -> bool {
     match c {
         '\n' | '\t' => false,
@@ -439,7 +439,7 @@ pub(crate) fn warnings(command: &str, machine: &str, touch_id: bool) -> Vec<Warn
 }
 
 /// The environment a card's command runs with: an allowlist of what
-/// factoryd's own holds (Fugo 36006), so anything it gains later stays out
+/// factoryd's own holds, so anything it gains later stays out
 /// unless added here on purpose, and the agents' PATH. None of Claktory's
 /// own variables (FACTORY_*, CLAKTORY_*), and no secret. SSH_AUTH_SOCK
 /// stays, so ssh works as in a terminal.
@@ -797,7 +797,7 @@ async fn execute(factory: &Arc<Factory>, agent: &str, ask: i64, command: &Comman
     }
     // What it left behind goes too: at once when it timed out; asked
     // first, then made, when the shell ended but something it started runs
-    // on (`sleep 3000 &`, `nohup server &`; Fugo 36500).
+    // on (`sleep 3000 &`, `nohup server &`).
     if timed_out {
         signal_group(pgid, libc::SIGKILL);
     } else if group_alive(pgid) {
@@ -992,7 +992,7 @@ mod tests {
             "a\u{200b}b",
             "a\u{feff}b",
             "a\u{061c}",
-            // Fugo 36500: tags (ASCII smuggling), invisible operators, the
+            // Tags (ASCII smuggling), invisible operators, the
             // Mongolian vowel separator, a soft hyphen, variation selectors,
             // Hangul fillers and the other format characters.
             "rm\u{E0072}\u{E006D} x",

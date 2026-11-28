@@ -45,6 +45,11 @@ rusqlite = { version = "0.43.0", features = ["bundled"] }
 # Only for OpenMLS's group id (dm.rs, forgetting a group): the same version
 # claktory-dm-crypto pins.
 openmls = "=0.9.2"
+# The account recovery key's X25519 pair, from its 20 bytes: the versions
+# already locked through openmls and iroh, so nothing is built twice.
+x25519-dalek = "2"
+hkdf = "0.13"
+sha2 = "0.11"
 
 # Android: the raw JNI calls of the bootstrap (src/android.rs), the version
 # iroh's own DNS resolver already brings.

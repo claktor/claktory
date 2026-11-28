@@ -6,6 +6,7 @@ mod answered_on;
 mod annotations;
 mod app_archive;
 pub mod apps;
+pub mod authority;
 mod arrange;
 mod arrange_undo;
 pub mod browser;
@@ -95,6 +96,7 @@ pub mod review_watch;
 mod rivet_reach;
 mod runner;
 mod runs;
+mod seals;
 mod service;
 mod sketch;
 pub mod speech;
@@ -125,6 +127,12 @@ pub use account::analytics::{backend_started, backend_stopped};
 /// For tests: anchors a test's own account service to roots of its own.
 #[doc(hidden)]
 pub use account::anchor::anchor_for_tests as anchor_account_for_tests;
+#[cfg(feature = "test-hooks")]
+pub use account::backend_key_for_tests as account_backend_key_for_tests;
+#[cfg(feature = "test-hooks")]
+pub use account::ring_bell_for_tests as ring_account_bell_for_tests;
+#[cfg(feature = "test-hooks")]
+pub use account::apps_connected_for_tests;
 /// For tests: a Factory done with, whose home another now uses.
 #[doc(hidden)]
 pub use account::stop_for_tests as stop_account_for_tests;

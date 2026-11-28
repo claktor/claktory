@@ -154,6 +154,60 @@ void main() {
     );
   });
 
+  testWidgets('a brief typed in Project settings is saved, and one cleared '
+      'is removed; Save sends only what changed', (tester) async {
+    final harness = Harness(_workspace());
+    await harness.show(
+      tester,
+      size: const Size(1000, 1200),
+      home: ProjectSettingsForm(project: _bakery, close: () {}),
+    );
+    await settle(tester);
+    final brief = find.byWidgetPredicate(
+      (widget) => widget is EditableText && widget.maxLines == 12,
+    );
+    expect(brief, findsOneWidget);
+    expect(find.text('The outcome, the team and the rules'), findsOneWidget);
+    await tester.enterText(
+      brief,
+      '  Ship the bakery site by Friday.\nAsk June before changing prices.\n',
+    );
+    await tester.pump();
+    await tester.tap(_button('Save'));
+    await settle(tester);
+    expect(
+      harness.last.updateProject,
+      UpdateProject(
+        projectId: 'p1',
+        brief:
+            'Ship the bakery site by Friday.\nAsk June before changing prices.',
+      ),
+    );
+  });
+
+  testWidgets('a brief cleared in Project settings is removed', (tester) async {
+    final harness = Harness(_workspace());
+    final briefed = _bakery.deepCopy()..brief = 'Ship it.';
+    await harness.show(
+      tester,
+      size: const Size(1000, 1200),
+      home: ProjectSettingsForm(project: briefed, close: () {}),
+    );
+    final brief = find.byWidgetPredicate(
+      (widget) => widget is EditableText && widget.maxLines == 12,
+    );
+    await settle(tester);
+    expect(tester.widget<EditableText>(brief).controller.text, 'Ship it.');
+    await tester.enterText(brief, '');
+    await tester.pump();
+    await tester.tap(_button('Save'));
+    await settle(tester);
+    final cleared = harness.last.updateProject;
+    expect(cleared.hasBrief(), isTrue);
+    expect(cleared.brief, '');
+    expect(cleared.hasName(), isFalse);
+  });
+
   testWidgets("Delete says where the files stay and which pipes close; "
       'Archive instead archives it', (tester) async {
     final harness = Harness(_workspace(pipes: true));

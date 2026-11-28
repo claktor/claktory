@@ -12,7 +12,7 @@ import 'package:factory_app/state.dart';
 import 'package:factory_app/tunnel_client.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'tunnel_test.dart' show FakeTunnel;
+import 'tunnel_test.dart' show FakeTunnel, tunnelStatus;
 
 final _code = 'factory://?t=${'c' * 64}&e=${'a' * 64}&name=mac-mini';
 
@@ -31,11 +31,21 @@ class _Far {
   late final HttpServer server;
   var hellos = 0;
   var welcoming = true;
+  final _sockets = <WebSocket>[];
+
+  /// Closes every connection it has, as a dial that failed would end them.
+  Future<void> drop() async {
+    for (final socket in _sockets) {
+      await socket.close();
+    }
+    _sockets.clear();
+  }
 
   Future<void> start() async {
     server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     server.listen((request) async {
       final socket = await WebSocketTransformer.upgrade(request);
+      _sockets.add(socket);
       socket.listen((frame) {
         final message = ClientMessage.fromBuffer(frame as List<int>);
         if (!message.hasHello()) return;
@@ -66,6 +76,9 @@ class _Tunnels implements Tunnels {
   /// Which opens (counted from 1) never complete.
   final stuck = <int>{};
 
+  /// Which opens (counted from 1) complete only when the test says.
+  final held = <int, Completer<void>>{};
+
   @override
   Future<Tunnel> open({
     required String deviceKey,
@@ -77,6 +90,8 @@ class _Tunnels implements Tunnels {
     if (stuck.contains(opens)) return Completer<Tunnel>().future;
     final tunnel = FakeTunnel(port);
     made.add(tunnel);
+    final hold = held[opens];
+    if (hold != null) return hold.future.then((_) => tunnel);
     return Future.value(tunnel);
   }
 
@@ -110,7 +125,6 @@ Backend _backend(Tunnels tunnels, TunnelRuntime runtime) =>
         extensionView: ExtensionViewStore(),
         tunnels: tunnels,
         tunnelRuntime: runtime,
-        localPairing: () async => null,
       )
       ..deviceKey = ((_) => 'k' * 64)
       // Only a from-scratch start may rescue these: nothing else times out.
@@ -207,4 +221,87 @@ void main() {
       await backend.close();
     },
   );
+
+  test('Reconnect during a dial lets it finish, for as long as the dial '
+      'has and a little more; past that, it starts from scratch', () async {
+    far.welcoming = false;
+    final tunnels = _Tunnels(far.server.port);
+    final backend = _backend(tunnels, _Runtime())
+      ..backWithin = const Duration(minutes: 5);
+    backend.connectTo(parsePairingCode(_code));
+    unawaited(backend.run());
+    await until(() => tunnels.opens == 1 && far.hellos == 1);
+    final dialing = tunnels.made.first
+      ..status = tunnelStatus(phase: TunnelPhase.dialing, dialTimeoutMs: 100);
+
+    // Tapped again and again, as on a weak link: the dial isn't thrown away.
+    for (var tap = 0; tap < 5; tap++) {
+      backend.reconnectNow();
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    }
+    expect(dialing.closed, isFalse);
+    expect(tunnels.opens, 1);
+    expect(far.hellos, 1, reason: 'the try under way is still the one');
+
+    // Still dialing past its time: the next tap starts from scratch.
+    await Future<void>.delayed(const Duration(milliseconds: 2200));
+    far.welcoming = true;
+    backend.reconnectNow();
+    await until(() => dialing.closed);
+    await until(() => backend.connected.value);
+    expect(tunnels.opens, 2);
+    await backend.close();
+  });
+
+  test('a Reconnect that joined one try\'s dial gives the next try\'s dial '
+      'a window of its own', () async {
+    far.welcoming = false;
+    final tunnels = _Tunnels(far.server.port);
+    final backend = _backend(tunnels, _Runtime())
+      ..backWithin = const Duration(minutes: 5);
+    backend.connectTo(parsePairingCode(_code));
+    unawaited(backend.run());
+    await until(() => tunnels.opens == 1 && far.hellos == 1);
+    final dialing = tunnels.made.first
+      ..status = tunnelStatus(phase: TunnelPhase.dialing, dialTimeoutMs: 100);
+    final firstTap = DateTime.now();
+    backend.reconnectNow();
+
+    // That try ends, and the next dials.
+    await Future<void>.delayed(const Duration(milliseconds: 1500));
+    await far.drop();
+    await until(() => far.hellos == 2);
+
+    // Past the first try's window, but young in this one's.
+    final past =
+        const Duration(milliseconds: 2400) -
+        DateTime.now().difference(firstTap);
+    if (past > Duration.zero) await Future<void>.delayed(past);
+    backend.reconnectNow();
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+    expect(dialing.closed, isFalse);
+    expect(tunnels.opens, 1);
+    await backend.close();
+  });
+
+  test('a second Reconnect while the first one\'s fresh tunnel opens lets '
+      'it open', () async {
+    final opening = Completer<void>();
+    final tunnels = _Tunnels(far.server.port)..held[2] = opening;
+    final backend = _backend(tunnels, _Runtime());
+    backend.connectTo(parsePairingCode(_code));
+    unawaited(backend.run());
+    await until(() => backend.connected.value);
+
+    backend.reconnectNow();
+    await until(() => tunnels.opens == 2);
+    backend.reconnectNow();
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+    expect(tunnels.opens, 2, reason: 'the second tap starts nothing again');
+
+    opening.complete();
+    await until(() => backend.connected.value);
+    expect(tunnels.opens, 2);
+    await backend.close();
+  });
 }

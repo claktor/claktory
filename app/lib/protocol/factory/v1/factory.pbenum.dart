@@ -138,6 +138,33 @@ class MonitorAction extends $pb.ProtobufEnum {
   const MonitorAction._(super.value, super.name);
 }
 
+class FileSealState extends $pb.ProtobufEnum {
+  /// No seals.
+  static const FileSealState FILE_SEAL_STATE_UNSPECIFIED =
+      FileSealState._(0, _omitEnumNames ? '' : 'FILE_SEAL_STATE_UNSPECIFIED');
+
+  /// The file is the version its latest seal names.
+  static const FileSealState FILE_SEAL_STATE_MATCHES =
+      FileSealState._(1, _omitEnumNames ? '' : 'FILE_SEAL_STATE_MATCHES');
+
+  /// It changed since its latest seal, or is gone.
+  static const FileSealState FILE_SEAL_STATE_CHANGED =
+      FileSealState._(2, _omitEnumNames ? '' : 'FILE_SEAL_STATE_CHANGED');
+
+  static const $core.List<FileSealState> values = <FileSealState>[
+    FILE_SEAL_STATE_UNSPECIFIED,
+    FILE_SEAL_STATE_MATCHES,
+    FILE_SEAL_STATE_CHANGED,
+  ];
+
+  static final $core.List<FileSealState?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 2);
+  static FileSealState? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const FileSealState._(super.value, super.name);
+}
+
 /// Whether a FileContent is a preview (#379).
 class FilePreview extends $pb.ProtobufEnum {
   /// The original: no preview was asked, or none was needed (small enough,
@@ -368,6 +395,14 @@ class ErrorCode extends $pb.ProtobufEnum {
   static const ErrorCode ERROR_CODE_OTHER_ACCOUNT =
       ErrorCode._(17, _omitEnumNames ? '' : 'ERROR_CODE_OTHER_ACCOUNT');
 
+  /// Only the person can do this (#546): the request came from a tool
+  /// connection (an agent's `factoryd` command or script, let in with
+  /// `<home>/tool-token`), which may only read the Workspace and send what
+  /// its allowlist names. The person does it on one of their devices, or in
+  /// this computer's Claktory app. The connection stays open.
+  static const ErrorCode ERROR_CODE_PERSON_ONLY =
+      ErrorCode._(18, _omitEnumNames ? '' : 'ERROR_CODE_PERSON_ONLY');
+
   static const $core.List<ErrorCode> values = <ErrorCode>[
     ERROR_CODE_UNSPECIFIED,
     ERROR_CODE_UNSUPPORTED_PROTOCOL_VERSION,
@@ -387,10 +422,11 @@ class ErrorCode extends $pb.ProtobufEnum {
     ERROR_CODE_SIGN_IN_REQUIRED,
     ERROR_CODE_MOVED,
     ERROR_CODE_OTHER_ACCOUNT,
+    ERROR_CODE_PERSON_ONLY,
   ];
 
   static final $core.List<ErrorCode?> _byValue =
-      $pb.ProtobufEnum.$_initByValueList(values, 17);
+      $pb.ProtobufEnum.$_initByValueList(values, 18);
   static ErrorCode? valueOf($core.int value) =>
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
@@ -1640,6 +1676,13 @@ class ClaktoryAccountState extends $pb.ProtobufEnum {
       ClaktoryAccountState._(
           5, _omitEnumNames ? '' : 'CLAKTORY_ACCOUNT_STATE_SKIPPED');
 
+  /// Asked to join the account with no code (AccountAuthorize, or an emailed
+  /// code once the account has a device): waiting for the person to approve
+  /// it on one of their devices, until approval_expires_ms.
+  static const ClaktoryAccountState CLAKTORY_ACCOUNT_STATE_AWAITING_APPROVAL =
+      ClaktoryAccountState._(
+          6, _omitEnumNames ? '' : 'CLAKTORY_ACCOUNT_STATE_AWAITING_APPROVAL');
+
   static const $core.List<ClaktoryAccountState> values = <ClaktoryAccountState>[
     CLAKTORY_ACCOUNT_STATE_UNSPECIFIED,
     CLAKTORY_ACCOUNT_STATE_SIGNED_OUT,
@@ -1647,10 +1690,11 @@ class ClaktoryAccountState extends $pb.ProtobufEnum {
     CLAKTORY_ACCOUNT_STATE_SIGNED_IN,
     CLAKTORY_ACCOUNT_STATE_REVOKED,
     CLAKTORY_ACCOUNT_STATE_SKIPPED,
+    CLAKTORY_ACCOUNT_STATE_AWAITING_APPROVAL,
   ];
 
   static final $core.List<ClaktoryAccountState?> _byValue =
-      $pb.ProtobufEnum.$_initByValueList(values, 5);
+      $pb.ProtobufEnum.$_initByValueList(values, 6);
   static ClaktoryAccountState? valueOf($core.int value) =>
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
@@ -3171,6 +3215,15 @@ class NeedsYouRecordKind extends $pb.ProtobufEnum {
       NeedsYouRecordKind._(
           25, _omitEnumNames ? '' : 'NEEDS_YOU_RECORD_KIND_BROWSER');
 
+  /// An agent sealed a file (the Seal extension): no card, no approval.
+  /// Outcome CHANGED, agent_id the agent, title Claktory's sentence
+  /// ("Tomás sealed passline.md"), agent_reason the seal's note, in the
+  /// agent's words, sealed_path the file. seq is the seal call's entry in
+  /// its conversation.
+  static const NeedsYouRecordKind NEEDS_YOU_RECORD_KIND_SEALED =
+      NeedsYouRecordKind._(
+          26, _omitEnumNames ? '' : 'NEEDS_YOU_RECORD_KIND_SEALED');
+
   static const $core.List<NeedsYouRecordKind> values = <NeedsYouRecordKind>[
     NEEDS_YOU_RECORD_KIND_UNSPECIFIED,
     NEEDS_YOU_RECORD_KIND_QUESTION,
@@ -3198,10 +3251,11 @@ class NeedsYouRecordKind extends $pb.ProtobufEnum {
     NEEDS_YOU_RECORD_KIND_SECRET_SAVED,
     NEEDS_YOU_RECORD_KIND_RECOVERY_KEY_CHANGED,
     NEEDS_YOU_RECORD_KIND_BROWSER,
+    NEEDS_YOU_RECORD_KIND_SEALED,
   ];
 
   static final $core.List<NeedsYouRecordKind?> _byValue =
-      $pb.ProtobufEnum.$_initByValueList(values, 25);
+      $pb.ProtobufEnum.$_initByValueList(values, 26);
   static NeedsYouRecordKind? valueOf($core.int value) =>
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
@@ -3501,6 +3555,19 @@ class DmSendResult extends $pb.ProtobufEnum {
   static const DmSendResult DM_SEND_RESULT_NOT_HOME =
       DmSendResult._(9, _omitEnumNames ? '' : 'DM_SEND_RESULT_NOT_HOME');
 
+  /// Held back: the conversation still holds a device its account's signed
+  /// device list no longer names (a device locked out). Nothing was kept:
+  /// take that device out of the conversation, then send it again.
+  static const DmSendResult DM_SEND_RESULT_REMOVED_DEVICE_IN_GROUP =
+      DmSendResult._(
+          10, _omitEnumNames ? '' : 'DM_SEND_RESULT_REMOVED_DEVICE_IN_GROUP');
+
+  /// The sending device isn't on the person's current signed device list
+  /// (locked out or removed), so its home takes nothing from it. A device
+  /// just added may see this until the home reads the new list (seconds).
+  static const DmSendResult DM_SEND_RESULT_NOT_LISTED =
+      DmSendResult._(11, _omitEnumNames ? '' : 'DM_SEND_RESULT_NOT_LISTED');
+
   static const $core.List<DmSendResult> values = <DmSendResult>[
     DM_SEND_RESULT_UNSPECIFIED,
     DM_SEND_RESULT_STORED,
@@ -3512,10 +3579,12 @@ class DmSendResult extends $pb.ProtobufEnum {
     DM_SEND_RESULT_HOME_FULL,
     DM_SEND_RESULT_RATE_LIMITED,
     DM_SEND_RESULT_NOT_HOME,
+    DM_SEND_RESULT_REMOVED_DEVICE_IN_GROUP,
+    DM_SEND_RESULT_NOT_LISTED,
   ];
 
   static final $core.List<DmSendResult?> _byValue =
-      $pb.ProtobufEnum.$_initByValueList(values, 9);
+      $pb.ProtobufEnum.$_initByValueList(values, 11);
   static DmSendResult? valueOf($core.int value) =>
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
@@ -3781,6 +3850,198 @@ class AgentBrowserPointerKind extends $pb.ProtobufEnum {
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
   const AgentBrowserPointerKind._(super.value, super.name);
+}
+
+class AgentTabViewEnd extends $pb.ProtobufEnum {
+  static const AgentTabViewEnd AGENT_TAB_VIEW_END_UNSPECIFIED =
+      AgentTabViewEnd._(
+          0, _omitEnumNames ? '' : 'AGENT_TAB_VIEW_END_UNSPECIFIED');
+
+  /// The same view was opened on another device (`device`).
+  static const AgentTabViewEnd AGENT_TAB_VIEW_END_MOVED =
+      AgentTabViewEnd._(1, _omitEnumNames ? '' : 'AGENT_TAB_VIEW_END_MOVED');
+
+  /// The check's tab left its site (a navigation or a redirect to another
+  /// registrable domain): the view stopped before showing it, and the
+  /// request says so.
+  static const AgentTabViewEnd AGENT_TAB_VIEW_END_LEFT_SITE = AgentTabViewEnd._(
+      2, _omitEnumNames ? '' : 'AGENT_TAB_VIEW_END_LEFT_SITE');
+
+  /// The check request was answered, dismissed or taken back.
+  static const AgentTabViewEnd AGENT_TAB_VIEW_END_REQUEST_ENDED =
+      AgentTabViewEnd._(
+          3, _omitEnumNames ? '' : 'AGENT_TAB_VIEW_END_REQUEST_ENDED');
+
+  /// The agent's browser closed, or the tab did.
+  static const AgentTabViewEnd AGENT_TAB_VIEW_END_CLOSED =
+      AgentTabViewEnd._(4, _omitEnumNames ? '' : 'AGENT_TAB_VIEW_END_CLOSED');
+
+  /// It can't be shown now: the browser is waiting for the person in
+  /// another way (a sign-in with no automation), say.
+  static const AgentTabViewEnd AGENT_TAB_VIEW_END_UNAVAILABLE =
+      AgentTabViewEnd._(
+          5, _omitEnumNames ? '' : 'AGENT_TAB_VIEW_END_UNAVAILABLE');
+
+  static const $core.List<AgentTabViewEnd> values = <AgentTabViewEnd>[
+    AGENT_TAB_VIEW_END_UNSPECIFIED,
+    AGENT_TAB_VIEW_END_MOVED,
+    AGENT_TAB_VIEW_END_LEFT_SITE,
+    AGENT_TAB_VIEW_END_REQUEST_ENDED,
+    AGENT_TAB_VIEW_END_CLOSED,
+    AGENT_TAB_VIEW_END_UNAVAILABLE,
+  ];
+
+  static final $core.List<AgentTabViewEnd?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 5);
+  static AgentTabViewEnd? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const AgentTabViewEnd._(super.value, super.name);
+}
+
+class ActivityOutcome extends $pb.ProtobufEnum {
+  static const ActivityOutcome ACTIVITY_OUTCOME_UNSPECIFIED = ActivityOutcome._(
+      0, _omitEnumNames ? '' : 'ACTIVITY_OUTCOME_UNSPECIFIED');
+  static const ActivityOutcome ACTIVITY_OUTCOME_DONE =
+      ActivityOutcome._(1, _omitEnumNames ? '' : 'ACTIVITY_OUTCOME_DONE');
+
+  /// Refused: show "· not allowed".
+  static const ActivityOutcome ACTIVITY_OUTCOME_NOT_ALLOWED = ActivityOutcome._(
+      2, _omitEnumNames ? '' : 'ACTIVITY_OUTCOME_NOT_ALLOWED');
+
+  /// Tried, and it failed.
+  static const ActivityOutcome ACTIVITY_OUTCOME_FAILED =
+      ActivityOutcome._(3, _omitEnumNames ? '' : 'ACTIVITY_OUTCOME_FAILED');
+
+  static const $core.List<ActivityOutcome> values = <ActivityOutcome>[
+    ACTIVITY_OUTCOME_UNSPECIFIED,
+    ACTIVITY_OUTCOME_DONE,
+    ACTIVITY_OUTCOME_NOT_ALLOWED,
+    ACTIVITY_OUTCOME_FAILED,
+  ];
+
+  static final $core.List<ActivityOutcome?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 3);
+  static ActivityOutcome? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const ActivityOutcome._(super.value, super.name);
+}
+
+/// Where a row or an opened thing is.
+class ActivityPlaceKind extends $pb.ProtobufEnum {
+  /// Nothing to open (or it's gone): no chevron.
+  static const ActivityPlaceKind ACTIVITY_PLACE_KIND_UNSPECIFIED =
+      ActivityPlaceKind._(
+          0, _omitEnumNames ? '' : 'ACTIVITY_PLACE_KIND_UNSPECIFIED');
+
+  /// An agent's conversation: id the agent's, seq the entry (0: its end).
+  static const ActivityPlaceKind ACTIVITY_PLACE_KIND_CONVERSATION =
+      ActivityPlaceKind._(
+          1, _omitEnumNames ? '' : 'ACTIVITY_PLACE_KIND_CONVERSATION');
+
+  /// A chat: id the chat's.
+  static const ActivityPlaceKind ACTIVITY_PLACE_KIND_CHAT =
+      ActivityPlaceKind._(2, _omitEnumNames ? '' : 'ACTIVITY_PLACE_KIND_CHAT');
+
+  /// An agent's settings: id the agent's.
+  static const ActivityPlaceKind ACTIVITY_PLACE_KIND_AGENT_SETTINGS =
+      ActivityPlaceKind._(
+          3, _omitEnumNames ? '' : 'ACTIVITY_PLACE_KIND_AGENT_SETTINGS');
+
+  /// Settings → Secrets, at this secret: id its name.
+  static const ActivityPlaceKind ACTIVITY_PLACE_KIND_SECRET =
+      ActivityPlaceKind._(
+          4, _omitEnumNames ? '' : 'ACTIVITY_PLACE_KIND_SECRET');
+
+  /// Settings → Devices, at this device: id ActivityDevice.id.
+  static const ActivityPlaceKind ACTIVITY_PLACE_KIND_DEVICE =
+      ActivityPlaceKind._(
+          5, _omitEnumNames ? '' : 'ACTIVITY_PLACE_KIND_DEVICE');
+
+  /// A section of Settings: id "secrets", "devices", "providers",
+  /// "account", "notifications", "apps", "general" or "activity" (Device
+  /// activity itself, which is recorded as opened like any other).
+  static const ActivityPlaceKind ACTIVITY_PLACE_KIND_SETTINGS =
+      ActivityPlaceKind._(
+          6, _omitEnumNames ? '' : 'ACTIVITY_PLACE_KIND_SETTINGS');
+
+  /// A pipe: id the pipe's.
+  static const ActivityPlaceKind ACTIVITY_PLACE_KIND_PIPE =
+      ActivityPlaceKind._(7, _omitEnumNames ? '' : 'ACTIVITY_PLACE_KIND_PIPE');
+
+  /// A project: id the project's.
+  static const ActivityPlaceKind ACTIVITY_PLACE_KIND_PROJECT =
+      ActivityPlaceKind._(
+          8, _omitEnumNames ? '' : 'ACTIVITY_PLACE_KIND_PROJECT');
+
+  /// A file: id its path.
+  static const ActivityPlaceKind ACTIVITY_PLACE_KIND_FILE =
+      ActivityPlaceKind._(9, _omitEnumNames ? '' : 'ACTIVITY_PLACE_KIND_FILE');
+
+  /// An app (the Marketplace's Apps): id the app's.
+  static const ActivityPlaceKind ACTIVITY_PLACE_KIND_APP =
+      ActivityPlaceKind._(10, _omitEnumNames ? '' : 'ACTIVITY_PLACE_KIND_APP');
+
+  static const $core.List<ActivityPlaceKind> values = <ActivityPlaceKind>[
+    ACTIVITY_PLACE_KIND_UNSPECIFIED,
+    ACTIVITY_PLACE_KIND_CONVERSATION,
+    ACTIVITY_PLACE_KIND_CHAT,
+    ACTIVITY_PLACE_KIND_AGENT_SETTINGS,
+    ACTIVITY_PLACE_KIND_SECRET,
+    ACTIVITY_PLACE_KIND_DEVICE,
+    ACTIVITY_PLACE_KIND_SETTINGS,
+    ACTIVITY_PLACE_KIND_PIPE,
+    ACTIVITY_PLACE_KIND_PROJECT,
+    ACTIVITY_PLACE_KIND_FILE,
+    ACTIVITY_PLACE_KIND_APP,
+  ];
+
+  static final $core.List<ActivityPlaceKind?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 10);
+  static ActivityPlaceKind? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const ActivityPlaceKind._(super.value, super.name);
+}
+
+/// How a device's connection reached this Claktory: the session line's
+/// ", directly" or ", through claktory.com". Never the word relay.
+class SessionPath extends $pb.ProtobufEnum {
+  /// Not known (a session from before Claktory told them apart): say nothing.
+  static const SessionPath SESSION_PATH_UNSPECIFIED =
+      SessionPath._(0, _omitEnumNames ? '' : 'SESSION_PATH_UNSPECIFIED');
+
+  /// Straight to this computer, over the internet or the local network.
+  static const SessionPath SESSION_PATH_DIRECT =
+      SessionPath._(1, _omitEnumNames ? '' : 'SESSION_PATH_DIRECT');
+
+  /// Through Claktory's own relay (claktory.com).
+  static const SessionPath SESSION_PATH_CLAKTORY =
+      SessionPath._(2, _omitEnumNames ? '' : 'SESSION_PATH_CLAKTORY');
+
+  /// Through a relay the person set in place of Claktory's.
+  static const SessionPath SESSION_PATH_OTHER_RELAY =
+      SessionPath._(3, _omitEnumNames ? '' : 'SESSION_PATH_OTHER_RELAY');
+
+  /// The app on the computer Claktory runs on, without the network.
+  static const SessionPath SESSION_PATH_THIS_COMPUTER =
+      SessionPath._(4, _omitEnumNames ? '' : 'SESSION_PATH_THIS_COMPUTER');
+
+  static const $core.List<SessionPath> values = <SessionPath>[
+    SESSION_PATH_UNSPECIFIED,
+    SESSION_PATH_DIRECT,
+    SESSION_PATH_CLAKTORY,
+    SESSION_PATH_OTHER_RELAY,
+    SESSION_PATH_THIS_COMPUTER,
+  ];
+
+  static final $core.List<SessionPath?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 4);
+  static SessionPath? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const SessionPath._(super.value, super.name);
 }
 
 const $core.bool _omitEnumNames =

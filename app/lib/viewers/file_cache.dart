@@ -1,10 +1,10 @@
 // What a device keeps of the files its viewers read from a Claktory on
 // another machine (device-local state). Coming back
 // to a picture, a video, a PDF or a text an agent showed shows the copy
-// kept here at once, once a one-byte read says the file is still that
-// version, rather than bringing it over the tunnel again; a file changed
-// under the same name is read again and replaces it. Offline, the copy
-// shows, saying it may be out of date.
+// kept here rather than bringing it over the tunnel again: a viewer shows
+// it at once while a one-byte read asks whether the file is still that
+// version; a file changed under the same name is read again and replaces
+// it. Offline, the copy shows, saying it may be out of date.
 //
 // - Kept per Claktory ([keptClaktoryKey]), path and variant (the original,
 //   or the preview made for this screen), each with the version it is
@@ -217,8 +217,9 @@ class KeptFile {
 
 /// A kept copy found for a file, and whether the file is still its
 /// version: [current] false when that couldn't be asked (offline), so it
-/// may be out of date.
-typedef KeptRead = ({KeptFile kept, bool current});
+/// may be out of date. [seals]: the file's seals as the asking found them;
+/// null when it couldn't ask.
+typedef KeptRead = ({KeptFile kept, bool current, FileSeals? seals});
 
 /// One Claktory's files kept on this device.
 class FileCache {
@@ -320,19 +321,30 @@ class FileCache {
           if (entry is! File) continue;
           (entry.path.endsWith('.json') ? records : others).add(entry);
         }
-        for (final record in records) {
+        // All at once rather than one after another: the first file opened
+        // after a launch waits for every record.
+        Future<(File, String, KeptFile?)> read(File record) async {
           final id = record.uri.pathSegments.last.replaceAll('.json', '');
-          KeptFile? kept;
           try {
-            kept = KeptFile._fromJson(
+            final kept = KeptFile._fromJson(
               id,
               folder,
               jsonDecode(await record.readAsString()),
             );
+            return (
+              record,
+              id,
+              kept != null && await kept.file.exists() ? kept : null,
+            );
           } on FormatException {
-            kept = null;
+            return (record, id, null);
+          } on FileSystemException {
+            return (record, id, null);
           }
-          if (kept == null || !await kept.file.exists()) {
+        }
+
+        for (final (record, id, kept) in await Future.wait(records.map(read))) {
+          if (kept == null) {
             await _delete(record);
             continue;
           }
@@ -365,6 +377,48 @@ class FileCache {
     return entries[_idOf(path, variant)];
   });
 
+  /// The first of [variants] of [path] kept here, whichever version; null
+  /// if none (or none that says its version).
+  Future<KeptFile?> firstOf(String path, List<String> variants) async {
+    for (final variant in variants) {
+      final kept = await find(path, variant);
+      if (kept != null) return kept.sha256.isEmpty ? null : kept;
+    }
+    return null;
+  }
+
+  /// Whether the file at [kept]'s path is still [kept]'s version, asked
+  /// with a one-byte read, with its seals then: true, or false when that
+  /// couldn't be asked (offline); null when it changed or went. A file gone has its copies
+  /// dropped; a changed one's stay till its new version takes their
+  /// place, so a viewer closed before it comes still has one to show.
+  Future<({bool current, FileSeals? seals})?> check(
+    Backend backend,
+    KeptFile kept,
+  ) async {
+    var current = false;
+    FileSeals? seals;
+    if (backend.connected.value) {
+      try {
+        final now = await backend.readFile(
+          kept.path,
+          maxBytes: 1,
+          expectedSha256: kept.sha256,
+        );
+        if (now.error.isNotEmpty) {
+          if (now.error != 'changed') await drop(kept.path);
+          return null;
+        }
+        current = true;
+        if (now.hasSeals()) seals = now.seals;
+      } on RequestFailure {
+        current = false;
+      }
+    }
+    await touch(kept);
+    return (current: current, seals: seals);
+  }
+
   /// The first of [variants] of [path] kept here, if the file is still its
   /// version: asked with a one-byte read. A file changed or gone has its
   /// copies dropped (null); one that can't be asked (offline) gives its
@@ -374,32 +428,11 @@ class FileCache {
     String path,
     List<String> variants,
   ) async {
-    KeptFile? kept;
-    for (final variant in variants) {
-      kept = await find(path, variant);
-      if (kept != null) break;
-    }
-    if (kept == null || kept.sha256.isEmpty) return null;
-    var current = false;
-    if (backend.connected.value) {
-      try {
-        final now = await backend.readFile(
-          path,
-          maxBytes: 1,
-          expectedSha256: kept.sha256,
-        );
-        if (now.error.isNotEmpty) {
-          // Changed, or gone: what comes next says which.
-          await drop(path);
-          return null;
-        }
-        current = true;
-      } on RequestFailure {
-        current = false;
-      }
-    }
-    await touch(kept);
-    return (kept: kept, current: current);
+    final kept = await firstOf(path, variants);
+    if (kept == null) return null;
+    final checked = await check(backend, kept);
+    if (checked == null) return null;
+    return (kept: kept, current: checked.current, seals: checked.seals);
   }
 
   /// [kept] was used now: the last to go.
@@ -499,6 +532,13 @@ class FileCache {
     final id = _idOf(path, variant);
     final old = entries.remove(id);
     if (old != null) await _deleteCopy(old);
+    // Its other copies (the original, a preview) of another version go:
+    // never shown in place of this one.
+    for (final other in entries.values.toList()) {
+      if (other.path != path || other.sha256 == meta.sha256) continue;
+      entries.remove(other.id);
+      await _deleteCopy(other);
+    }
     final kept = KeptFile._(
       id: id,
       path: path,

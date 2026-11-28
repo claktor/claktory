@@ -16,7 +16,7 @@ use super::*;
 
 /// Sites on this machine, over https with a certificate of their own:
 /// `pages` is (host, path, html), PORT in it the port they're on. Its port.
-async fn served(pages: Vec<(&'static str, &'static str, String)>) -> u16 {
+pub(crate) async fn served(pages: Vec<(&'static str, &'static str, String)>) -> u16 {
     let mut names: Vec<String> = pages.iter().map(|(host, _, _)| (*host).to_owned()).collect();
     names.dedup();
     let made = rcgen::generate_simple_self_signed(names).unwrap();
@@ -73,7 +73,7 @@ async fn served(pages: Vec<(&'static str, &'static str, String)>) -> u16 {
 
 /// A real headless Chrome that finds every name on this machine and takes
 /// its certificates, on `url`: None where there's no Chrome.
-async fn page_at(url: &str) -> Option<(Local, Arc<Page>, std::path::PathBuf)> {
+pub(crate) async fn page_at(url: &str) -> Option<(Local, Arc<Page>, std::path::PathBuf)> {
     let chrome = find_chrome()?;
     super::tests::room_for_chromes();
     let profile = std::env::temp_dir().join(format!("factoryd-frames-{}-{}", std::process::id(), rand_suffix()));

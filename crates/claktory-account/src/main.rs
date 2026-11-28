@@ -18,6 +18,7 @@ Usage:
   claktory-account service-key-statement --secrets FILE --text FILE --signature ID:SIG --out FILE
   claktory-account check-statement URL
   claktory-account stats --db FILE [--format text|charts-json]
+  claktory-account ai-reports --db FILE [--after ID] [--most N] [--format text|json]
   claktory-account backup --db FILE --to DIR [--keep N]
   claktory-account set-cloudflare-token FILE (the token on standard input)
   claktory-account set-resend-key FILE      (the key on standard input)
@@ -45,6 +46,8 @@ serve options:
                           /account/admin; repeat for more
   --geoip FILE            a GeoIP city file (.mmdb: DB-IP's IP to City Lite, or
                           GeoLite2 City) to know roughly where Claktories are
+  --asn FILE              a GeoLite2 ASN file (.mmdb) to name the network a
+                          computer asking to join the account is on
   --relay URL             a relay for Claktories to use; repeat for more
   --vouch-claktory-email ADDRESS
                           a claktory.com address pipes may show as verified
@@ -90,6 +93,12 @@ than the last. check-statement fetches URL's well-known and checks its
 statement against the roots, as Claktory does; it fails when it's missing or
 wrong.
 
+ai-reports prints the replies people reported (Report this reply) that are
+still kept, oldest first: those after --after's id (0), at most --most (50),
+and the --after that shows the next ones. It only reads the database. Text
+shows each report's characters that could act on a terminal as their codes;
+json gives them as they were sent, for another program.
+
 backup writes a consistent copy of the database to DIR, while it's in use, and
 keeps the newest N copies (14).
 
@@ -114,6 +123,7 @@ fn main() -> ExitCode {
         "service-key-statement" => service_key_statement(&args),
         "check-statement" => check_statement(&args),
         "stats" => stats(&args),
+        "ai-reports" => ai_reports(&args),
         "backup" => backup(&args),
         "set-resend-key" => set_resend_key(&args),
         "set-cloudflare-token" => set_cloudflare_token(&args),
@@ -193,6 +203,7 @@ fn serve(args: &[String]) -> Result<(), String> {
             "--relay",
             "--vouch-claktory-email",
             "--geoip",
+            "--asn",
             "--service-key-statement",
             "--user-apps",
             "--user-apps-uid",
@@ -273,6 +284,14 @@ fn serve(args: &[String]) -> Result<(), String> {
             config.locator = Some(Arc::new(server::geo::GeoIp::open(&path)?));
         } else {
             tracing::warn!("no GeoIP file at {} yet: places stay unknown until it's there and the service restarts", path.display());
+        }
+    }
+    if let Some(path) = options.value("--asn")? {
+        let path = PathBuf::from(path);
+        if path.exists() {
+            config.networks = Some(Arc::new(server::geo::GeoIp::open(&path)?));
+        } else {
+            tracing::warn!("no ASN file at {} yet: networks stay unknown until it's there and the service restarts", path.display());
         }
     }
     let mailer = mailer(&options, &secrets)?;
@@ -493,6 +512,36 @@ fn stats(args: &[String]) -> Result<(), String> {
         println!("{}", server::stats::export(&conn, now)?);
     } else {
         print!("{}", server::stats::report(&conn, now).map_err(|error| error.to_string())?);
+    }
+    Ok(())
+}
+
+fn ai_reports(args: &[String]) -> Result<(), String> {
+    let options = Options(args.to_vec());
+    options.check(&["--db", "--after", "--most", "--format"], &[])?;
+    let db = PathBuf::from(options.required("--db")?);
+    let after = match options.value("--after")? {
+        Some(after) => after.parse().ok().filter(|after: &i64| *after >= 0).ok_or("--after takes a report's id")?,
+        None => 0,
+    };
+    let most = match options.value("--most")? {
+        Some(most) => most.parse().ok().filter(|most: &usize| *most > 0).ok_or("--most takes a number above 0")?,
+        None => 50,
+    };
+    let json = match options.value("--format")?.as_deref() {
+        None | Some("text") => false,
+        Some("json") => true,
+        Some(other) => return Err(format!("--format is text or json, not {other}")),
+    };
+    let conn = rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|error| format!("can't open {}: {error}", db.display()))?;
+    let (reports, more) = server::reports::kept(&conn, jiff::Timestamp::now().as_second(), after, most).map_err(|error| error.to_string())?;
+    if json {
+        let next = if more { reports.last().map(|last| last.id) } else { None };
+        let answer = serde_json::json!({"reports": reports, "next_after": next});
+        println!("{}", serde_json::to_string_pretty(&answer).map_err(|error| error.to_string())?);
+    } else {
+        print!("{}", server::reports::text(&reports, more));
     }
     Ok(())
 }

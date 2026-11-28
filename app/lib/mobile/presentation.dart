@@ -32,6 +32,7 @@ class SheetAction<T> {
     this.value, {
     this.glyph,
     this.destructive = false,
+    this.checked = false,
   });
 
   final String label;
@@ -42,6 +43,9 @@ class SheetAction<T> {
 
   /// It deletes or removes something: in `danger`.
   final bool destructive;
+
+  /// It's what's on or open now: a check at the row's end, read as selected.
+  final bool checked;
 }
 
 /// Asks what to do: on a phone an action sheet ([title] and [message] in
@@ -951,10 +955,12 @@ class _ActionList<T> extends StatelessWidget {
       Widget Function(Color color)? glyph,
       Color? color,
       bool bold = false,
+      bool checked = false,
     }) {
       final ink = color ?? palette.text;
       return Semantics(
         button: true,
+        selected: checked,
         label: label,
         // Its own tap, labelled, in place of the detector's.
         onTap: onTap,
@@ -988,6 +994,19 @@ class _ActionList<T> extends StatelessWidget {
                     ),
                   ),
                 ),
+                if (checked) ...[
+                  const SizedBox(width: Space.s),
+                  glyphWithText(
+                    context,
+                    ExtensionGlyph(
+                      icon: 'check',
+                      name: 'Checked',
+                      color: palette.signal,
+                      size: 20,
+                    ),
+                    size: 20,
+                  ),
+                ],
               ],
             ),
           ),
@@ -1029,6 +1048,7 @@ class _ActionList<T> extends StatelessWidget {
               label: action.label,
               glyph: action.glyph,
               color: action.destructive ? palette.danger : null,
+              checked: action.checked,
               onTap: () => close(action.value),
             ),
           if (cancelLabel case final cancel?) ...[

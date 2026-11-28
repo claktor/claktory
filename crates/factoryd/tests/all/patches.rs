@@ -26,9 +26,9 @@ async fn patches_make_the_same_workspace_as_whole_ones() {
         }),
         client_message::Body::SelectAgent(v1::SelectAgent { agent_id: "builder".into() }),
         send_message("builder", "hello"),
-        client_message::Body::UpdateProject(v1::UpdateProject { project_id: "site".into(), name: None, archived: Some(true), before_id: None }),
+        client_message::Body::UpdateProject(v1::UpdateProject { project_id: "site".into(), name: None, archived: Some(true), before_id: None, brief: None }),
         client_message::Body::DeleteAgent(v1::DeleteAgent { agent_id: "helper".into() }),
-        client_message::Body::UpdateProject(v1::UpdateProject { project_id: "site".into(), name: None, archived: Some(false), before_id: None }),
+        client_message::Body::UpdateProject(v1::UpdateProject { project_id: "site".into(), name: None, archived: Some(false), before_id: None, brief: None }),
         client_message::Body::SelectAgent(v1::SelectAgent { agent_id: "rivet".into() }),
     ];
     let mut patches = 0;

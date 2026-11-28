@@ -124,6 +124,7 @@ const ALLOWED: &[&str] = &[
     "Input.insertText",
     "Network.clearBrowserCache",
     "Network.getCookies",
+    "Page.captureScreenshot",
     "Page.createIsolatedWorld",
     "Page.enable",
     "Page.getFrameTree",
@@ -131,6 +132,7 @@ const ALLOWED: &[&str] = &[
     "Page.navigate",
     "Page.screencastFrameAck",
     "Page.setDocumentContent",
+    "Page.setInterceptFileChooserDialog",
     "Page.startScreencast",
     "Page.stopScreencast",
     "Runtime.callFunctionOn",
@@ -249,7 +251,7 @@ mod tests {
     fn only_the_methods_factoryd_sends_go_through() {
         assert!(ALLOWED.windows(2).all(|pair| pair[0] < pair[1]), "sorted, for binary_search");
         for method in ["Network.getAllCookies", "Network.enable", "Storage.getStorageKeyForFrame", "Storage.getUsageAndQuota",
-            "Page.captureSnapshot", "Page.captureScreenshot", "Debugger.enable", "IO.read", "DOMStorage.getDOMStorageItems",
+            "Page.captureSnapshot", "Page.printToPDF", "Debugger.enable", "IO.read", "DOMStorage.getDOMStorageItems",
             "IndexedDB.requestData", "Runtime.Evaluate", "runtime.evaluate", ""]
         {
             let message = json!({"id": 3, "sessionId": "S", "method": method}).to_string();

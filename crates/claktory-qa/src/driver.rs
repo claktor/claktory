@@ -1,6 +1,7 @@
 //! The protocol driver: one connection to a sandbox per command, let in as
-//! factoryd's own CLI is (`cli.rs`: the token of `<home>/remote/local-pairing`
-//! on the loopback port), sending any request as JSON and printing what
+//! the person on the loopback port (`<home>/qa-person-token`, which factoryd
+//! built with its qa-person feature writes; `remote/local-pairing`'s token
+//! from a commit before the app's socket), sending any request as JSON and printing what
 //! comes back as JSON. Requests and answers go through the protocol's
 //! descriptors (`build.rs`), so a new request needs no code here: its name
 //! and its fields as the proto file has them.
@@ -187,9 +188,15 @@ impl Connection {
         let stream = TcpStream::connect(&address).await.map_err(|error| down(error.to_string()))?;
         let (socket, _) =
             tokio_tungstenite::client_async(format!("ws://{address}"), stream).await.map_err(|error| down(error.to_string()))?;
-        let token = std::fs::read_to_string(sandbox.home().join("remote/local-pairing"))
+        // The QA person's token (factoryd's qa-person feature), or,
+        // from a commit before it, this machine's pairing code's.
+        let token = std::fs::read_to_string(sandbox.home().join("qa-person-token"))
             .ok()
-            .and_then(|code| code.trim().split(['?', '&']).find_map(|part| part.strip_prefix("t=").map(str::to_owned)))
+            .map(|token| token.trim().to_owned())
+            .or_else(|| {
+                let code = std::fs::read_to_string(sandbox.home().join("remote/local-pairing")).ok()?;
+                code.trim().split(['?', '&']).find_map(|part| part.strip_prefix("t=").map(str::to_owned))
+            })
             .unwrap_or_default();
         let mut connection = Connection { socket, next: 1, held: Default::default(), workspace: v1::Workspace::default() };
         let hello = v1::Hello {

@@ -5,7 +5,7 @@
 //! requirement is: the same team, or, in a Dev build signed ad hoc, the
 //! cdhash of the app it sits in.
 
-use std::os::unix::net::UnixStream;
+use std::os::fd::AsRawFd;
 use std::path::Path;
 
 /// A signature, as Security reads it.
@@ -18,6 +18,8 @@ pub struct Signature {
     pub adhoc: bool,
     /// The code directory's hash, as a requirement's `cdhash H"…"` names it.
     pub cdhash: Vec<u8>,
+    /// Signed with the hardened runtime (kSecCodeSignatureRuntime).
+    pub runtime: bool,
 }
 
 impl Signature {
@@ -41,7 +43,6 @@ pub use mac::{check, of_path, own};
 #[cfg(target_os = "macos")]
 mod mac {
     use std::ffi::c_void;
-    use std::os::fd::AsRawFd;
 
     use core_foundation::base::{CFType, TCFType};
     use core_foundation::data::CFData;
@@ -88,6 +89,7 @@ mod mac {
     /// kSecCSStrictValidate | kSecCSCheckAllArchitectures | kSecCSCheckNestedCode
     const STATIC_CHECK: u32 = (1 << 4) | (1 << 0) | (1 << 3);
     const ADHOC: u32 = 0x0002;
+    const RUNTIME: u32 = 0x0001_0000;
 
     /// Releases a Security object when it goes.
     struct Owned(*const c_void);
@@ -101,7 +103,7 @@ mod mac {
     }
 
     /// The peer's audit token: 8 words, exactly.
-    fn audit_token(socket: &UnixStream) -> Result<[u8; 32], String> {
+    fn audit_token(socket: &impl AsRawFd) -> Result<[u8; 32], String> {
         let mut token = [0u8; 32];
         let mut len = token.len() as libc::socklen_t;
         let status = unsafe { libc::getsockopt(socket.as_raw_fd(), SOL_LOCAL, LOCAL_PEERTOKEN, token.as_mut_ptr().cast(), &mut len) };
@@ -126,7 +128,7 @@ mod mac {
 
     /// Checks the process on the other end of `socket` against
     /// `requirement`; its signature when it passes.
-    pub fn check(socket: &UnixStream, requirement_text: &str) -> Result<Signature, String> {
+    pub fn check(socket: &impl AsRawFd, requirement_text: &str) -> Result<Signature, String> {
         let requirement = requirement(requirement_text)?;
         let token = audit_token(socket)?;
         let key = unsafe { CFString::wrap_under_get_rule(kSecGuestAttributeAudit) };
@@ -190,6 +192,7 @@ mod mac {
         let flags = unsafe { get(kSecCodeInfoFlags) }.and_then(|value| value.downcast::<CFNumber>()).and_then(|value| value.to_i64());
         let certificates = unsafe { get(kSecCodeInfoCertificates) }.is_some();
         let adhoc = flags.map_or(!certificates, |flags| flags as u32 & ADHOC != 0);
+        let runtime = flags.is_some_and(|flags| flags as u32 & RUNTIME != 0);
         let cdhash = unsafe { get(kSecCodeInfoUnique) }
             .and_then(|value| value.downcast::<CFData>())
             .map(|data| data.bytes().to_vec())
@@ -197,13 +200,13 @@ mod mac {
         if cdhash.is_empty() {
             return Err(format!("{identifier} has no code directory hash"));
         }
-        Ok(Signature { identifier, team, adhoc, cdhash })
+        Ok(Signature { identifier, team, adhoc, cdhash, runtime })
     }
 }
 
 /// Elsewhere there's no app to check: every peer is refused.
 #[cfg(not(target_os = "macos"))]
-pub fn check(_socket: &UnixStream, _requirement: &str) -> Result<Signature, String> {
+pub fn check(_socket: &impl AsRawFd, _requirement: &str) -> Result<Signature, String> {
     Err("the browser helper works only on macOS".into())
 }
 

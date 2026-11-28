@@ -166,14 +166,29 @@ async fn a_pop_up_that_comes_back_is_not_dismissed_again() {
 }
 
 #[tokio::test]
-async fn a_pop_up_that_asks_for_a_password_is_the_persons() {
+async fn a_sign_in_pop_up_is_the_pages_and_never_dismissed() {
     let html = popup(r#"<label>Password <input type=password></label><button onclick="window.shut = true">Close</button>"#);
     let Some((_local, page, profile)) = page_with(&html).await else { return };
     let mut hands = TestHand::new();
     let Ok(Answer::Page(read)) = page.read(4096).await else { panic!("a page") };
+    // A dialog to sign in is the page's, never in its way: nothing to clear.
+    assert!(read.overlays.is_empty(), "{:?}", read.overlays);
     let refused = page.dismiss(&mut hands.hand(), &read.document).await.unwrap_err();
-    assert_eq!(refused.0, "sensitive_action", "{refused:?}");
+    assert_eq!(refused.0, "unsupported_target", "{refused:?}");
     assert_eq!(seen(&page, "window.shut === undefined").await, true);
+    let _ = std::fs::remove_dir_all(&profile);
+}
+
+#[tokio::test]
+async fn a_sign_in_dialog_that_mentions_cookies_isnt_a_cookie_notice() {
+    let html = r#"<!doctype html><title>X</title><h1>Home</h1>
+        <div role=dialog aria-modal=true style="position:fixed;inset:10% 30%;background:#fff">
+        <p>By signing up, you agree to the Terms of Service and Privacy Policy, including Cookie Use.</p>
+        <label>Phone, email or username <input type=text></label><button>Next</button></div>"#;
+    let Some((_local, page, profile)) = page_with(html).await else { return };
+    let Ok(Answer::Page(read)) = page.read(4096).await else { panic!("a page") };
+    assert_ne!(element(&read, "Next").overlay.as_deref(), Some("cookie notice"), "{:?}", read.elements);
+    assert!(!read.text.contains("cookie notice"), "{}", read.text);
     let _ = std::fs::remove_dir_all(&profile);
 }
 

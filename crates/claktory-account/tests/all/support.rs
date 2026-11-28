@@ -234,7 +234,9 @@ impl Instance {
         self.post("/v1/sign-in/start", &start, &claktory.ip).await
     }
 
-    /// Signs `claktory` in to `email`'s account, and checks its share.
+    /// Signs `claktory` in to `email`'s account, and checks its share. Its
+    /// verify is signed with its backend key, as factoryd signs it: proof
+    /// of the key it has there when it signs in again.
     pub async fn sign_in(&self, claktory: &mut Claktory, email: &str, name: &str) -> SignedIn {
         let answer = self.start_sign_in(claktory, email, name).await;
         assert_eq!(answer.status, 200, "{}", answer.text());
@@ -245,7 +247,14 @@ impl Instance {
             code: self.last_code(&normalize_email(email).expect("an email")),
             eph_pub: ephemeral.public_b64(),
         };
-        let answer = self.post("/v1/sign-in/verify", &verify, &claktory.ip).await;
+        let body = serde_json::to_vec(&verify).expect("json");
+        let time = self.now();
+        let headers = [
+            (TIME_HEADER, time.to_string()),
+            (SIGNATURE_HEADER, sign_request(&claktory.key, "POST", "/v1/sign-in/verify", time, &body)),
+            ("x-forwarded-for", claktory.ip.clone()),
+        ];
+        let answer = self.send("POST", "/v1/sign-in/verify", body, &headers).await;
         assert_eq!(answer.status, 200, "{}", answer.text());
         let signed_in: SignedIn = answer.json();
         let share = ephemeral.open(&signed_in.sealed_share, &claktory.id, signed_in.epoch).expect("the share opens");

@@ -59,7 +59,8 @@ const READ_AHEAD: usize = 4;
 /// How receive talks to the person: in a terminal, or a test.
 #[derive(Clone)]
 pub struct Ui {
-    /// Shows the receive code.
+    /// Shows the receive code. For a move with the account it comes
+    /// without its secret, and isn't shown: there's no code then.
     pub code: Arc<dyn Fn(&ReceiveCode) + Send + Sync>,
     /// Says what's happening, a line at a time.
     pub say: Arc<dyn Fn(&str) + Send + Sync>,
@@ -86,6 +87,13 @@ pub struct Options {
     pub committed: bool,
     /// Only this computer's addresses, no relays (tests).
     pub local_only: bool,
+    /// A move with the account: the email the person signs in to Claktory
+    /// with. No code is shown and no digits asked: the account service asks
+    /// the person to approve the move on a device connected to the Claktory
+    /// that moves, and only that Claktory's endpoint is let in.
+    pub email: Option<String>,
+    /// The account service, when not Claktory's own (`--service URL`).
+    pub service: Option<String>,
 }
 
 fn receive_dir(home: &Home) -> PathBuf {
@@ -117,6 +125,58 @@ impl Claim {
     fn save(&self, home: &Home) -> Result<(), ImportError> {
         let text = serde_json::to_string(self).unwrap_or_default();
         crate::remote::write_private(&Claim::path(home), text.as_bytes()).map_err(|error| failed("Can't save who's moving here", error))
+    }
+}
+
+/// A move with the account, once its source took it: the only endpoint let
+/// in, and what the service said of it. Kept in `receive/approved.json`,
+/// so running receive again carries on.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+struct Approved {
+    source_key: String,
+    source_claktory_id: String,
+    approver: String,
+}
+
+impl Approved {
+    fn path(home: &Home) -> PathBuf {
+        receive_dir(home).join("approved.json")
+    }
+
+    fn load(home: &Home) -> Option<Approved> {
+        let text = std::fs::read_to_string(Approved::path(home)).ok()?;
+        serde_json::from_str::<Approved>(&text).ok().filter(|approved| !approved.source_key.is_empty())
+    }
+
+    fn save(&self, home: &Home) -> Result<(), ImportError> {
+        let text = serde_json::to_string(self).unwrap_or_default();
+        crate::remote::write_private(&Approved::path(home), text.as_bytes()).map_err(|error| failed("Can't save the approved move", error))
+    }
+}
+
+/// Asks the account service to receive one of the account's Claktories here
+/// and waits for the person's approval and its source's take: the source's
+/// endpoint, the only one let in. Its connections wait meanwhile.
+async fn approval(home: &Home, options: &Options, email: &str, key: &SecretKey, relays: Vec<String>, ui: &Ui) -> Result<Approved, ImportError> {
+    let asked = crate::account::moves::receive_start(home, options.service.as_deref(), email, key, relays).await.map_err(ImportError::Refused)?;
+    (ui.say)(crate::account::moves::APPROVE_THERE);
+    // The one fact a service can't fake: the person checks it's this
+    // computer they approve.
+    let code = crate::account::moves::computer_code(key);
+    (ui.say)(&format!("On your device, Settings → Move will show this computer's code: {code}. Approve only if it matches."));
+    loop {
+        tokio::time::sleep(asked.interval).await;
+        if let Some(authorized) = asked.poll(key).await.map_err(ImportError::Refused)? {
+            let approved = Approved {
+                source_key: authorized.source_key,
+                source_claktory_id: authorized.source_claktory_id,
+                approver: authorized.approver,
+            };
+            approved.save(home)?;
+            (ui.say)("Approved. Waiting for the Claktory you're moving to connect…");
+            return Ok(approved);
+        }
     }
 }
 
@@ -200,7 +260,7 @@ async fn receiving(home: &Home, addr: SocketAddr, options: &Options, ui: &Ui) ->
         return commit(home, &state).map_err(ImportError::Refused);
     }
     let (key, secret) = key_and_secret(home)?;
-    let endpoint = bind(key, options.local_only).await?;
+    let endpoint = bind(key.clone(), options.local_only).await?;
     if !options.local_only {
         let _ = tokio::time::timeout(ONLINE_WAIT, endpoint.online()).await;
     }
@@ -218,7 +278,16 @@ async fn receiving(home: &Home, addr: SocketAddr, options: &Options, ui: &Ui) ->
             endpoint.addr().ip_addrs().filter(|address| !address.ip().is_loopback()).copied().collect()
         },
     };
-    (ui.code)(&code);
+    // With the account, no code is shown: the source is whoever the person
+    // approves. One approved before carries on.
+    let with_account = options.email.is_some() || Approved::load(home).is_some();
+    if with_account {
+        // No code to show: only where it listens, without the secret,
+        // which a terminal shows nothing of.
+        (ui.code)(&ReceiveCode { secret: String::new(), ..code.clone() });
+    } else {
+        (ui.code)(&code);
+    }
     let staged = {
         let home = home.clone();
         tokio::task::spawn_blocking(move || Staging::load(&home)).await.map_err(|error| failed("Can't read what's here", error))?
@@ -236,6 +305,7 @@ async fn receiving(home: &Home, addr: SocketAddr, options: &Options, ui: &Ui) ->
         claimed: claimed.clone(),
         working: Arc::new(tokio::sync::Mutex::new(())),
         done: done.clone(),
+        approved: None,
     };
     // Connections are accepted apart from the session, so a slow handshake
     // never holds it up.
@@ -253,6 +323,26 @@ async fn receiving(home: &Home, addr: SocketAddr, options: &Options, ui: &Ui) ->
             }
         })
     };
+    // Connections that come meanwhile wait (the source dials as soon as it
+    // takes the move, maybe before the poll hears so).
+    if with_account {
+        let approved = match Approved::load(home) {
+            Some(approved) => approved,
+            None => {
+                let email = options.email.clone().unwrap_or_default();
+                let relays = ctx.code.relays.clone();
+                match approval(home, options, &email, &key, relays, ui).await {
+                    Ok(approved) => approved,
+                    Err(error) => {
+                        accepting.abort();
+                        endpoint.close().await;
+                        return Err(error);
+                    }
+                }
+            }
+        };
+        ctx.approved = Some(approved.source_key);
+    }
     let mut next = None;
     let result = loop {
         let connection = match next.take() {
@@ -373,6 +463,9 @@ struct Ctx {
     /// The text for the person once the source committed and this side
     /// finished: the move is done, whatever happens to the session.
     done: Arc<std::sync::Mutex<Option<String>>>,
+    /// A move with the account: the only source endpoint let in, approved
+    /// by the person on their device; no secret, no digits.
+    approved: Option<String>,
 }
 
 /// Writes what's queued on `out`, in order, while the session reads.
@@ -464,7 +557,16 @@ impl Ctx {
         let Frame::Hello { secret, version, machine, os, arch } = hello else {
             return Outcome::Again;
         };
-        if !move_wire::same(&secret, &self.secret) {
+        if let Some(approved) = &self.approved {
+            // Only the endpoint the source named taking the move: iroh's
+            // handshake proved `source` is that key.
+            if source != approved {
+                tokio::time::sleep(WRONG_PAUSE).await;
+                let why = "This computer is waiting for the Claktory you approved to move here, so another can't.".to_owned();
+                let _ = out.send((Frame::Failed { why }, Vec::new()));
+                return Outcome::Again;
+            }
+        } else if !move_wire::same(&secret, &self.secret) {
             tokio::time::sleep(WRONG_PAUSE).await;
             let why = "That isn't the code this computer shows now: copy it again from where factoryd receive runs.".to_owned();
             let _ = out.send((Frame::Failed { why }, Vec::new()));
@@ -472,6 +574,7 @@ impl Ctx {
         }
         let claim = locked(&self.claimed).clone();
         let resumed = claim.as_deref() == Some(source);
+        let approved = self.approved.is_some();
         // Another key while the one that has the code isn't connected: the
         // same computer starting its move again (a source starts each try
         // with a new key, #23), let in only by the digits once more.
@@ -502,6 +605,14 @@ impl Ctx {
         let _ = out.send((welcome, Vec::new()));
         if resumed {
             self.say(&format!("{machine} is back: carrying on."));
+        } else if approved {
+            // Approved on the person's device, its source checked by key:
+            // no digits.
+            if let Err(error) = (Claim { source: source.to_owned(), machine: machine.clone() }).save(&self.home) {
+                return self.fail(out, error.to_string());
+            }
+            *locked(&self.claimed) = Some(source.to_owned());
+            self.say(&format!("{machine} is moving its Claktory here, as you approved."));
         } else {
             if again {
                 self.say(&format!(
@@ -777,7 +888,7 @@ impl Ctx {
             }
         }
         if state.step == Step::Commit {
-            let _ = out.send((Frame::Ready { old_app_code: state.old_app_code.clone() }, Vec::new()));
+            let _ = out.send((Frame::Ready { old_app_code: None }, Vec::new()));
             return None;
         }
         let (home, say, progress) = (self.home.clone(), self.ui.say.clone(), out.clone());
@@ -791,8 +902,8 @@ impl Ctx {
         .await
         .unwrap_or_else(|error| Err(failed("The import stopped", error)));
         match imported {
-            Ok(imported) => {
-                let _ = out.send((Frame::Ready { old_app_code: imported.old_app_code }, Vec::new()));
+            Ok(_imported) => {
+                let _ = out.send((Frame::Ready { old_app_code: None }, Vec::new()));
                 self.say(&format!("Verified. Waiting for {} to hand over…", self.machine));
                 None
             }

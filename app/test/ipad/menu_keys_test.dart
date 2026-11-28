@@ -1,5 +1,5 @@
 // A hardware keyboard's ⌘-commands on an iPad while the system's menu
-// shows them (Zucchero's row 701): in the Simulator its key commands never
+// shows them: in the Simulator its key commands never
 // fire, so ⌃⌘S left the sidebar as it was and focus mode's ⌘⇧C, ⌥⌘↓ and
 // ⌘↩ did nothing, Flutter's own bindings having stood down. They're bound
 // in Flutter whether or not the menu takes them, and a `run` the menu sends

@@ -1,9 +1,8 @@
-// Needs you on an iPhone: the list of what waits (#599, needs-you-cards.md
-// §4.5), a request tapped there alone on its own screen, who asks opening
-// their conversation, back to the list once answered, and no focus mode
-// (#606). The same one-card screen is a narrow iPad's focus mode (#514
-// §7): one card a screen, "3 of 7" opening the queue, ˄ ˅ between cards,
-// and the answer pinned under the thumb.
+// Needs you on an iPhone: the list of what waits, a request tapped there
+// alone on its own screen, who asks opening their conversation, back to
+// the list once answered, and no focus mode. The same one-card screen is a
+// narrow iPad's focus mode: one card a screen, "3 of 7" opening the queue,
+// ˄ ˅ between cards, and the answer pinned under the thumb.
 import 'package:factory_app/card_answer.dart' show AnswerDock, CardAnswer;
 import 'package:factory_app/card_files.dart' show CardAttachButton;
 import 'package:factory_app/inbox.dart' show NeedsYouCard, NeedsYouList;
@@ -75,7 +74,7 @@ Future<Harness> _open(
 
 /// Focus mode's sitting: the phone's one-card screen, as a narrow iPad's
 /// focus mode shows it (ipad/focus.dart; Slide Over, ⅓ Split View). An
-/// iPhone has none (#606). [onClose]: what its Back and Done do.
+/// iPhone has none. [onClose]: what its Back and Done do.
 Future<Harness> _focus(
   WidgetTester tester, {
   Workspace? workspace,
@@ -241,12 +240,11 @@ void main() {
       await harness.apply(tester, _workspace(mista: const []));
       await tester.pump();
       // The receipt, a moment, over this request: never the next one, nor
-      // buttons a second tap could answer it with (Squalo's B1).
+      // buttons a second tap could answer it with.
       expect(find.text('Turn on the relay rule?'), findsOneWidget);
       expect(find.text('Ship the migration tonight?'), findsNothing);
       expect(find.byKey(phoneThumbDockKey), findsNothing);
-      // Opened alone: nothing to go Next to, only Done back to the list
-      // (Zucchero 49234).
+      // Opened alone: nothing to go Next to, only Done back to the list.
       expect(find.widgetWithText(Button, 'Next'), findsNothing);
       await tester.pump(phoneAnsweredFor ~/ 2);
       expect(find.text('Ship the migration tonight?'), findsNothing);
@@ -258,7 +256,7 @@ void main() {
       expect(
         find.descendant(
           of: find.byType(NeedsYouList),
-          // In the card's own words: an approval's yes (#533).
+          // In the card's own words: an approval's yes.
           matching: find.text('Approved'),
         ),
         findsOneWidget,
@@ -444,7 +442,7 @@ void main() {
     expect(find.text('Turn on the relay rule?'), findsOneWidget);
     await harness.apply(tester, _workspace(mista: const []));
     await pumpFrames(tester);
-    // It never moves on by itself (§8).
+    // It never moves on by itself.
     expect(find.text('Turn on the relay rule?'), findsOneWidget);
     final next = find.widgetWithText(Button, 'Next');
     expect(next, findsOneWidget);
@@ -501,7 +499,7 @@ void main() {
               builder: (context) {
                 final dock = AnswerDock.of(context);
                 docked = dock != null;
-                // Docked on purpose: the no asks why (Sorbet 38658).
+                // Docked on purpose: the no asks why.
                 WidgetsBinding.instance.addPostFrameCallback((_) {
                   dock?.answer.value = CardAnswer(
                     key: item.key,
@@ -620,7 +618,7 @@ void main() {
       final no = tester.getRect(_inDock('Dismiss'));
       expect(no.center.dx, lessThan(yes.center.dx));
       expect(yes.center.dy, closeTo(no.center.dy, 1));
-      // Their buttons 2:3 (Lucy's spec; Zucchero 49328).
+      // Their buttons 2:3.
       final yesButton = tester.getRect(
         find.ancestor(of: _inDock('Approve'), matching: find.byType(Button)),
       );

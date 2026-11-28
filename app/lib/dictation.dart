@@ -623,7 +623,7 @@ class DictationFieldState extends State<Dictation> implements DictationHold {
       builder: (context, _) {
         // A recording not sent yet shows even before the Claktory says
         // it takes voice (the app just started, not connected yet).
-        if (!voiceKnown(workspace.workspace) &&
+        if (!micOffered(workspace.workspace) &&
             _state != DictationState.unsent) {
           final trailing = widget.trailing;
           if (trailing == null) return widget.child;

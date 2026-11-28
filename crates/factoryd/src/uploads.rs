@@ -4,7 +4,7 @@
 //! <yyyy-mm-dd>/<name>`, for the agent to move where it belongs. While it
 //! comes in, a file is kept in `uploads/.partial/`; an upload whose connection
 //! dropped resumes from what's there as long as the backend runs. One that
-//! finished is remembered for an hour (#401): asked again, after an answer
+//! finished is remembered for an hour: asked again, after an answer
 //! lost on a weak connection, StartUpload says it's all there and
 //! FinishUpload answers as it did, so nothing is sent or stored twice.
 //!

@@ -94,6 +94,7 @@ Future<Harness> _showVideo(
   int size = 9 * 1024 * 1024,
   List<Thread> threads = const [],
   bool ranged = true,
+  FileSeals? seals,
 }) async {
   final data = List<int>.filled(size, 7);
   final harness = await showPanes(
@@ -106,6 +107,7 @@ Future<Harness> _showVideo(
         size: Int64(size),
         data: data,
         sha256: 'v1',
+        seals: seals,
       ),
     },
   );
@@ -268,6 +270,31 @@ void main() {
     await tester.tap(find.bySemanticsLabel('Play').first);
     await settle(tester);
     expect(player.state.value.playing, isTrue);
+  });
+
+  testWidgets('a video changed since its seal says who sealed it', (
+    tester,
+  ) async {
+    await _showVideo(
+      tester,
+      seals: FileSeals(
+        path: _path,
+        seals: [
+          FileSeal(
+            sha256: 'sealed-sha',
+            agentName: 'Tomás',
+            sealedMs: Int64(DateTime.now().millisecondsSinceEpoch),
+            kept: true,
+          ),
+        ],
+        state: FileSealState.FILE_SEAL_STATE_CHANGED,
+      ),
+    );
+    expect(
+      find.textContaining('Changed since Tomás sealed it'),
+      findsOneWidget,
+    );
+    expect(find.text('Open sealed version'), findsOneWidget);
   });
 
   // An agent showing a video that's already open:

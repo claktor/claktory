@@ -22,7 +22,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use claktory_account::server::{self, Config, Secrets, Service, UserApps, mail};
+use claktory_account::server::{self, Config, Service, UserApps, mail};
 use claktory_dm_crypto::certificate::LeafKind;
 use claktory_dm_crypto::device_list::Listed;
 use claktory_dm_crypto::group::LeafKey;
@@ -51,7 +51,7 @@ async fn service(dir: &Path) -> (String, Arc<mail::Memory>) {
     let mail = Arc::new(mail::Memory::default());
     let config = Config { user_apps: Some(UserApps { socket, uid }), ..Config::default() };
     let clock: server::Clock = Arc::new(|| jiff::Timestamp::now().as_second());
-    let service = Service::new(&dir.join("account.db"), Secrets::generate(), config, mail.clone(), clock).expect("the service");
+    let service = Service::new(&dir.join("account.db"), dm_device::service_secrets(), config, mail.clone(), clock).expect("the service");
     tokio::spawn(server::serve(listener, service));
     (url, mail)
 }
@@ -111,7 +111,8 @@ fn bytes_of(id: EndpointId) -> [u8; 32] {
     *id.as_bytes()
 }
 
-/// The home's state, as a device asks it.
+/// The home's state, as a device asks it (over its own link: DmRoutes is a
+/// device's).
 async fn home_state(client: &mut Client) -> v1::DmHome {
     match client.request(Request::DmRoutes(v1::DmRoutes { routes: Vec::new() })).await.body {
         Body::DmHome(home) => home,
@@ -160,7 +161,16 @@ async fn the_home_hears_only_the_persons_own_claktories() {
     let home = factoryd::dm_device::endpoint_for_test(&factory).expect("an endpoint");
     phone.home = Some(home);
     phone.publish_keys().await;
-    until("this Claktory hears it's the home", async || home_state(&mut link).await.is_home).await;
+    let mut asking = phone.link(addr).await;
+    until("this Claktory hears it's the home", async || home_state(&mut asking).await.is_home).await;
+    // A connection signed in to no account gives the home no routes.
+    match link.request(Request::DmRoutes(v1::DmRoutes { routes: Vec::new() })).await.body {
+        Body::Error(error) => {
+            assert_eq!(error.code(), v1::ErrorCode::InvalidRequest);
+            assert!(error.message.contains("isn't signed in"), "{}", error.message);
+        }
+        other => panic!("routes from a connection signed in to no account: {other:?}"),
+    }
     let home_id = EndpointId::from_bytes(&home).expect("an endpoint id");
     lookup.on_endpoint(&home_id, WAIT).await.expect("the home is published");
 

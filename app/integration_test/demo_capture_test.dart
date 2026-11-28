@@ -70,7 +70,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:ui' as ui;
 
-import 'package:factory_app/backend.dart' show RequestFailure, localPort;
+import 'package:factory_app/backend.dart' show RequestFailure;
 import 'package:factory_app/explorer.dart' show openFile;
 import 'package:factory_app/main.dart' as app;
 import 'package:factory_app/controls.dart' show Button, GlyphButton;
@@ -174,10 +174,10 @@ void main() {
   binding.framePolicy = LiveTestWidgetsFlutterBindingFramePolicy.benchmark;
 
   testWidgets('demo capture', timeout: Timeout.none, (tester) async {
-    if (!_dev || localPort != '7421') {
+    if (!_dev) {
       fail(
         'the demo films only the dev Claktory: run it with '
-        '--dart-define=FACTORY_DEV=true and no FACTORY_PORT',
+        '--dart-define=FACTORY_DEV=true',
       );
     }
     final control = File('$_shots/control');

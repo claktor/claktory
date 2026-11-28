@@ -1,3 +1,4 @@
+import 'package:clock/clock.dart';
 import 'package:flutter/widgets.dart';
 
 import 'characters/character.dart';
@@ -6,6 +7,7 @@ import 'controls.dart';
 import 'explorer.dart';
 import 'extensions.dart';
 import 'find.dart' show RenderedFindScope;
+import 'highlights.dart' show Glow;
 import 'identity.dart';
 import 'mobile/presentation.dart';
 import 'mobile/metrics.dart';
@@ -20,7 +22,7 @@ import 'tell_rivet.dart';
 /// it runs, when it started, how long it has run (ticking) or took, and how
 /// it ended; a click shows its last lines of output, and a running one can
 /// be stopped.
-class TasksView extends StatelessWidget {
+class TasksView extends StatefulWidget {
   const TasksView({super.key, required this.tasks, required this.agentId});
 
   final Tasks tasks;
@@ -29,13 +31,91 @@ class TasksView extends StatelessWidget {
   /// tasks", or as an admin) say whose they are.
   final String agentId;
 
+  @override
+  State<TasksView> createState() => _TasksViewState();
+}
+
+/// What points at [agentId]'s background task [id] ("task-3"): its Tasks
+/// go to it, and it glows there.
+String taskKey(String agentId, String id) => 'task:$agentId/$id';
+
+class _TasksViewState extends State<TasksView> {
+  /// Each task's place by [taskKey], to scroll to it.
+  final _rows = <String, GlobalKey>{};
+
+  /// What points at tasks (a calendar's Open task), and the last pointing
+  /// this view went to.
+  ValueNotifier<({List<String> keys, DateTime at})?>? _pointedAt;
+  DateTime? _wentTo;
+
+  /// The task open because something pointed at it.
+  String? _opened;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final pointedAt = AppScope.of(context).highlights.pointedAt;
+    if (pointedAt != _pointedAt) {
+      _pointedAt?.removeListener(_pointed);
+      _pointedAt = pointedAt..addListener(_pointed);
+    }
+  }
+
+  @override
+  void dispose() {
+    _pointedAt?.removeListener(_pointed);
+    super.dispose();
+  }
+
+  void _pointed() {
+    if (mounted) setState(() {});
+  }
+
+  /// The task of this view pointed at in the last few seconds and not gone
+  /// to yet, if any.
+  String? _target() {
+    final pointed = _pointedAt?.value;
+    if (pointed == null || pointed.at == _wentTo) return null;
+    if (clock.now().difference(pointed.at) > const Duration(seconds: 10)) {
+      return null;
+    }
+    final keys = {
+      for (final task in widget.tasks.tasks) taskKey(task.agentId, task.id),
+    };
+    final key = pointed.keys.where(keys.contains).firstOrNull;
+    if (key != null) _wentTo = pointed.at;
+    return key;
+  }
+
+  /// Scrolls to [key]'s task once this frame is laid out, glowing.
+  void _goTo(String key, String agentId) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final place = _rows[key]?.currentContext;
+      if (!mounted || place == null) return;
+      Scrollable.ensureVisible(place, alignment: 0.2);
+      final backend = AppScope.of(context);
+      final agent = backend.workspace.agent(agentId);
+      backend.highlights.glow(key, [agentColor(agent?.color ?? 'slate')]);
+    });
+  }
+
   /// Searchable with ⌘F, by the words it shows (find.dart).
   @override
   Widget build(BuildContext context) =>
       RenderedFindScope(placeholder: 'Search tasks', child: _view(context));
 
   Widget _view(BuildContext context) {
-    final store = AppScope.of(context).workspace;
+    final tasks = widget.tasks;
+    final agentId = widget.agentId;
+    final backend = AppScope.of(context);
+    final store = backend.workspace;
+    if (_target() case final target?) {
+      _opened = target;
+      final task = tasks.tasks.firstWhere(
+        (task) => taskKey(task.agentId, task.id) == target,
+      );
+      _goTo(target, task.agentId);
+    }
     final running = [
       for (final task in tasks.tasks)
         if (task.running) task,
@@ -44,12 +124,21 @@ class TasksView extends StatelessWidget {
       for (final task in tasks.tasks)
         if (!task.running) task,
     ];
-    Widget item(BackgroundTask task) => TaskRow(
-      key: ValueKey('${task.agentId}/${task.id}'),
-      task: task,
-      store: store,
-      own: task.agentId == agentId,
-    );
+    Widget item(BackgroundTask task) {
+      final key = taskKey(task.agentId, task.id);
+      return Glow(
+        key: _rows.putIfAbsent(key, GlobalKey.new),
+        store: backend.highlights,
+        matches: (glowing) => glowing == key,
+        child: TaskRow(
+          task: task,
+          store: store,
+          own: task.agentId == agentId,
+          opened: _opened == key,
+        ),
+      );
+    }
+
     return ListenableBuilder(
       listenable: store,
       builder: (context, _) => ListView(
@@ -130,6 +219,7 @@ class TaskRow extends StatefulWidget {
     required this.task,
     required this.store,
     required this.own,
+    this.opened = false,
   });
 
   final BackgroundTask task;
@@ -138,12 +228,16 @@ class TaskRow extends StatefulWidget {
   /// It's the panel agent's own, so it needn't say whose it is.
   final bool own;
 
+  /// Something opened its place at this task: it opens, as a click on it
+  /// would.
+  final bool opened;
+
   @override
   State<TaskRow> createState() => _TaskRowState();
 }
 
 class _TaskRowState extends State<TaskRow> {
-  var _open = false;
+  late var _open = widget.opened;
   var _stopping = false;
 
   /// Why the last Stop was refused, until the task changes.
@@ -152,6 +246,7 @@ class _TaskRowState extends State<TaskRow> {
   @override
   void didUpdateWidget(TaskRow old) {
     super.didUpdateWidget(old);
+    if (widget.opened && !old.opened) _open = true;
     if (old.task != widget.task) {
       _error = null;
       if (!widget.task.running) _stopping = false;

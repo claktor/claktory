@@ -307,7 +307,8 @@ pub fn without_hidden(text: &str) -> String {
 
 /// A Claktory's name as the service shows it, in emails too: nothing
 /// hidden (`without_hidden`), nothing that looks like a link, at most
-/// `NAME_LIMIT` characters, and never empty.
+/// `NAME_LIMIT` characters, and never empty. A longer one ends with "…",
+/// at a word's end when one is near.
 pub fn clean_name(name: &str) -> String {
     let shown = without_hidden(name);
     let words: Vec<&str> = shown
@@ -318,9 +319,33 @@ pub fn clean_name(name: &str) -> String {
         })
         .collect();
     let joined: String = words.join(" ").chars().filter(|character| !character.is_control() && !"<>".contains(*character)).collect();
-    let cut: String = joined.chars().take(NAME_LIMIT).collect();
-    let cut = cut.trim();
-    if cut.is_empty() { "Claktory".to_owned() } else { cut.to_owned() }
+    let joined = joined.trim();
+    if joined.is_empty() {
+        return "Claktory".to_owned();
+    }
+    if joined.chars().count() <= NAME_LIMIT {
+        return joined.to_owned();
+    }
+    let head: String = joined.chars().take(NAME_LIMIT - 1).collect();
+    let head = match head.rfind(' ') {
+        Some(at) if head[..at].chars().count() >= NAME_LIMIT * 2 / 3 => &head[..at],
+        _ => head.as_str(),
+    };
+    format!("{}…", head.trim_end())
+}
+
+/// What a computer asking to join calls itself, as its card shows it:
+/// `clean_name`'s rules, and no bidi or other format characters, which
+/// could reorder what the card says.
+pub fn clean_card_name(name: &str) -> String {
+    let unformatted: String = name.chars().filter(|character| !is_format(*character)).collect();
+    clean_name(&unformatted)
+}
+
+/// Unicode's format characters (Cf) that change how text reads: bidi
+/// embeddings, overrides, isolates and marks, zero-width ones, the BOM.
+fn is_format(character: char) -> bool {
+    matches!(character, '\u{00AD}' | '\u{061C}' | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{206F}' | '\u{FEFF}' | '\u{FFF9}'..='\u{FFFB}')
 }
 
 /// "example.com", "evil.co/x": a word a mail program would make a link of.
@@ -508,6 +533,12 @@ pub struct CheckIn {
     /// says there are none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub devices: Option<Vec<DeviceCount>>,
+    /// The `removed_cursor` of the last answer it got (E11-8), or "" for
+    /// none yet: the answer then carries the account's device keys removed
+    /// since. None from Claktories before they unpaired removed devices,
+    /// whose answer leaves them out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub removed_since: Option<String>,
 }
 
 /// A Claktory's agents, projects and paired devices, at a check-in; newer
@@ -630,6 +661,28 @@ pub struct CheckedIn {
     /// future, or with a value no Claktory could have): never send them again.
     #[serde(default)]
     pub periods_ignored: u32,
+    /// The account's computer asking to join, waiting for the person's
+    /// approval, by id only: for the Claktory to ring the bell on the
+    /// person's devices. Empty almost always.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub authorizations_waiting: Vec<String>,
+    /// Moves to another computer the person approved with this Claktory
+    /// as their source, not yet taken, by id only: for it to fetch them
+    /// (`GET /v1/claktories/moves`). Empty almost always.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub moves_waiting: Vec<String>,
+    /// Device keys (account keys) removed from the account since the
+    /// check-in's `removed_since` (all of them for "", one it can't read or
+    /// one from another account): lost, stolen or given away, so the
+    /// Claktory unpairs any of its devices with one (E11-8). Keys only; one
+    /// may come again in a later answer. Empty when it sent no
+    /// `removed_since`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removed_device_keys: Vec<String>,
+    /// To send back as the next check-in's `removed_since`, as it is: an
+    /// opaque word. None when it sent no `removed_since`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub removed_cursor: Option<String>,
     /// The account's recovery key (#239); None while it has none, and from
     /// a service before it.
     #[serde(default)]
@@ -881,6 +934,18 @@ pub struct ErrorBody {
     /// while it has none).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery_key: Option<Box<RecoveryKey>>,
+    /// With `authorization_pending`: its fields, beside the others.
+    #[serde(flatten)]
+    pub pending: Option<Box<AuthorizationPending>>,
+}
+
+/// What an `authorization_pending` error says: the request to poll,
+/// how long it waits and how often to ask.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthorizationPending {
+    pub request_id: String,
+    pub expires_in: i64,
+    pub interval: i64,
 }
 
 /// A new Ed25519 key, such as a Claktory's backend key.
@@ -967,6 +1032,11 @@ pub struct ListedClaktory {
     pub relays: Vec<String>,
     /// When it was last heard from, in ms since 1970.
     pub last_contact_ms: i64,
+    /// `hex(sha256(backend key))[..16]`, as a request to join showed it: a
+    /// device that approved one connects only to the Claktory with its
+    /// fingerprint.
+    #[serde(default)]
+    pub fingerprint: String,
 }
 
 /// `POST /v1/devices/remove`, signed: another device of the same account
@@ -1040,6 +1110,328 @@ pub fn read_device_assertion(service_key: &VerifyingKey, text: &str) -> Option<D
 pub fn verify_device_assertion(service_key: &VerifyingKey, text: &str, now: i64) -> Option<DeviceAssertion> {
     read_device_assertion(service_key, text)
         .filter(|assertion| assertion.iat <= now + ASSERTION_SKEW && now <= assertion.exp + ASSERTION_SKEW)
+}
+
+/// How long a computer's request to join the account waits for the
+/// person's approval, in seconds.
+pub const AUTHORIZE_LIFETIME: i64 = 600;
+/// How often a computer waiting for approval may ask, in seconds.
+pub const AUTHORIZE_INTERVAL: i64 = 5;
+/// How long a Claktory's word for a device works, from its `iat`, and how
+/// far its `iat` may be from the service's clock, in seconds.
+pub const ALLOWED_DEVICE_LIFETIME: i64 = 120;
+
+/// `POST /v1/claktories/authorize/start`, signed by `backend_key` without
+/// a token: a computer asks to join the account of `email`, for the person
+/// to approve on one of their devices. No code exists. A move's
+/// destination (`kind` "move", `factoryd receive --email`) asks to receive
+/// one of the account's Claktories instead: it has no Claktory id yet
+/// (`claktory_id` ""), `backend_key` is its receive key, and `receive`
+/// says where the source dials it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AuthorizeStart {
+    pub email: String,
+    pub claktory_id: String,
+    pub backend_key: String,
+    pub name: String,
+    pub version: String,
+    pub platform: String,
+    /// "claktory" (the default, and from a factoryd before moves), or "move".
+    #[serde(default = "kind_claktory", skip_serializing_if = "is_kind_claktory")]
+    pub kind: String,
+    /// A move's: where the source dials the destination.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receive: Option<MoveReceive>,
+}
+
+/// A request's kind: a computer joining the account.
+pub const KIND_CLAKTORY: &str = "claktory";
+/// A request's kind: a move's destination, receiving one of the account's
+/// Claktories.
+pub const KIND_MOVE: &str = "move";
+
+fn kind_claktory() -> String {
+    KIND_CLAKTORY.to_owned()
+}
+
+fn is_kind_claktory(kind: &String) -> bool {
+    kind == KIND_CLAKTORY
+}
+
+/// Where a move's source dials its destination: the receive key as an
+/// iroh endpoint id (64 hex, the same key as the start's `backend_key`),
+/// and the relays it's reachable through.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MoveReceive {
+    pub endpoint: String,
+    #[serde(default)]
+    pub relays: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AuthorizeStarted {
+    pub request_id: String,
+    pub expires_in: i64,
+    pub interval: i64,
+}
+
+/// `POST /v1/claktories/authorize/poll`, signed by the start's key without
+/// a token (and so for a request sign-in verify left waiting).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AuthorizePoll {
+    pub request_id: String,
+    pub eph_pub: String,
+}
+
+/// The answer to an approved poll: what sign-in verify answers, and the
+/// account key of the device that approved, the only one the new Claktory
+/// lets in at once.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Authorized {
+    #[serde(flatten)]
+    pub signed_in: SignedIn,
+    pub first_device: String,
+}
+
+/// The answer to a move destination's poll once its source took the move:
+/// the only endpoint it lets dial in (`source_key`, 64 hex, the one the
+/// source named taking it), the Claktory that moves, and the account key
+/// of the device that approved. Nothing signs in: the moved Claktory keeps
+/// its source's registration.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MoveAuthorized {
+    pub kind: String,
+    pub source_key: String,
+    pub source_claktory_id: String,
+    pub approver: String,
+}
+
+/// What the service saw of a computer that asks to join, for the card
+/// to lead with.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AuthorizationSeen {
+    pub ip: String,
+    /// The owner of the network it came from (its ASN's organisation); ""
+    /// when unknown.
+    pub network: String,
+    /// "Falkenstein, Saxony, Germany"; "" when unknown.
+    pub place: String,
+}
+
+/// What a computer that asks to join calls itself, cleaned.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AuthorizationSays {
+    pub name: String,
+    pub platform: String,
+    pub version: String,
+}
+
+/// A computer's request to join the account, as its devices see it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DeviceAuthorization {
+    pub id: String,
+    /// "claktory"; "move" for a move's destination.
+    pub kind: String,
+    /// "waiting", or "two_at_once" when another computer asked meanwhile
+    /// and neither was added. A computer joining also lists for 10
+    /// minutes once answered: "approved" or "declined", with `answered_by`
+    /// and `answered_at`, and nothing to act on (no fingerprint,
+    /// `may_approve` false).
+    pub state: String,
+    /// When it asked (unix seconds).
+    pub started: i64,
+    /// Seconds left while it waits; 0 once it doesn't.
+    pub expires_in: i64,
+    pub seen: AuthorizationSeen,
+    pub says: AuthorizationSays,
+    /// `hex(sha256(backend key))[..16]`, sent back with the decision.
+    pub fingerprint: String,
+    /// Whether this device signed in by email itself, as an approver must.
+    pub may_approve: bool,
+    /// A move's: its destination's receive key as an endpoint id (64 hex),
+    /// for the device's own approval to name (`MoveApproval`); "" for a
+    /// computer joining.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub endpoint: String,
+    /// Once answered: the name of the device that approved or declined it,
+    /// cleaned as `says.name` is ("" when that device is no longer on the
+    /// account), and when (unix seconds).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub answered_by: String,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub answered_at: i64,
+}
+
+fn is_zero(value: &i64) -> bool {
+    *value == 0
+}
+
+/// `GET /v1/devices/authorizations`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DeviceAuthorizations {
+    pub authorizations: Vec<DeviceAuthorization>,
+}
+
+/// `POST /v1/devices/authorizations/<id>`: the person's decision.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AuthorizationDecision {
+    pub approve: bool,
+    pub fingerprint: String,
+    /// To approve: a Claktory's word that this device is allowed on it now
+    /// (`sign_allowed_device`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed: Option<String>,
+    /// To approve a move: the device's own approval (`sign_move_approval`),
+    /// which the service checks and keeps, and gives the source untouched,
+    /// for the source to check against its own devices.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub move_approval: Option<String>,
+}
+
+/// `GET /v1/devices/moves` (device signed): the account's move waiting for
+/// approval, if any, shaped as `DeviceAuthorization` (`kind` "move"). Only
+/// here: a move is never in `GET /v1/devices/authorizations`, the bell or a
+/// check-in's `authorizations_waiting`; the person finds it in Settings →
+/// Move on a device connected to the Claktory they move.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DeviceMoves {
+    pub moves: Vec<DeviceAuthorization>,
+}
+
+/// A device's own approval of a move, signed with its account key: the
+/// source moves only on this, checked against its own allowed devices,
+/// never on the service's word.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MoveApproval {
+    pub v: u32,
+    pub kind: String,
+    pub request_id: String,
+    pub account_id: String,
+    /// The Claktory that moves.
+    pub source_claktory_id: String,
+    /// The destination's receive key as an endpoint id (64 hex): the only
+    /// computer it moves to.
+    pub endpoint: String,
+    /// The card's fingerprint of that key (`key_fingerprint`).
+    pub fingerprint: String,
+    /// The approving device's account key (base64url), which signed it.
+    pub device_key: String,
+    pub iat: i64,
+    /// When it no longer works (the request's end), unix seconds.
+    pub exp: i64,
+}
+
+/// What a device's move approval covers, before its payload.
+const MOVE_APPROVAL_LABEL: &[u8] = b"claktory move approval v1\n";
+
+/// A device's approval of a move, signed with its account key:
+/// `b64(payload) "." b64(signature)` over `MOVE_APPROVAL_LABEL ‖ payload`.
+pub fn sign_move_approval(account_key: &SigningKey, approval: &MoveApproval) -> String {
+    let payload = serde_json::to_vec(approval).unwrap_or_default();
+    let signature = account_key.sign(&[MOVE_APPROVAL_LABEL, &payload].concat());
+    format!("{}.{}", b64(&payload), b64(signature.to_bytes()))
+}
+
+/// What a move approval says, if the device key it names signed it, it's
+/// version 1 of kind "move", and works at `now` (`iat` no later than
+/// `MAX_SKEW` ahead, `exp` not passed). Whether its request, account,
+/// Claktory, endpoint and device are the ones expected is the caller's to
+/// check: the source's, against its own devices.
+pub fn verify_move_approval(text: &str, now: i64) -> Option<MoveApproval> {
+    let (payload, signature) = text.trim().split_once('.')?;
+    let payload = unb64(payload)?;
+    let approval: MoveApproval = serde_json::from_slice(&payload).ok()?;
+    let key = verifying_key(&approval.device_key)?;
+    if !verify(&key, &[MOVE_APPROVAL_LABEL, &payload].concat(), signature) {
+        return None;
+    }
+    let works = approval.iat <= now + MAX_SKEW && now <= approval.exp;
+    (approval.v == 1 && approval.kind == KIND_MOVE && works).then_some(approval)
+}
+
+/// A move the person approved with this Claktory as its source, as `GET
+/// /v1/claktories/moves` gives it to that Claktory: where to dial, what the
+/// service saw of the destination (for the Move to show), and the device's
+/// approval exactly as it came.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WaitingMove {
+    pub request_id: String,
+    pub receive: MoveReceive,
+    pub seen: AuthorizationSeen,
+    pub says: AuthorizationSays,
+    pub fingerprint: String,
+    /// `sign_move_approval`'s, untouched: check it before anything else.
+    pub approval: String,
+    /// Seconds left to take it.
+    pub expires_in: i64,
+}
+
+/// `GET /v1/claktories/moves` (signed).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ClaktoryMoves {
+    pub moves: Vec<WaitingMove>,
+}
+
+/// `POST /v1/claktories/moves/<id>/take` (signed): the source takes the
+/// move, naming the endpoint (64 hex) it dials from, the only one the
+/// destination lets in.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MoveTake {
+    pub endpoint: String,
+}
+
+/// `GET /v1/claktories/authorizations`: the account's request waiting, by
+/// id only, for a Claktory to ring the bell on the person's devices.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ClaktoryAuthorizations {
+    pub waiting: Vec<String>,
+}
+
+/// The short fingerprint of a backend key a card shows: the first 16 hex
+/// of its SHA-256.
+pub fn key_fingerprint(backend_key: &str) -> String {
+    let digest = Sha256::digest(backend_key.as_bytes());
+    digest[..8].iter().fold(String::with_capacity(16), |mut out, byte| {
+        let _ = write!(out, "{byte:02x}");
+        out
+    })
+}
+
+/// A Claktory's word that the device with `account_key` is allowed on it
+/// now, for approving request `request_id`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AllowedDevice {
+    pub v: u32,
+    pub account_id: String,
+    pub claktory_id: String,
+    pub account_key: String,
+    pub request_id: String,
+    pub iat: i64,
+}
+
+/// What a Claktory's word for a device covers, before its payload.
+const ALLOWED_DEVICE_LABEL: &[u8] = b"claktory allowed device v1\n";
+
+/// A Claktory's word for a device, signed with its backend key:
+/// `b64(payload) "." b64(signature)`, over `ALLOWED_DEVICE_LABEL ‖ payload`.
+pub fn sign_allowed_device(backend_key: &SigningKey, allowed: &AllowedDevice) -> String {
+    let payload = serde_json::to_vec(allowed).unwrap_or_default();
+    let signature = backend_key.sign(&[ALLOWED_DEVICE_LABEL, &payload].concat());
+    format!("{}.{}", b64(&payload), b64(signature.to_bytes()))
+}
+
+/// What a Claktory's word for a device says, if `backend_key` signed it,
+/// it's version 1 and works at `now` (unix seconds). Whether its account,
+/// Claktory, key and request are the ones expected is the caller's to check.
+pub fn verify_allowed_device(backend_key: &VerifyingKey, text: &str, now: i64) -> Option<AllowedDevice> {
+    let (payload, signature) = text.trim().split_once('.')?;
+    let payload = unb64(payload)?;
+    if !verify(backend_key, &[ALLOWED_DEVICE_LABEL, &payload].concat(), signature) {
+        return None;
+    }
+    let allowed: AllowedDevice = serde_json::from_slice(&payload).ok()?;
+    let fresh = allowed.iat <= now + ALLOWED_DEVICE_LIFETIME && now <= allowed.iat + ALLOWED_DEVICE_LIFETIME;
+    (allowed.v == 1 && fresh).then_some(allowed)
 }
 
 /// What a pipe peer statement says it is, in its payload and before it in
@@ -1470,7 +1862,13 @@ mod tests {
         assert_eq!(clean_name("visit evil.com or www.x.org"), "visit or");
         assert_eq!(clean_name("v0.1.9 build"), "v0.1.9 build", "a version isn't a domain");
         assert_eq!(clean_name("a\u{7}b<c>"), "abc");
-        assert_eq!(clean_name(&"x".repeat(60)).len(), NAME_LIMIT);
+        // Cut with "…", at a word's end when one is near.
+        assert_eq!(clean_name(&"x".repeat(60)), format!("{}…", "x".repeat(NAME_LIMIT - 1)));
+        assert_eq!(
+            clean_name("Evil Mac of someone with a very long name that goes past sixty characters easily"),
+            "Evil Mac of someone with a very long…"
+        );
+        assert_eq!(clean_name(&"y".repeat(NAME_LIMIT)), "y".repeat(NAME_LIMIT), "at the limit, whole");
         assert_eq!(clean_name("  "), "Claktory");
         assert_eq!(clean_name("\u{202E}Mac\u{200B} mini\u{2066}"), "Mac mini", "nothing hidden");
         assert_eq!(clean_name("\u{1F469}\u{200D}\u{1F4BB} Lab"), "\u{1F469}\u{200D}\u{1F4BB} Lab", "an emoji's joiner stays");
@@ -1528,5 +1926,45 @@ mod tests {
         let forged = format!("{}.{claktory_sig}", b64(serde_json::to_vec(&changed).unwrap()));
         assert_eq!(verify_recovery_key(&claktory.verifying_key(), &forged), None);
         assert!(!verify_recovery_key_device(&forged, &device_sig));
+    }
+
+    #[test]
+    fn a_move_approval_checks_with_the_device_key_it_names_and_only_while_it_works() {
+        let device = SigningKey::from_bytes(&[3; 32]);
+        let approval = MoveApproval {
+            v: 1,
+            kind: KIND_MOVE.into(),
+            request_id: "req".into(),
+            account_id: "acct".into(),
+            source_claktory_id: "studio".into(),
+            endpoint: "ab".repeat(32),
+            fingerprint: key_fingerprint("receive key"),
+            device_key: b64(device.verifying_key().to_bytes()),
+            iat: 1000,
+            exp: 1600,
+        };
+        let text = sign_move_approval(&device, &approval);
+        assert_eq!(verify_move_approval(&text, 1000), Some(approval.clone()));
+        assert_eq!(verify_move_approval(&text, 1600), Some(approval.clone()));
+        assert_eq!(verify_move_approval(&text, 1601), None, "expired");
+        assert_eq!(verify_move_approval(&text, 699), None, "made in the future");
+        // Signed by another device than it names.
+        let other = SigningKey::from_bytes(&[4; 32]);
+        assert_eq!(verify_move_approval(&sign_move_approval(&other, &approval), 1000), None);
+        // Another label's signature over the same payload doesn't pass.
+        let payload = serde_json::to_vec(&approval).unwrap();
+        let wrong = format!("{}.{}", b64(&payload), b64(device.sign(&payload).to_bytes()));
+        assert_eq!(verify_move_approval(&wrong, 1000), None);
+        let join = MoveApproval { kind: KIND_CLAKTORY.into(), ..approval.clone() };
+        assert_eq!(verify_move_approval(&sign_move_approval(&device, &join), 1000), None, "not a move");
+        let v2 = MoveApproval { v: 2, ..approval };
+        assert_eq!(verify_move_approval(&sign_move_approval(&device, &v2), 1000), None);
+        // A start from before moves reads as a join.
+        let old: AuthorizeStart = serde_json::from_str(
+            r#"{"email":"m@example.com","claktory_id":"abcdefghijkl","backend_key":"k","name":"n","version":"v","platform":"p"}"#,
+        )
+        .unwrap();
+        assert_eq!((old.kind.as_str(), &old.receive), (KIND_CLAKTORY, &None));
+        assert!(!serde_json::to_string(&old).unwrap().contains("kind"), "a join's start reads as before");
     }
 }

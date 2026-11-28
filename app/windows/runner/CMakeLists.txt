@@ -5,7 +5,9 @@ project(runner LANGUAGES CXX)
 # Mac or Linux too (../test/README.md).
 add_library(claktory_core STATIC
   "core/connection_store.cpp"
+  "core/command_line.cpp"
   "core/json.cpp"
+  "core/launcher_plan.cpp"
   "core/window_geometry.cpp"
 )
 apply_standard_settings(claktory_core)
@@ -20,6 +22,7 @@ add_executable(${BINARY_NAME} WIN32
   "app_paths.cpp"
   "device_channel.cpp"
   "drop_target.cpp"
+  "engine_channel.cpp"
   "encodable_json.cpp"
   "file_dialogs.cpp"
   "file_store.cpp"
@@ -28,6 +31,7 @@ add_executable(${BINARY_NAME} WIN32
   "network_channel.cpp"
   "notifications_channel.cpp"
   "presence.cpp"
+  "setup_channel.cpp"
   "sight_channel.cpp"
   "toast_activator.cpp"
   "utils.cpp"

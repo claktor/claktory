@@ -71,6 +71,8 @@ async fn a_device_signs_in_with_its_key_and_finds_the_accounts_claktories() {
         endpoint_id: String::new(),
         relays: vec![],
         last_contact_ms: (START + 60) * 1000,
+        // As a request to join shows it.
+        fingerprint: key_fingerprint(&b64(laptop.key.verifying_key().to_bytes())),
     };
     let studio_listed = ListedClaktory {
         claktory_id: studio.id.clone(),
@@ -82,6 +84,7 @@ async fn a_device_signs_in_with_its_key_and_finds_the_accounts_claktories() {
         endpoint_id: "a".repeat(64),
         relays: vec!["https://relay-eu.claktory.com".into()],
         last_contact_ms: START * 1000,
+        fingerprint: key_fingerprint(&b64(studio.key.verifying_key().to_bytes())),
     };
     assert_eq!(list.claktories, vec![laptop_listed, studio_listed.clone()]);
 
@@ -656,4 +659,77 @@ fn keys_from_before_are_kept_as_their_accounts() {
         assert!(!db::key_of_another_account(&conn, "a@example.com", key).unwrap(), "{key}");
     }
     assert!(!db::key_of_another_account(&conn, "b@example.com", "key-3").unwrap(), "a key never seen");
+}
+
+/// E11-8: a check-in hears the account's devices removed since its cursor,
+/// so a Claktory that was off when the person locked one out unpairs it
+/// when it's back; all of them with no cursor, one it can't read, or one
+/// from another account. Claktories that don't ask hear nothing.
+#[tokio::test]
+async fn a_check_in_hears_the_device_keys_removed_since_it_last_asked() {
+    let instance = start().await;
+    let mut studio = Claktory::new("198.51.100.30");
+    let account = instance.sign_in(&mut studio, "matt@example.com", "Mac mini").await.account_id;
+    let phone = Device::new("192.0.2.90");
+    instance.sign_in_device(&phone, "matt@example.com", "iPhone").await;
+    let [stolen, lost] = [Device::new("192.0.2.91"), Device::new("192.0.2.92")];
+    instance.sign_in_device(&stolen, "matt@example.com", "iPad").await;
+    instance.sign_in_device(&lost, "matt@example.com", "MacBook").await;
+    let theirs = Device::new("192.0.2.93");
+    instance.sign_in_device(&theirs, "ana@example.com", "Ana's iPhone").await;
+    let remove = async |device: &Device| {
+        instance.advance(1);
+        let answer =
+            instance.device_signed(&phone, "POST", "/v1/devices/remove", Some(&json!({"account_key": device.account_key()})), None).await;
+        assert_eq!(answer.json::<DeviceRemoved>(), DeviceRemoved { removed: true });
+    };
+    let check_in = async |since: Option<&str>| -> CheckedIn {
+        instance.advance(1);
+        let body = CheckIn {
+            version: "v0.1.30".into(),
+            platform: "macos-arm64".into(),
+            removed_since: since.map(str::to_owned),
+            ..CheckIn::default()
+        };
+        let answer = instance.signed(&studio, "POST", "/v1/check-in", &body, None).await;
+        assert_eq!(answer.status, 200, "{}", answer.text());
+        answer.json()
+    };
+
+    let none = check_in(Some("")).await;
+    assert!(none.removed_device_keys.is_empty());
+    let cursor = none.removed_cursor.expect("a cursor");
+    remove(&stolen).await;
+    instance.advance(600);
+    let heard = check_in(Some(&cursor)).await;
+    assert_eq!(heard.removed_device_keys, [stolen.account_key()]);
+    let cursor = heard.removed_cursor.expect("a cursor");
+
+    // The next one: only it.
+    remove(&lost).await;
+    let heard = check_in(Some(&cursor)).await;
+    assert_eq!(heard.removed_device_keys, [lost.account_key()]);
+    let cursor = heard.removed_cursor.expect("a cursor");
+    // Again within minutes: it may come again (unpairing twice is
+    // harmless); later, nothing new.
+    assert_eq!(check_in(Some(&cursor)).await.removed_device_keys, [lost.account_key()]);
+    instance.advance(600);
+    let cursor = check_in(Some(&cursor)).await.removed_cursor.expect("a cursor");
+    instance.advance(3600);
+    assert!(check_in(Some(&cursor)).await.removed_device_keys.is_empty(), "nothing new");
+
+    // No cursor, an unreadable one, or another account's: all of them,
+    // never another account's keys.
+    let mut both = [stolen.account_key(), lost.account_key()];
+    both.sort();
+    for since in ["", "garbage", &format!("someone-else.{}", instance.now()), &format!("{account}.-5")] {
+        let mut keys = check_in(Some(since)).await.removed_device_keys;
+        keys.sort();
+        assert_eq!(keys, both, "{since}");
+    }
+    assert!(!check_in(Some("")).await.removed_device_keys.contains(&theirs.account_key()));
+
+    // A Claktory that doesn't ask: nothing, and no cursor.
+    let old = check_in(None).await;
+    assert_eq!((old.removed_device_keys.len(), old.removed_cursor), (0, None));
 }

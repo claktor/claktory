@@ -33,6 +33,8 @@ pub(crate) struct Source {
     pub user: PathBuf,
     pub repo: PathBuf,
     pub token: String,
+    /// The account key its own app was signed in with.
+    pub app_key: String,
 }
 
 pub(crate) async fn source() -> Source {
@@ -99,9 +101,38 @@ pub(crate) async fn source() -> Source {
     std::fs::write(blobs.join(GOOD_BLOB), "drawing").expect("blob");
     std::fs::write(blobs.join("b".repeat(64)), "tampered").expect("blob");
     std::fs::write(blobs.join("notes.txt"), "not a blob").expect("blob");
-    let pairing = std::fs::read_to_string(home.root().join("remote/local-pairing")).expect("local pairing");
-    let token = pairing.split(['?', '&']).find_map(|part| part.strip_prefix("t=")).expect("a token").to_owned();
-    Source { dir, home, user, repo, token }
+    let token = from_before_546(&home);
+    let app_key = signed_in_app(&home);
+    Source { dir, home, user, repo, token, app_key }
+}
+
+/// Makes `home` look as a Claktory before the app's socket left it: its app paired
+/// with a local pairing code, the local device keeping its token's hash, as
+/// a bundle made then has it. The token.
+fn from_before_546(home: &Home) -> String {
+    use sha2::Digest as _;
+    let mut bytes = [0_u8; 32];
+    getrandom::fill(&mut bytes).expect("random numbers");
+    let token: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    std::fs::write(home.root().join("remote/local-pairing"), format!("factory://?t={token}&name=Old%20Mac\n")).expect("local pairing");
+    let path = home.root().join("remote/devices.json");
+    let mut devices: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).expect("devices")).expect("json");
+    let local = devices.as_array_mut().expect("a list").iter_mut().find(|device| device["local"] == true).expect("the local device");
+    local["token_sha256"] = sha2::Sha256::digest(token.as_bytes()).iter().map(|byte| format!("{byte:02x}")).collect::<String>().into();
+    std::fs::write(&path, devices.to_string()).expect("devices");
+    token
+}
+
+/// Makes this computer's own app signed in to the person's account: the
+/// local device keeps the account key its assertion proved. The key.
+pub(crate) fn signed_in_app(home: &Home) -> String {
+    let key = "A".repeat(42) + "w";
+    let path = home.root().join("remote/devices.json");
+    let mut devices: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).expect("devices")).expect("json");
+    let local = devices.as_array_mut().expect("a list").iter_mut().find(|device| device["local"] == true).expect("the local device");
+    local["account_key"] = key.clone().into();
+    std::fs::write(&path, devices.to_string()).expect("devices");
+    key
 }
 
 /// SHA-256 of "drawing".
@@ -282,14 +313,25 @@ async fn a_claktory_moves_with_its_paths_folders_checkouts_vault_and_devices() {
     let new_key = std::fs::read_to_string(here.root().join("vault/auto.key")).expect("new key");
     assert_ne!(old_key, new_key);
 
-    // The old computer's app is a device now, with its token, and a code to give it.
+    // The old computer's app is a device now, allowed as the person's and
+    // let in by the account key it was signed in with there: no token, no
+    // tunnel key and no code come with it.
     let devices: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(here.root().join("remote/devices.json")).expect("devices")).expect("json");
     let devices = devices.as_array().expect("list");
     assert!(devices.iter().all(|device| device.get("local").is_none()), "{devices:?}");
     assert!(!here.root().join("remote/local-pairing").exists(), "made again when it starts");
-    let code = imported.old_app_code.expect("a code for the old app");
-    assert!(code.contains(&format!("t={}", source.token)), "{code}");
+    let old_app = devices.iter().find(|device| device["allowed_by"] == "moved").expect("the old computer's app");
+    assert_eq!(old_app["account_key"], source.app_key.as_str());
+    assert_eq!((old_app["discovered"].as_bool(), old_app["allow_confirmed"].as_bool()), (Some(true), Some(true)), "{old_app}");
+    for gone in ["token_sha256", "endpoint_id", "code_expires", "pending_endpoint_id"] {
+        assert!(old_app.get(gone).is_none_or(|value| value.as_str() == Some("")), "{gone}: {old_app}");
+    }
+    assert!(imported.old_app, "{}", imported.text);
+    assert!(imported.text.contains("through your Claktory account"), "{}", imported.text);
+    for code in ["factory://", &source.token] {
+        assert!(!imported.text.contains(code), "a code in the import's text: {}", imported.text);
+    }
 
     // Each agent is told, once.
     let (text, summary): (String, String) = db
@@ -445,12 +487,16 @@ async fn a_claktory_that_moved_away_runs_nothing_says_where_and_its_app_can_dele
         r#"{"format":1,"export_id":"ab","at_ms":1763735100000,"epoch":1,"machine":"Old Mac","to":"cloud-box","to_os":"linux","version":"v0.1.14","bundle":"/x"}"#,
     )
     .expect("tombstone");
-    // The copy left behind: the fenced pairing code, its records, and the
-    // workspace, which stays.
+    // The copy left behind: its records, the workspace, which stays, and
+    // the local pairing code a Claktory before the app's socket fenced, which lets no
+    // one in now.
     std::fs::write(here.root().join("moved/remote/local-pairing"), "factory://?t=0123abcd&a=127.0.0.1%3A7420\n").expect("code");
     std::fs::create_dir_all(here.root().join("agents/ed")).expect("agents");
     std::fs::create_dir_all(here.root().join("workspace/notes")).expect("workspace");
     std::fs::write(here.root().join("workspace/notes/a.md"), "kept").expect("note");
+    // The Dev app's pins, which the app keeps reaching it by, with its
+    // socket (made by moved mode).
+    std::fs::write(here.root().join("app-pins"), "ab\n").expect("pins");
     let moved = move_import::moved::read(&here).expect("moved");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
@@ -477,7 +523,36 @@ async fn a_claktory_that_moved_away_runs_nothing_says_where_and_its_app_can_dele
     assert!(
         wrong.ask(v1::client_message::Body::DeleteMovedCopy(v1::DeleteMovedCopy::default())).await.is_none_or(|answer| answer.is_none())
     );
-    let (mut own, _) = MovedClient::connect(addr, "0123abcd").await;
+    let (mut fenced, _) = MovedClient::connect(addr, "0123abcd").await;
+    assert!(
+        fenced.ask(v1::client_message::Body::DeleteMovedCopy(v1::DeleteMovedCopy::default())).await.is_none_or(|answer| answer.is_none()),
+        "a code on disk isn't the app"
+    );
+    // A program on the app's socket that isn't this computer's own app is
+    // turned away as in normal mode, never offered a Delete it can't make.
+    if cfg!(target_os = "macos") {
+        let path = factoryd::authority::socket_path(&here);
+        let mut stream = None;
+        for _ in 0..100 {
+            if let Ok(connected) = tokio::net::UnixStream::connect(&path).await {
+                stream = Some(connected);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let (mut socket, _) = tokio_tungstenite::client_async("ws://factory/", stream.expect("the app's socket")).await.expect("ws");
+        use futures_util::{SinkExt, StreamExt};
+        use prost::Message as _;
+        let hello = v1::ClientMessage { id: 1, body: Some(v1::client_message::Body::Hello(v1::Hello::default())) };
+        socket.send(tokio_tungstenite::tungstenite::Message::Binary(hello.encode_to_vec().into())).await.expect("send");
+        let Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(bytes))) = socket.next().await else { panic!("an answer") };
+        let (code, why) = refusal(v1::ServerMessage::decode(bytes).expect("decode").body.expect("a body"));
+        assert_eq!(code, v1::ErrorCode::Unauthorized, "{why}");
+        assert!(why.contains("scripts/dev.sh app") || why.contains("claktory.com"), "{why}");
+    }
+    // This computer's own app: on its socket, or, in the tests, with the
+    // person's token on the loopback port.
+    let (mut own, _) = MovedClient::connect(addr, &factoryd::authority::person_token_for_test(here.root())).await;
     // Anything else it asks is answered that it moved.
     let other = own.ask(v1::client_message::Body::SelectAgent(v1::SelectAgent::default())).await.expect("an answer").expect("a body");
     assert_eq!(refusal(other).0, v1::ErrorCode::Moved);
@@ -489,6 +564,11 @@ async fn a_claktory_that_moved_away_runs_nothing_says_where_and_its_app_can_dele
     assert!(own.ask(v1::client_message::Body::SelectAgent(v1::SelectAgent::default())).await.is_none_or(|answer| answer.is_none()));
     assert!(!here.root().join("agents").exists() && !here.root().join("moved").exists());
     assert_eq!(std::fs::read_to_string(here.root().join("workspace/notes/a.md")).expect("kept"), "kept");
+    // The app still reaches it, to hear that the copy was deleted.
+    assert!(here.root().join("app-pins").exists(), "the app's pins stay");
+    if cfg!(target_os = "macos") {
+        assert!(factoryd::authority::socket_path(&here).exists(), "the app's socket stays");
+    }
     // It still runs, saying so, and moving back can still stop it.
     assert!(here.root().join("moved-mode.pid").exists());
     let (mut again, error) = MovedClient::connect(addr, "0123abcd").await;
@@ -514,6 +594,13 @@ async fn a_claktory_that_moved_away_runs_nothing_says_where_and_its_app_can_dele
 async fn a_bundle_export_made_imports() {
     use factoryd::move_export::{Options, Place, Service};
     let source = source().await;
+    // Made since the app's socket: no local pairing code; and its app never signed
+    // in to the account, so it has nothing to connect with, and is paired
+    // again like any device.
+    std::fs::remove_file(source.home.root().join("remote/local-pairing")).expect("local pairing");
+    let path = source.home.root().join("remote/devices.json");
+    let devices = std::fs::read_to_string(&path).expect("devices").replace(&source.app_key, "");
+    std::fs::write(&path, devices).expect("devices");
     std::fs::write(source.repo.join("README.md"), "one\nchanged\n").expect("write");
     let out = source.dir.join("out.claktory");
     let place = Place { home: source.home.clone(), port: 0, user_home: source.user.clone(), dev: false, service: Service::None };
@@ -528,7 +615,7 @@ async fn a_bundle_export_made_imports() {
     assert!(!here.root().join("import").exists());
     asked.same_identity = true;
     let imported = move_import::import(&here, free_addr(), &asked).expect("imported");
-    assert!(imported.old_app_code.is_some(), "{}", imported.text);
+    assert!(!imported.old_app, "{}", imported.text);
     assert!(imported.text.contains("Run this Claktory in one place only"), "{}", imported.text);
     let site = user.join("site");
     assert_eq!(std::fs::read_to_string(site.join("README.md")).expect("readme"), "one\nchanged\n");

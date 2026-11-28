@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Runs claktory-qa (crates/claktory-qa/README.md) as built from a commit:
 # what's committed, never the working tree. The first run for a commit
-# exports it with `git archive` and builds factoryd, claktory-account and
-# claktory-qa from it into the QA root; later runs reuse them.
+# exports it with `git archive` and builds factoryd, the apps host
+# (claktory-apps, beside factoryd, so a sandbox runs apps), claktory-account
+# and claktory-qa from it into the QA root; later runs reuse them.
 #
 #   scripts/qa.sh up                    a sandbox on main's HEAD
 #   scripts/qa.sh --rev factory/me up   on another branch or commit
@@ -127,7 +128,7 @@ if [[ -n "$CONTAINER" ]]; then
     arm64 | aarch64) LARCH=aarch64 ;;
     *) LARCH=x86_64 ;;
     esac
-    for pkg in factoryd claktory-account claktory-qa; do
+    for pkg in factoryd claktory-apps claktory-account claktory-qa; do
       # No update channel stamped in: a sandbox never looks for releases.
       env -u FACTORY_UPDATE_URL -u FACTORY_VERSION FACTORY_LINUX_SRC="$SRC" \
         "$REPO/scripts/build-linux.sh" "$LARCH" "$LIN/$pkg" "$pkg" >&2
@@ -135,12 +136,13 @@ if [[ -n "$CONTAINER" ]]; then
     rm -rf "$SRC"
     cat >"$LIN/Containerfile" <<'EOF'
 # The contained QA tier, built by scripts/qa.sh --container: claktory-qa,
-# factoryd and the account service, static, plus what agents' tools run on.
+# factoryd, its apps host and the account service, static, plus what
+# agents' tools run on.
 FROM docker.io/library/alpine:3.21
-# procps-ng: the sandbox checks its processes with `ps -o command= -p`,
-# which busybox's ps can't do.
+# procps-ng: ps, top and pgrep as agents' commands expect them, which
+# busybox's aren't.
 RUN apk add --no-cache bash coreutils git procps-ng && mkdir -p /qa
-COPY factoryd claktory-account claktory-qa /opt/claktory-qa/
+COPY factoryd claktory-apps claktory-account claktory-qa /opt/claktory-qa/
 EOF
     "$ENGINE" build -q -t "$IMAGE" "$LIN" >&2
   fi
@@ -214,7 +216,17 @@ BIN="$ROOT/bin/$STAMP"
 # build lock.
 prune_cache() {
   local running dir commit kb
-  running="$(ps -axo command= 2>/dev/null | grep -oE "$ROOT/bin/[0-9a-f]+(-v[0-9.]+)?/" | sort -u || true)"
+  # Every process's command line, from pgrep: ps is setuid on a Mac, and an
+  # agent's sandbox may not let it run, which would read as nothing running.
+  local list=(pgrep -af .)
+  [[ "$(uname -s)" == Darwin ]] && list=(pgrep -lf .)
+  local all
+  all="$("${list[@]}" 2>/dev/null || true)"
+  if [[ -z "$all" ]]; then
+    echo "claktory-qa: can't list this computer's processes, so no build is pruned" >&2
+    return 0
+  fi
+  running="$(grep -oE "$ROOT/bin/[0-9a-f]+(-v[0-9.]+)?/" <<<"$all" | sort -u || true)"
   while IFS= read -r dir; do
     commit="$(basename "$dir")"
     [[ "$commit" != "$STAMP" ]] || continue
@@ -241,7 +253,9 @@ prune_cache() {
     fi
   fi
 }
-built() { [[ -x "$BIN/claktory-qa" && "$(cat "$BIN/commit" 2>/dev/null)" == "$STAMP" ]]; }
+# A folder from before the apps host came with every build lacks it, and is
+# built again.
+built() { [[ -x "$BIN/claktory-qa" && -x "$BIN/claktory-apps" && "$(cat "$BIN/commit" 2>/dev/null)" == "$STAMP" ]]; }
 if ! built; then
   # One build at a time in the shared target, from cargo to the copy out
   # of it: another commit's build in between would leave its binaries
@@ -282,14 +296,18 @@ if ! built; then
     # And the QA lies (qa-lies, debug builds only, each off until `up
     # --claim-…` asks for it), where the commit has them.
     if grep -q '^qa-lies' "$SRC/crates/factoryd/Cargo.toml"; then FEATURES+=(--features factoryd/qa-lies); fi
+    # And the QA person (qa-person, debug builds only, #546 A), where the
+    # commit has it: the driver acts as the person with the token factoryd
+    # writes to <home>/qa-person-token, as the app on its socket would.
+    if grep -q '^qa-person' "$SRC/crates/factoryd/Cargo.toml"; then FEATURES+=(--features factoryd/qa-person); fi
     (cd "$SRC" && env -u FACTORY_UPDATE_URL -u FACTORY_VERSION ${VERSION:+FACTORY_VERSION="$VERSION"} CARGO_TARGET_DIR="$ROOT/target" \
       cargo build --quiet --message-format=json-render-diagnostics \
-      -p factoryd -p claktory-account -p claktory-qa ${FEATURES[@]+"${FEATURES[@]}"}) >"$MESSAGES"
+      -p factoryd -p claktory-apps -p claktory-account -p claktory-qa ${FEATURES[@]+"${FEATURES[@]}"}) >"$MESSAGES"
     # The proof: every crate of this source compiled in this build, none
-    # found fresh from another's, and the three binaries among them.
+    # found fresh from another's, and the four binaries among them.
     ours="$(grep '"reason":"compiler-artifact"' "$MESSAGES" | grep -F "\"package_id\":\"path+file://$SRC/" || true)"
     stale="$(grep -F '"fresh":true' <<<"$ours" | sed -E 's/.*"package_id":"path\+file:\/\/[^"]*\/([^"#\/]+)#.*/\1/' | sort -u | tr '\n' ' ' || true)"
-    for bin in factoryd claktory-account claktory-qa; do
+    for bin in factoryd claktory-apps claktory-account claktory-qa; do
       grep -F '"fresh":false' <<<"$ours" | grep -qF "\"executable\":\"$ROOT/target/debug/$bin\"" ||
         stale="$stale$bin(not built) "
     done
@@ -300,7 +318,7 @@ if ! built; then
     fi
     rm -rf "$BIN.tmp"
     mkdir -p "$BIN.tmp"
-    cp "$ROOT/target/debug/factoryd" "$ROOT/target/debug/claktory-account" "$ROOT/target/debug/claktory-qa" "$BIN.tmp/"
+    cp "$ROOT/target/debug/factoryd" "$ROOT/target/debug/claktory-apps" "$ROOT/target/debug/claktory-account" "$ROOT/target/debug/claktory-qa" "$BIN.tmp/"
     echo "$STAMP" >"$BIN.tmp/commit"
     mv "$BIN.tmp" "$BIN"
     rm -rf "$SRC" "$MESSAGES"

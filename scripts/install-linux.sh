@@ -13,30 +13,41 @@
 #   ~/.local/bin/factoryd               a link to the backend, so factoryd is
 #                                       on PATH (/usr/local/bin/factoryd for root)
 #
-#   install-linux.sh RELEASE_DIR [--no-pair]
+#   install-linux.sh RELEASE_DIR [--no-pair] [--email EMAIL | --show-code]
 #
 # A Linux Factory has no app of its own: Factory on a Mac connects to it over
-# its private tunnel. The first install prints a pairing code for the first
-# device and waits for it (--no-pair leaves that out: the online installer's
-# --yes and --json). Installing again restarts the backend, which interrupts
-# every agent mid-run.
+# its private tunnel. With --email it signs in to the Claktory account at
+# EMAIL with no code (#546): the person approves it on one of their devices,
+# which then connects. With --show-code (a person at this terminal, never an
+# agent) the first install prints a pairing code for the first device and
+# waits for it. Neither: it says how to connect one. --no-pair (the online
+# installer's --yes and --json) asks nothing at this terminal. Installing
+# again restarts the backend, which interrupts every agent mid-run.
 #
 # Exit codes, as factoryd's commands use them: 0 installed and running, 3
 # refused (not this machine's kind, or no systemd session), 4 installed but
 # not running (the reason on stderr), 1 anything else.
 set -euo pipefail
 
-RELEASE="${1:?usage: install-linux.sh RELEASE_DIR [--no-pair] [--hold]}"
+RELEASE="${1:?usage: install-linux.sh RELEASE_DIR [--no-pair] [--email EMAIL | --show-code] [--hold]}"
+# PAIR: a person may be asked things at this terminal; SHOW_CODE: they asked
+# for the first device's pairing code here.
 PAIR=true
+SHOW_CODE=false
+EMAIL=""
 HOLD=false
-for flag in "${@:2}"; do
-  case "$flag" in
+shift
+while (($#)); do
+  case "$1" in
     --no-pair) PAIR=false ;;
+    --show-code) SHOW_CODE=true ;;
+    --email) EMAIL="${2:-}"; shift ;;
     # Installed and enabled but not started: the online installer's --import
     # runs `factoryd import` first, then installs again without --hold.
     --hold) HOLD=true ;;
-    *) echo "install-linux.sh doesn't know $flag" >&2; exit 1 ;;
+    *) echo "install-linux.sh doesn't know $1" >&2; exit 1 ;;
   esac
+  shift
 done
 HOME_DIR="$HOME/.factory"
 BIN="$HOME_DIR/bin/factoryd"
@@ -286,13 +297,18 @@ else
   run="$cli"
 fi
 
-if $first && $PAIR; then
+if [[ -n "$EMAIL" ]]; then
+  echo
+  # The no-code setup (#546): waits a while for the person's approval;
+  # running it again waits on.
+  "$BIN" account authorize --email "$EMAIL" </dev/null || true
+elif $first && $PAIR && $SHOW_CODE; then
   echo
   # In a terminal, pair waits there until the device is allowed.
   # Cancelling it (Ctrl-C) leaves Claktory installed all the same.
-  "$BIN" pair || true
+  "$BIN" pair --show-code || true
   echo
-  echo "To connect another device later, run: $run pair"
+  echo "To connect another device later, allow it on one that's connected, in Settings → Devices."
 elif $first; then
-  echo "To connect a device, run: $run pair"
+  echo "To connect your devices, sign this Claktory in to your Claktory account: run $run account authorize --email <your email>, then approve it on one of your devices."
 fi

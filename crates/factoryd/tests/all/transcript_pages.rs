@@ -41,15 +41,21 @@ async fn a_long_conversation_comes_a_page_at_a_time() {
     assert!(total >= 260, "{total}");
     assert!(!view.has_earlier, "selected while short: it holds every entry, and what came since");
 
-    // A new connection gets the latest 200, starting at a response's first entry.
+    // A new connection gets about a screenful, the latest 50, starting at a
+    // response's first entry.
     drop(client);
     let (mut client, _, transcript) = Client::connect(addr).await;
     let transcript = transcript.expect("the selected agent's transcript");
     assert!(transcript.has_earlier);
-    assert!(transcript.entries.len() <= 200 && transcript.entries.len() >= 190, "{}", transcript.entries.len());
+    assert!(transcript.entries.len() <= 50 && transcript.entries.len() >= 45, "{}", transcript.entries.len());
     assert_eq!(transcript.entries.last().map(|entry| entry.seq), Some(total - 1));
     let first = &transcript.entries[0];
     assert!(first.reply == 0 || first.reply == first.seq, "never partway through a response: {first:?}");
+
+    // Asked for without a limit, an earlier page is 200.
+    let earlier = page(&mut client, load("builder", first.seq, 0, None)).await;
+    assert!(earlier.entries.len() <= 200 && earlier.entries.len() >= 190, "{}", earlier.entries.len());
+    assert_eq!(earlier.entries.last().map(|entry| entry.seq), Some(first.seq - 1));
 
     // Scrolling up: page after page, until the first entry, with no gap.
     let mut held = transcript.entries.clone();
@@ -104,4 +110,31 @@ async fn a_snapshot_stops_at_about_256_kb_but_holds_a_bigger_entry_whole() {
     assert_eq!(transcript.entries.len(), 1, "{:?}", transcript.entries.iter().map(|entry| entry.seq).collect::<Vec<_>>());
     assert!(transcript.has_earlier);
     assert!(prost::Message::encoded_len(&transcript) > 300 * 1024);
+}
+
+#[tokio::test]
+async fn a_snapshot_stops_at_about_64_kb_and_earlier_pages_at_about_256() {
+    let dir = temp_dir();
+    let (addr, _factory) = start(&dir).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    apply_request(&mut client, &mut view, create_agent("", "Builder", "")).await;
+    apply_request(&mut client, &mut view, Request::SelectAgent(v1::SelectAgent { agent_id: "builder".into() })).await;
+    for n in 0..12 {
+        apply_request(&mut client, &mut view, send_message("builder", &format!("{n} {}", "x".repeat(16 * 1024)))).await;
+        view.follow(&mut client, |view| {
+            let agent = view.agent("builder");
+            agent.status() == v1::AgentStatus::Idle && agent.queued_messages == 0
+        })
+        .await;
+    }
+    drop(client);
+    let (mut client, _, transcript) = Client::connect(addr).await;
+    let transcript = transcript.expect("transcript");
+    let size = prost::Message::encoded_len(&transcript);
+    assert!(transcript.has_earlier);
+    assert!((48 * 1024..=80 * 1024).contains(&size), "{size}");
+    let earlier = page(&mut client, load("builder", transcript.entries[0].seq, 0, None)).await;
+    let size = prost::Message::encoded_len(&earlier);
+    assert!((200 * 1024..=280 * 1024).contains(&size), "{size}");
 }

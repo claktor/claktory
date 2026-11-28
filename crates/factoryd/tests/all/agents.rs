@@ -85,7 +85,7 @@ async fn a_message_to_an_agent_without_a_usable_model_says_why_it_was_not_sent()
     assert!(entries[1].starts_with("notice: No model available: \"anthropic/not-signed-in\" needs its provider signed in."), "{entries:?}");
 
     // A provider that's signed in but no longer offers the model says so,
-    // rather than to sign in (Abbacchio's LOW on #185 U4).
+    // rather than to sign in.
     let gone = client_message::Body::UpdateAgent(v1::UpdateAgent {
         agent_id: "writer".into(),
         model: Some("scripted/gone".into()),

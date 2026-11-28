@@ -33,7 +33,6 @@ void main() {
               explorer: ExplorerStore(),
               extensionView: ExtensionViewStore(),
               localBackend: false,
-              localPairing: () async => null,
             )
             ..deviceKey = ((_) => key)
             ..askForPatches = patches
@@ -112,8 +111,14 @@ void main() {
         split: ViewSplit(
           axis: ViewAxis.VIEW_AXIS_ROW,
           children: [
-            ViewNode(id: 'chat', leaf: ViewLeaf(kind: 'chat')),
-            ViewNode(id: 'p1', leaf: ViewLeaf(kind: 'settings')),
+            ViewNode(
+              id: 'chat',
+              leaf: ViewLeaf(kind: 'chat'),
+            ),
+            ViewNode(
+              id: 'p1',
+              leaf: ViewLeaf(kind: 'settings'),
+            ),
           ],
         ),
       ),

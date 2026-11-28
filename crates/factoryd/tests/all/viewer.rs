@@ -233,7 +233,7 @@ async fn an_agent_shows_the_person_a_file_once() {
     view.follow(&mut client, |view| idle(view, "builder")).await;
     assert!(said(&view).expect("said").starts_with("No such file: "));
     // A named pipe is never opened: that would wait for a writer, and the
-    // agent with it (row 1322).
+    // agent with it.
     #[cfg(unix)]
     {
         assert!(std::process::Command::new("mkfifo").arg(site.join("slow.txt")).status().expect("mkfifo").success());
@@ -363,7 +363,7 @@ async fn a_full_layout_replaces_its_oldest_pane() {
     assert_eq!(panes(view.agent("builder").layout.as_ref()), ["chat", &file(1)]);
 }
 
-/// Focus (#272): the person fills the window with one pane; it's kept with
+/// Focus: the person fills the window with one pane; it's kept with
 /// the layout, for every device and across a restart, and an agent's show
 /// leaves it in place.
 #[tokio::test]
@@ -522,7 +522,7 @@ async fn a_pdf_is_shown_and_read_whole_from_one_version() {
     assert_eq!((big.error.as_str(), big.data.len()), ("This PDF is too big to open here (80 MB).", 0));
 }
 
-/// #347: the person opening a pane (on the phone, from its list of open
+/// The person opening a pane (on the phone, from its list of open
 /// files) counts as opening it now, on every device, as an agent's re-show
 /// does.
 #[tokio::test]
@@ -548,4 +548,58 @@ async fn the_person_opening_a_pane_makes_it_the_latest() {
     assert!(matches!(&refused, Body::Error(error) if error.message == "The layout has no pane \"nope\"."), "{refused:?}");
     let refused = apply_request(&mut client, &mut view, opened_pane("nobody", "a")).await;
     assert!(matches!(&refused, Body::Error(error) if error.code() == v1::ErrorCode::NotFound), "{refused:?}");
+}
+
+/// A file the app kept is opened again without reading it again: a read
+/// naming the kept copy's hash gets `unchanged` and no data while the file
+/// is that version, and the new version, hashed whole, once it isn't.
+#[tokio::test]
+async fn a_kept_copy_is_opened_again_without_reading_it_again() {
+    let dir = temp_dir();
+    let (addr, _factory) = start(&dir).await;
+    let (mut client, _, _) = Client::connect(addr).await;
+    let notes = dir.join("notes.md");
+    let text = "# Notes\n".repeat(1000);
+    std::fs::write(&notes, &text).expect("write");
+    let ask = |max_bytes: u64, offset: u64, unless: &str| {
+        client_message::Body::ReadFile(v1::ReadFile {
+            path: notes.display().to_string(),
+            max_bytes,
+            offset,
+            unless_sha256: unless.into(),
+            ..Default::default()
+        })
+    };
+
+    // The first piece of a long text has no hash unless a kept copy is named.
+    let first = content(client.request(ask(1000, 0, "")).await.body);
+    assert_eq!((first.truncated, first.sha256.as_str()), (true, ""));
+    let whole = content(client.request(ask(0, 0, "")).await.body);
+    assert_eq!((whole.truncated, whole.sha256.len(), whole.unchanged), (false, 64, false));
+    let named = content(client.request(ask(1000, 0, &"0".repeat(64))).await.body);
+    assert_eq!((named.data.len(), named.sha256.as_str(), named.unchanged), (1000, whole.sha256.as_str(), false));
+
+    // Still that version: nothing read, the rest as it is.
+    let kept = content(client.request(ask(1000, 0, &whole.sha256.to_uppercase())).await.body);
+    assert!(kept.unchanged);
+    assert_eq!((kept.data.len(), kept.truncated, kept.error.as_str()), (0, false, ""));
+    assert_eq!((kept.mime.as_str(), kept.size, kept.modified_ms, kept.sha256.as_str()), ("text/markdown", whole.size, whole.modified_ms, whole.sha256.as_str()));
+
+    // Changed: read as asked, a range of the new version too, with its hash.
+    let changed = text.replacen("Notes", "Plans", 1);
+    std::fs::write(&notes, &changed).expect("rewrite");
+    let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+    std::fs::File::options().write(true).open(&notes).and_then(|file| file.set_modified(later)).expect("touch");
+    let fresh = content(client.request(ask(1000, 0, &whole.sha256)).await.body);
+    assert!(!fresh.unchanged);
+    assert_eq!((fresh.data.as_slice(), fresh.truncated), (&changed.as_bytes()[..1000], true));
+    assert_eq!(fresh.sha256.len(), 64);
+    assert_ne!(fresh.sha256, whole.sha256);
+    let range = content(client.request(ask(100, 4000, &whole.sha256)).await.body);
+    assert_eq!((range.data.as_slice(), range.unchanged, range.sha256.as_str()), (&changed.as_bytes()[4000..4100], false, fresh.sha256.as_str()));
+
+    // A file that's gone says so, as a plain read does.
+    std::fs::remove_file(&notes).expect("remove");
+    let gone = content(client.request(ask(0, 0, &fresh.sha256)).await.body);
+    assert_eq!((gone.error, gone.unchanged), (format!("No such file: {}", notes.display()), false));
 }

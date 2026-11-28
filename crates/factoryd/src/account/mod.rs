@@ -24,6 +24,7 @@
 pub(crate) mod analytics;
 pub(crate) mod anchor;
 pub(crate) mod apps;
+pub(crate) mod moves;
 pub(crate) mod recovery;
 pub(crate) mod relay_token;
 pub(crate) mod reports;
@@ -34,8 +35,8 @@ use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
 use claktory_account::protocol::{
-    self as api, CheckIn, CheckedIn, Endpoints, Ephemeral, ErrorBody, MoveDone, MoveRequest, Share, ShareRequest, SignInStart,
-    SignInStarted, SignInVerify, SignedIn, WellKnown,
+    self as api, AuthorizePoll, AuthorizeStart, AuthorizeStarted, Authorized, CheckIn, CheckedIn, ClaktoryAuthorizations, Endpoints,
+    Ephemeral, ErrorBody, MoveDone, MoveRequest, Share, ShareRequest, SignInStart, SignInStarted, SignInVerify, SignedIn, WellKnown,
 };
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use factory_protocol::v1::{self, ErrorCode};
@@ -130,6 +131,19 @@ struct Saved {
     /// claktory.com's key when it's another, not verified: it waits for
     /// the person (`recovery::use_new`).
     recovery_waiting: Option<recovery::Waiting>,
+    /// The account's key as claktory.com last gave it (its public half),
+    /// whatever the vault is sealed to; empty while it has none. What a new
+    /// key made here replaces (`recovery::make`).
+    recovery_account_key: String,
+    /// How far its check-ins have heard of device keys removed from the
+    /// account (E11-8 point 6): the service's `removed_cursor`, an opaque
+    /// word, sent back as `removed_since`; empty for none yet.
+    removed_cursor: String,
+    /// Signed in with no code, approved on a device of the person's: that
+    /// device's account key, the only device let in at once, within
+    /// `FIRST_DEVICE_WINDOW` of `signed_in_ms`. Empty for a sign-in with the
+    /// emailed code, which lets in the first device that comes.
+    first_device: String,
     /// The account key this Claktory last vouched for, this computer's own
     /// app's (#529, `vouch`), with the sign-in it vouched under (#619).
     vouched_app: Option<VouchedApp>,
@@ -184,6 +198,18 @@ impl Saved {
     }
 }
 
+/// Whether this Claktory was never signed in to an account, as
+/// `<home>/account` keeps it, read without the backend (`factoryd pair
+/// --show-code`): no file yet, or one that never signed in. One that can't
+/// be read counts as signed in.
+pub(crate) fn never_signed_in_here(home: &crate::home::Home) -> bool {
+    match std::fs::read(home.root().join("account").join("account.json")) {
+        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+        Ok(bytes) => serde_json::from_slice::<Saved>(&bytes)
+            .is_ok_and(|saved| !saved.signed_in() && saved.signed_in_ms == 0 && saved.last_check_in_ms == 0 && saved.signing_out.is_empty()),
+    }
+}
+
 /// The account protector's params in the vault: what opening it needs.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Params {
@@ -207,6 +233,25 @@ struct Pending {
     expires_ms: i64,
     /// The address the code comes from; empty when unknown.
     code_from: String,
+    /// Waiting for the person to approve it on a device instead of for a
+    /// code: AccountAuthorize, or a code the account answered with
+    /// `authorization_pending`.
+    approval: Option<Approval>,
+}
+
+/// A request to join the account waiting for the person's approval, polled
+/// every `interval` (`poll_approval`).
+#[derive(Clone)]
+struct Approval {
+    interval: Duration,
+    next_poll: Instant,
+}
+
+impl Approval {
+    fn new(interval_s: i64) -> Approval {
+        let interval = Duration::from_secs(interval_s.clamp(1, 60) as u64);
+        Approval { interval, next_poll: Instant::now() + interval }
+    }
 }
 
 struct Inner {
@@ -235,6 +280,28 @@ struct Inner {
     stamped: std::collections::HashMap<[u8; 32], i64>,
     /// When the sign-outs not yet told are tried again.
     next_sign_out: Instant,
+    /// When a check-in since this backend started last heard of the
+    /// account's removed devices, and when a device's Hello last asked for
+    /// one (`removals_fresh`).
+    removals_heard: Option<Instant>,
+    removals_asked: Option<Instant>,
+    /// A computer asking to join the account, waiting for the person's
+    /// approval, by request id: the bell their devices hear. Asked for
+    /// every `BELL_EVERY` while a device is connected, and heard with
+    /// every check-in.
+    waiting: Vec<String>,
+    waiting_asked: Option<Instant>,
+    /// Moves to another computer the person approved with this Claktory as
+    /// their source (`moves`): when they were last asked for, until when
+    /// they're asked for often (a device of the person's just asked for
+    /// this Claktory's word to approve one), and those this Claktory
+    /// turned down, by request id, so they aren't checked again.
+    moves_asked: Option<Instant>,
+    moves_soon_until: Option<Instant>,
+    moves_turned_down: Vec<String>,
+    /// A recovery key a device is making for the account, waiting for
+    /// its signature (`recovery::make`, `recovery::publish`).
+    recovery_making: Option<recovery::Making>,
 }
 
 /// The time to sign a request with, `now` by the service's clock: now, or
@@ -267,6 +334,8 @@ pub(crate) struct State {
     busy: tokio::sync::Mutex<()>,
     /// Wakes `monitor`: something's due now.
     wake: Notify,
+    /// Notified after every check-in, whatever its outcome.
+    checked: Notify,
     http: reqwest::Client,
     /// Replies reported lately (`reports`).
     reports: reports::Sent,
@@ -489,6 +558,14 @@ impl State {
             reseal_due: None,
             stamped: Default::default(),
             next_sign_out: now,
+            removals_heard: None,
+            removals_asked: None,
+            waiting: Vec::new(),
+            waiting_asked: None,
+            moves_asked: None,
+            moves_soon_until: None,
+            moves_turned_down: Vec::new(),
+            recovery_making: None,
         };
         let http = reqwest::Client::builder()
             .timeout(CALL_TIMEOUT)
@@ -502,6 +579,7 @@ impl State {
             inner: Mutex::new(inner),
             busy: tokio::sync::Mutex::new(()),
             wake: Notify::new(),
+            checked: Notify::new(),
             http,
             reports: reports::Sent::default(),
             stopped: std::sync::atomic::AtomicBool::new(false),
@@ -746,13 +824,18 @@ impl State {
 
     /// A signed call as the signed-in Claktory.
     async fn signed<T: DeserializeOwned>(&self, path: &str, body: &impl Serialize) -> Result<T, Failure> {
+        self.signed_with("POST", path, body).await
+    }
+
+    /// `signed`, with the method given.
+    async fn signed_with<T: DeserializeOwned>(&self, method: &str, path: &str, body: &impl Serialize) -> Result<T, Failure> {
         let (service, service_key, token) = {
             let inner = self.lock();
             (inner.saved.service.clone(), inner.saved.service_key.clone(), inner.saved.machine_token.clone())
         };
         let key = api::verifying_key(&service_key).ok_or_else(|| Failure::Unreachable("no service key kept".to_owned()))?;
         let (_, backend_key) = self.identity().map_err(|error| Failure::Unreachable(error.to_string()))?;
-        self.call(&service, Some(&key), "POST", path, body, Some((&token, &backend_key))).await
+        self.call(&service, Some(&key), method, path, body, Some((&token, &backend_key))).await
     }
 
     /// A signed call with a token and backend key of its choosing.
@@ -871,7 +954,9 @@ impl State {
         // Switch account… (V6): signed in, with a code asked for another
         // address, it shows as signed in, with where the code went.
         let switching = inner.switching();
-        let state = if inner.pending.is_some() && !switching {
+        let state = if inner.pending.as_ref().is_some_and(|pending| pending.approval.is_some()) {
+            v1::ClaktoryAccountState::AwaitingApproval
+        } else if inner.pending.is_some() && !switching {
             v1::ClaktoryAccountState::AwaitingCode
         } else if saved.signed_in() && saved.revoked {
             v1::ClaktoryAccountState::Revoked
@@ -903,7 +988,7 @@ impl State {
                 }
                 _ => inner.problem.clone(),
             },
-            code_expires_ms: inner.pending.as_ref().map_or(0, |pending| pending.expires_ms),
+            code_expires_ms: inner.pending.as_ref().filter(|pending| pending.approval.is_none()).map_or(0, |pending| pending.expires_ms),
             last_sign_in_json: saved.last_sign_in_json.clone(),
             last_check_in_json: saved.last_check_in_json.clone(),
             last_sign_in_ms: saved.last_sign_in_ms,
@@ -913,6 +998,12 @@ impl State {
             skippable: false,
             code_from: inner.pending.as_ref().map(|pending| pending.code_from.clone()).unwrap_or_default(),
             switching_to,
+            approval_expires_ms: inner
+                .pending
+                .as_ref()
+                .filter(|pending| pending.approval.is_some())
+                .map_or(0, |pending| pending.expires_ms),
+            authorizations_waiting: if saved.signed_in() && !saved.revoked { inner.waiting.clone() } else { Vec::new() },
         })
     }
 
@@ -945,6 +1036,9 @@ pub(crate) struct Owner {
     /// The pinned key is from before this build's floor (`anchor`): it no
     /// longer vouches for devices.
     pub retired: bool,
+    /// Signed in with no code: the account key of the device that
+    /// approved it, the only one let in at once; empty otherwise.
+    pub first_device: String,
 }
 
 /// The account it's signed in to, while signing in is on (`config`, so it
@@ -964,6 +1058,7 @@ pub(crate) fn owner(factory: &Factory, config: &AccountConfig) -> Option<Owner> 
         service_key: api::verifying_key(&saved.service_key)?,
         signed_in_ms: saved.signed_in_ms,
         retired: anchor::retired(&saved.service, saved.service_key_from),
+        first_device: saved.first_device.clone(),
     })
 }
 
@@ -1009,6 +1104,30 @@ pub(crate) fn check_assertion(
     Ok(said)
 }
 
+/// The account key of the assertion this computer's own app showed on its
+/// socket (E11-8 point 6), for its DMs: the service's, unexpired, for this
+/// Claktory's account. Its device key isn't compared: the socket has no
+/// tunnel key, and the app is known there by its code signature. None
+/// without one that checks out.
+pub(crate) fn app_account_key(factory: &Factory, assertion: &str) -> Option<String> {
+    app_account(factory, assertion).map(|(account_key, _)| account_key)
+}
+
+/// `app_account_key`, with the account it was proven for: (account key,
+/// account id).
+pub(crate) fn app_account(factory: &Factory, assertion: &str) -> Option<(String, String)> {
+    if assertion.is_empty() {
+        return None;
+    }
+    let config = factory.lock().config.account.clone();
+    let owner = owner(factory, &config)?;
+    if owner.retired {
+        return None;
+    }
+    let said = api::verify_device_assertion(&owner.service_key, assertion, now_s())?;
+    (said.account_id == owner.account_id && !said.account_key.is_empty()).then_some((said.account_key, said.account_id))
+}
+
 #[cfg(unix)]
 fn create_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
     use std::os::unix::fs::DirBuilderExt;
@@ -1046,7 +1165,28 @@ pub(crate) async fn sign_in(factory: &Arc<Factory>, email: &str) -> Result<(), R
     };
     let account = &factory.account;
     let _busy = account.busy.lock().await;
-    let service = configured_service(&config);
+    let (service, service_key, key_from, verifying) = service_for_sign_in(factory, &config).await?;
+    let (claktory_id, key) = account.identity()?;
+    let start = SignInStart {
+        email,
+        claktory_id,
+        name: computer_name(),
+        backend_key: api::b64(key.verifying_key().to_bytes()),
+        version: crate::update::VERSION.to_owned(),
+        platform: platform(),
+    };
+    send_code(factory, &service, &service_key, key_from, &verifying, start).await
+}
+
+/// The service to sign in at, as `config` says, with its key checked
+/// (`anchor`): its address and key, the key's `from`, and the key to check
+/// its answers with. A sign-out there it hasn't heard of yet is told first.
+async fn service_for_sign_in(
+    factory: &Arc<Factory>,
+    config: &AccountConfig,
+) -> Result<(String, String, Option<i64>, VerifyingKey), RequestError> {
+    let account = &factory.account;
+    let service = configured_service(config);
     let known = account.well_known(&service).await.map_err(|failure| sign_in_error(&service, failure))?;
     let key_from = match anchor::vouch(&service, &known) {
         anchor::Vouch::Free(from) => from,
@@ -1066,16 +1206,7 @@ pub(crate) async fn sign_in(factory: &Arc<Factory>, email: &str) -> Result<(), R
     if account.lock().saved.signing_out.iter().any(|out| out.service == service) {
         tell_sign_outs(factory, true).await;
     }
-    let (claktory_id, key) = account.identity()?;
-    let start = SignInStart {
-        email,
-        claktory_id,
-        name: computer_name(),
-        backend_key: api::b64(key.verifying_key().to_bytes()),
-        version: crate::update::VERSION.to_owned(),
-        platform: platform(),
-    };
-    send_code(factory, &service, &service_key, key_from, &verifying, start).await
+    Ok((service, service_key, key_from, verifying))
 }
 
 /// Sends `start`, and waits for its code.
@@ -1120,6 +1251,7 @@ async fn send_code(
                 from if from.is_empty() && service == DEFAULT_SERVICE => DEFAULT_CODE_FROM.to_owned(),
                 from => from,
             },
+            approval: None,
         });
     }
     account.save();
@@ -1156,10 +1288,327 @@ pub(crate) async fn cancel_sign_in(factory: &Arc<Factory>) -> Result<(), Request
     Ok(())
 }
 
+/// What a sign-in waiting for the person's approval says to a code.
+const WAITING_FOR_APPROVAL: &str = "This Claktory is waiting for you to approve it on one of your devices.";
+/// A computer's request to join waits this long at most (the service's own
+/// `expires_in` is what counts; this only bounds a wrong one).
+const APPROVAL_LONGEST: i64 = 15 * 60;
+
+/// AccountAuthorize (the no-code setup): asks the account's devices to
+/// approve this Claktory, with no code anywhere, then waits for their answer
+/// (`poll_approval`). Asking again for the same email while it waits changes
+/// nothing: another request would cancel both.
+pub(crate) async fn authorize(factory: &Arc<Factory>, email: &str) -> Result<(), RequestError> {
+    let config = enabled(factory)?;
+    let Some(email) = api::normalize_email(email) else {
+        return Err(refused(ErrorCode::InvalidRequest, "Enter an email address, like you@example.com."));
+    };
+    let account = &factory.account;
+    let _busy = account.busy.lock().await;
+    if account
+        .lock()
+        .pending
+        .as_ref()
+        .is_some_and(|pending| pending.approval.is_some() && pending.start.email == email && pending.expires_ms > now_ms())
+    {
+        return Ok(());
+    }
+    let (service, service_key, key_from, verifying) = service_for_sign_in(factory, &config).await?;
+    let (claktory_id, key) = account.identity()?;
+    let mut start = AuthorizeStart {
+        email,
+        claktory_id,
+        name: computer_name(),
+        backend_key: api::b64(key.verifying_key().to_bytes()),
+        version: crate::update::VERSION.to_owned(),
+        platform: platform(),
+        kind: api::KIND_CLAKTORY.to_owned(),
+        receive: None,
+    };
+    let path = "/v1/claktories/authorize/start";
+    let mut asked = account.call::<AuthorizeStarted>(&service, Some(&verifying), "POST", path, &start, Some(("", &key))).await;
+    // A backend key this Claktory signed out with: a new one.
+    if matches!(&asked, Err(Failure::Refused(_, body)) if body.error == "backend_key_retired") {
+        tracing::info!(service, "the account service retired this backend key; asking with a new one");
+        account.new_key();
+        let (_, key) = account.identity()?;
+        start.backend_key = api::b64(key.verifying_key().to_bytes());
+        asked = account.call(&service, Some(&verifying), "POST", path, &start, Some(("", &key))).await;
+    }
+    let started = match asked {
+        Ok(started) => started,
+        Err(Failure::Refused(_, body)) if body.error == "no_device_to_approve" => {
+            return Err(refused(ErrorCode::InvalidRequest, NO_DEVICE_TO_APPROVE));
+        }
+        Err(Failure::Refused(_, body)) if body.error == "two_at_once" => return Err(refused(ErrorCode::InvalidRequest, TWO_AT_ONCE)),
+        Err(failure) => return Err(sign_in_error(&service, failure)),
+    };
+    let signed = SignInStart {
+        email: start.email.clone(),
+        claktory_id: start.claktory_id.clone(),
+        name: start.name.clone(),
+        backend_key: start.backend_key.clone(),
+        version: start.version.clone(),
+        platform: start.platform.clone(),
+    };
+    {
+        let mut inner = account.lock();
+        inner.saved.last_sign_in_json = serde_json::to_string_pretty(&start).unwrap_or_default();
+        inner.saved.last_sign_in_ms = now_ms();
+        inner.problem.clear();
+        inner.pending = Some(Pending {
+            service: service.clone(),
+            service_key,
+            key_from,
+            start: signed,
+            request_id: started.request_id,
+            expires_ms: now_ms() + started.expires_in.clamp(1, APPROVAL_LONGEST) * 1000,
+            code_from: String::new(),
+            approval: Some(Approval::new(started.interval)),
+        });
+    }
+    account.save();
+    tracing::info!(service, "asked the account's devices to approve this Claktory");
+    account.wake.notify_one();
+    changed(factory);
+    Ok(())
+}
+
+const NO_DEVICE_TO_APPROVE: &str = "None of your devices can approve this Claktory yet. On your phone or Mac, sign in to your Claktory account with your email, connect it to one of your Claktories, then ask again.";
+const TWO_AT_ONCE: &str = "Two computers asked to join your account at the same time, so neither was added. Ask again.";
+
+/// Asks the service whether the person approved this Claktory, if a request
+/// waits and it's time: signed in when they did (`complete`), and the device
+/// that approved is the one let in at once; told why when they declined, it
+/// ran out or another computer asked too. Called with `busy` held.
+async fn poll_approval(factory: &Arc<Factory>) {
+    let account = &factory.account;
+    let Some(pending) = account
+        .lock()
+        .pending
+        .clone()
+        .filter(|pending| pending.approval.as_ref().is_some_and(|approval| approval.next_poll <= Instant::now()))
+    else {
+        return;
+    };
+    let stop = |problem: &str| {
+        let mut inner = account.lock();
+        inner.pending = None;
+        inner.problem = problem.to_owned();
+    };
+    if now_ms() >= pending.expires_ms {
+        stop(NOT_APPROVED_IN_TIME);
+        changed(factory);
+        return;
+    }
+    let (Some(verifying), Ok((_, key))) = (api::verifying_key(&pending.service_key), account.identity()) else {
+        tracing::warn!("couldn't read this Claktory's keys to finish signing in");
+        stop("Claktory couldn't finish signing in. Ask again.");
+        changed(factory);
+        return;
+    };
+    let ephemeral = Ephemeral::new();
+    let asked = AuthorizePoll { request_id: pending.request_id.clone(), eph_pub: ephemeral.public_b64() };
+    let polled = account
+        .call::<Authorized>(&pending.service, Some(&verifying), "POST", "/v1/claktories/authorize/poll", &asked, Some(("", &key)))
+        .await;
+    let again = |account: &State| {
+        if let Some(approval) = account.lock().pending.as_mut().and_then(|pending| pending.approval.as_mut()) {
+            approval.next_poll = Instant::now() + approval.interval;
+        }
+    };
+    match polled {
+        Ok(authorized) => match complete(factory, &pending, &authorized.signed_in, &ephemeral, &authorized.first_device).await {
+            Ok(_) => tracing::info!(service = pending.service, "signed in to the account service, approved on a device"),
+            Err(error) => {
+                tracing::warn!(%error, "an approved sign-in couldn't be finished");
+                stop(&error.to_string());
+            }
+        },
+        Err(Failure::Refused(_, body)) if body.error == "authorization_pending" => again(account),
+        Err(Failure::Refused(_, body)) if body.error == "rate_limited" => again(account),
+        Err(Failure::Refused(_, body)) => {
+            tracing::info!(error = body.error, "the request to join the account ended");
+            let problem = match body.error.as_str() {
+                "access_denied" => "This Claktory was declined on one of your devices. If that was a mistake, ask again.".to_owned(),
+                "two_at_once" => TWO_AT_ONCE.to_owned(),
+                "expired_token" => NOT_APPROVED_IN_TIME.to_owned(),
+                "claktory_taken" => {
+                    account.new_identity();
+                    "This Claktory was signed in to another account before. Ask again to use this one.".to_owned()
+                }
+                "backend_key_retired" => {
+                    account.new_key();
+                    "That request no longer works. Ask again.".to_owned()
+                }
+                _ => sign_in_error(&pending.service, Failure::Refused(409, body)).to_string(),
+            };
+            stop(&problem);
+        }
+        // Not reached, or not the service: asked again until it runs out.
+        Err(failure) => {
+            tracing::info!(%failure, "couldn't ask whether this Claktory was approved; asking again");
+            again(account);
+        }
+    }
+    account.save();
+    changed(factory);
+}
+
+const NOT_APPROVED_IN_TIME: &str = "This Claktory wasn't approved in time. Ask again.";
+
+/// How often the bell (`Inner.waiting`) is asked for while a device is
+/// connected; check-ins bring it too.
+const BELL_EVERY: Duration = Duration::from_secs(60);
+
+/// Asks the service which computers wait for the person's approval, while
+/// this Claktory is signed in and an app is connected to hear the bell.
+/// Called with `busy` held.
+async fn ring_bell(factory: &Arc<Factory>) {
+    let account = &factory.account;
+    let (service, service_key, token) = {
+        let mut inner = account.lock();
+        if !inner.saved.signed_in() || inner.saved.revoked || inner.waiting_asked.is_some_and(|asked| asked.elapsed() < BELL_EVERY) {
+            return;
+        }
+        if factory.clients() == 0 {
+            // Nobody to ring: a check-in brings it later.
+            return;
+        }
+        inner.waiting_asked = Some(Instant::now());
+        (inner.saved.service.clone(), inner.saved.service_key.clone(), inner.saved.machine_token.clone())
+    };
+    let (Some(verifying), Ok((_, key))) = (api::verifying_key(&service_key), account.identity()) else { return };
+    let path = "/v1/claktories/authorizations";
+    let answer = account.send(&service, Some(&verifying), "GET", path, Vec::new(), Some((&token, &key))).await;
+    match answer
+        .and_then(|bytes| serde_json::from_slice::<ClaktoryAuthorizations>(&bytes).map_err(|error| Failure::Unreachable(error.to_string())))
+    {
+        Ok(heard) => heard_waiting(factory, heard.waiting),
+        Err(failure) => tracing::debug!(%failure, "couldn't ask which computers wait for approval"),
+    }
+}
+
+/// The computers waiting for the person's approval, as the service said:
+/// told to every device when it changed.
+fn heard_waiting(factory: &Factory, mut waiting: Vec<String>) {
+    waiting.retain(|id| !id.is_empty() && id.len() <= 200);
+    waiting.truncate(10);
+    let changed_now = {
+        let mut inner = factory.account.lock();
+        let changed_now = inner.waiting != waiting;
+        inner.waiting = waiting;
+        changed_now
+    };
+    if changed_now {
+        changed(factory);
+    }
+}
+
+/// Tests only: asks the service for the bell at once, rather than within
+/// `BELL_EVERY`.
+#[cfg(feature = "test-hooks")]
+pub fn ring_bell_for_tests(factory: &Factory) {
+    factory.account.lock().waiting_asked = None;
+    factory.account.wake.notify_one();
+}
+
+/// Tests only: how many apps are connected.
+#[cfg(feature = "test-hooks")]
+pub fn apps_connected_for_tests(factory: &Factory) -> usize {
+    factory.clients()
+}
+
+/// Tests only: this Claktory's backend key, public half.
+#[cfg(feature = "test-hooks")]
+pub fn backend_key_for_tests(factory: &Factory) -> VerifyingKey {
+    factory.account.identity().expect("the backend key").1.verifying_key()
+}
+
+/// Why a connection whose account key is `account_key` can't ask for this
+/// Claktory's word (ProveAllowedDevice), as Welcome.cannot_approve says it
+/// and the refusal does: empty when it can. A device on another machine
+/// (`remote`) that connected with a pairing code before it showed the
+/// account has none until it connects again with its assertion, which
+/// admission keeps; this computer's own app has one when it's signed in.
+pub(crate) fn cannot_approve(factory: &Factory, account_key: Option<&str>, remote: bool) -> String {
+    if account_key.is_some_and(|key| !key.is_empty()) {
+        return String::new();
+    }
+    if remote {
+        let name = factory.identity().name;
+        format!(
+            "This device connected to {name} with a code, not with your Claktory account. To approve here, sign in to your account on this device and connect again."
+        )
+    } else {
+        "Sign in to your Claktory account on this device first.".to_owned()
+    }
+}
+
+/// ProveAllowedDevice: this Claktory's word, signed with its backend key,
+/// that the device whose account key is `account_key` (the one its
+/// connection proved) is allowed on it, for approving request `request_id`
+/// at the service. Only for a connection of the person's, which the caller
+/// checks; working for 120 seconds by the service's clock.
+pub(crate) fn allowed_device_word(factory: &Factory, account_key: Option<&str>, remote: bool, request_id: &str) -> Result<String, RequestError> {
+    enabled(factory)?;
+    let Some(account_key) = account_key.filter(|key| !key.is_empty()) else {
+        return Err(refused(ErrorCode::SignInRequired, cannot_approve(factory, None, remote)));
+    };
+    if request_id.is_empty() || request_id.len() > 200 || request_id.chars().any(|character| character.is_control()) {
+        return Err(refused(ErrorCode::InvalidRequest, "That isn't a request to approve."));
+    }
+    let account = &factory.account;
+    let (account_id, claktory_id, offset) = {
+        let inner = account.lock();
+        if !inner.saved.signed_in() || inner.saved.revoked {
+            return Err(refused(ErrorCode::SignInRequired, "This Claktory isn't signed in to your account."));
+        }
+        (inner.saved.account_id.clone(), inner.saved.claktory_id.clone(), inner.clock_offset)
+    };
+    let (_, key) = account.identity()?;
+    let allowed = api::AllowedDevice {
+        v: 1,
+        account_id,
+        claktory_id,
+        account_key: account_key.to_owned(),
+        request_id: request_id.to_owned(),
+        iat: now_s() + offset,
+    };
+    Ok(api::sign_allowed_device(&key, &allowed))
+}
+
+/// Whether this Claktory has never been signed in to an account, by what it
+/// keeps (not by whether it's signed in now): no sign-in time kept (a
+/// sign-out keeps it), no check-in ever made, and no sign-out still to tell
+/// a service of. The Windows app's token signs in only then
+/// (`authority::Class::LocalBeforeFirstSignIn`).
+pub(crate) fn never_signed_in(factory: &Factory) -> bool {
+    let inner = factory.account.lock();
+    let saved = &inner.saved;
+    !saved.signed_in() && saved.signed_in_ms == 0 && saved.last_check_in_ms == 0 && saved.signing_out.is_empty()
+}
+
+/// Whether agents' commands may ask the account's devices to approve this
+/// Claktory (AccountAuthorize from a Tool connection): only a Claktory being
+/// set up, never signed in and with no device yet (Fugo). One that's in use
+/// is the person's to sign in: an agent could otherwise sign it in to an
+/// account of someone else's, whose device would then get in.
+pub(crate) fn tools_may_authorize(factory: &Factory) -> bool {
+    let never_signed_in = {
+        let inner = factory.account.lock();
+        let saved = &inner.saved;
+        !saved.signed_in() && saved.signed_in_ms == 0 && saved.signing_out.is_empty()
+    };
+    never_signed_in && !crate::remote::has_devices(&factory.home) && !crate::remote::app_ever_connected(&factory.home)
+}
+
 /// AccountVerify: signs in with the emailed code, and protects the vault
 /// with the account. Returns the account it signed in to, once it's this
-/// Claktory's and saved.
-pub(crate) async fn verify(factory: &Arc<Factory>, code: &str) -> Result<String, RequestError> {
+/// Claktory's and saved; None when the account answered that the person
+/// approves it on a device first (path 4b: an account that has one), so it
+/// now waits for that (`poll_approval`).
+pub(crate) async fn verify(factory: &Arc<Factory>, code: &str) -> Result<Option<String>, RequestError> {
     enabled(factory)?;
     let account = &factory.account;
     let _busy = account.busy.lock().await;
@@ -1170,6 +1619,9 @@ pub(crate) async fn verify(factory: &Arc<Factory>, code: &str) -> Result<String,
     let Some(pending) = pending else {
         return Err(refused(ErrorCode::InvalidRequest, "Enter your email address first."));
     };
+    if pending.approval.is_some() {
+        return Err(refused(ErrorCode::InvalidRequest, WAITING_FOR_APPROVAL));
+    }
     let Some(verifying) = api::verifying_key(&pending.service_key) else {
         return Err(refused(ErrorCode::Internal, "The service's key is unreadable."));
     };
@@ -1194,6 +1646,23 @@ pub(crate) async fn verify(factory: &Arc<Factory>, code: &str) -> Result<String,
             let current = switching_from.unwrap_or_default();
             return Err(refused(ErrorCode::InvalidRequest, format!("Claktory couldn't switch to that account. It's still signed in as {current}.")));
         }
+        // The account has a device that may approve: the code is spent, and
+        // the person approves this Claktory there (path 4b).
+        Err(Failure::Refused(_, ErrorBody { error, pending: Some(waiting), .. })) if error == "authorization_pending" => {
+            {
+                let mut inner = account.lock();
+                if let Some(pending) = inner.pending.as_mut() {
+                    pending.request_id.clone_from(&waiting.request_id);
+                    pending.expires_ms = now_ms() + waiting.expires_in * 1000;
+                    pending.approval = Some(Approval::new(waiting.interval));
+                }
+                inner.problem.clear();
+            }
+            tracing::info!(service = pending.service, "the code was right; waiting for the person to approve this Claktory on a device");
+            account.wake.notify_one();
+            changed(factory);
+            return Ok(None);
+        }
         Err(Failure::Refused(_, body)) if body.error == "backend_key_retired" => {
             account.lock().pending = None;
             account.new_key();
@@ -1211,6 +1680,20 @@ pub(crate) async fn verify(factory: &Arc<Factory>, code: &str) -> Result<String,
         }
         Err(failure) => return Err(sign_in_error(&pending.service, failure)),
     };
+    complete(factory, &pending, &signed_in, &ephemeral, "").await.map(Some)
+}
+
+/// Signed in, by the emailed code or a device's approval (`first_device`,
+/// its account key; empty for a code): keeps the sign-in, and protects the
+/// vault with the account. Returns the account. Called with `busy` held.
+async fn complete(
+    factory: &Arc<Factory>,
+    pending: &Pending,
+    signed_in: &SignedIn,
+    ephemeral: &Ephemeral,
+    first_device: &str,
+) -> Result<String, RequestError> {
+    let account = &factory.account;
     if signed_in.service_key != pending.service_key || signed_in.claktory_id != pending.start.claktory_id {
         return Err(sign_in_error(&pending.service, Failure::Unreachable("a sign-in for another key or Claktory".to_owned())));
     }
@@ -1237,6 +1720,7 @@ pub(crate) async fn verify(factory: &Arc<Factory>, code: &str) -> Result<String,
         inner.saved.name = pending.start.name.clone();
         inner.saved.revoked = false;
         inner.saved.signed_in_ms = now_ms();
+        inner.saved.first_device = first_device.to_owned();
         // Signed in there again: the sign-in a sign-out not told yet ended
         // has a new token now, so nothing's left to tell.
         inner.saved.signing_out.retain(|out| out.service != pending.service);
@@ -1294,7 +1778,7 @@ pub(crate) async fn verify(factory: &Arc<Factory>, code: &str) -> Result<String,
     // turned away (row 713).
     factory.account_open();
     account.wake.notify_one();
-    Ok(signed_in.account_id)
+    Ok(signed_in.account_id.clone())
 }
 
 /// AccountSignOut: the service is told first (#524), so the sign-in ends
@@ -1636,6 +2120,7 @@ async fn check_in(factory: &Arc<Factory>) {
         periods: Vec::new(),
         setup: Some(analytics::setup(factory)),
         devices: Some(analytics::devices(factory)),
+        removed_since: Some(account.lock().saved.removed_cursor.clone()),
     };
     let base = serde_json::to_string(&body).map_or(0, |json| json.len());
     body.periods = analytics::to_send(&account.lock().saved.periods, base, now_s());
@@ -1663,6 +2148,9 @@ async fn check_in(factory: &Arc<Factory>) {
             // Accepted periods are gone from disk at once, before anything
             // else is awaited (and broadcast).
             account.save();
+            heard_waiting(factory, checked.authorizations_waiting.clone());
+            moves::heard_waiting(factory, &checked.moves_waiting);
+            removed_heard(factory, &checked).await;
             reseal(factory, checked.epoch).await;
             recovery::compare(factory, checked.recovery_key).await;
             register_endpoints(factory).await;
@@ -1711,7 +2199,68 @@ async fn check_in(factory: &Arc<Factory>) {
         }
     }
     account.save();
+    account.checked.notify_waiters();
     changed(factory);
+}
+
+/// How long what check-ins heard of removed devices counts as fresh
+/// before a device is let in (E11-8 point 6), and how long a device's Hello
+/// waits for a check-in that hears of them again.
+const REMOVALS_FRESH: Duration = Duration::from_secs(3600);
+const REMOVALS_WAIT: Duration = Duration::from_secs(5);
+/// A check-in that couldn't hear of them isn't asked for again by every
+/// Hello: at most this often.
+const REMOVALS_ASK_GAP: Duration = Duration::from_secs(60);
+
+/// What a check-in heard of devices removed from the account (Lock out on
+/// another device, Remove at claktory.com/account): each device here that
+/// connected with one of those keys is unpaired, then the cursor is kept.
+/// A service from before sends no cursor, and nothing changes.
+async fn removed_heard(factory: &Arc<Factory>, checked: &CheckedIn) {
+    // As fresh as the service can tell, whether or not it keeps a cursor.
+    factory.account.lock().removals_heard = Some(Instant::now());
+    let Some(cursor) = &checked.removed_cursor else { return };
+    for key in &checked.removed_device_keys {
+        let unpaired = factory.unpair_account_key(key, crate::remote::Removal::Account).await;
+        if unpaired > 0 {
+            tracing::warn!(unpaired, "unpaired devices removed from the account");
+        }
+    }
+    let account = &factory.account;
+    account.lock().saved.removed_cursor.clone_from(cursor);
+    account.save();
+}
+
+/// Before a device is let in by its assertion or its key (E11-8 point 6):
+/// while signed in, a check-in hears of devices removed from the account
+/// first, at start and once what the last one heard is over an hour old,
+/// so a Claktory that was offline during Lock out turns the device away on
+/// its first connection back. Waits `REMOVALS_WAIT` at most, and lets the
+/// device in as before when the service can't be reached (fails open).
+pub(crate) async fn removals_fresh(factory: &Arc<Factory>) {
+    if !factory.lock().config.account.enabled {
+        return;
+    }
+    let account = &factory.account;
+    let checked = account.checked.notified();
+    tokio::pin!(checked);
+    {
+        let mut inner = account.lock();
+        let due = inner.saved.signed_in()
+            && !inner.saved.revoked
+            && inner.removals_heard.is_none_or(|heard| heard.elapsed() > REMOVALS_FRESH)
+            && inner.removals_asked.is_none_or(|asked| asked.elapsed() > REMOVALS_ASK_GAP);
+        if !due {
+            return;
+        }
+        inner.removals_asked = Some(Instant::now());
+        inner.next_check_in = Instant::now();
+    }
+    checked.as_mut().enable();
+    account.wake.notify_one();
+    if tokio::time::timeout(REMOVALS_WAIT, checked).await.is_err() {
+        tracing::info!("no check-in in time to hear of removed devices; letting the device in as before");
+    }
 }
 
 /// The vault was opened by hand, with its passphrase or recovery key: while
@@ -2040,11 +2589,16 @@ pub fn stop_for_tests(factory: &Factory) {
 /// with the service's share (trying again while it can't be reached); checks
 /// in at start and every hour.
 pub(crate) async fn monitor(factory: Weak<Factory>) {
+    // An app connecting wakes the loops: the bell and the moves are asked
+    // for only while one is, so a tick with none slept until the next
+    // check-in.
+    let Some(mut loops) = factory.upgrade().map(|factory| factory.loops_woken()) else { return };
     loop {
         let Some(strong) = factory.upgrade() else { return };
         if strong.account.stopped.load(std::sync::atomic::Ordering::SeqCst) {
             return;
         }
+        loops.borrow_and_update();
         let wait = tick(&strong).await;
         let woken = async {
             strong.account.wake.notified().await;
@@ -2052,6 +2606,11 @@ pub(crate) async fn monitor(factory: Weak<Factory>) {
         tokio::select! {
             () = tokio::time::sleep(wait) => {}
             () = woken => {}
+            seen = loops.changed() => {
+                if seen.is_err() {
+                    return;
+                }
+            }
         }
     }
 }
@@ -2065,14 +2624,23 @@ async fn tick(factory: &Arc<Factory>) -> Duration {
     let account = &factory.account;
     let _busy = account.busy.lock().await;
     tell_sign_outs(factory, false).await;
-    let (signed_in, revoked, sign_outs) = {
+    poll_approval(factory).await;
+    let (signed_in, revoked, sign_outs, approval) = {
         let inner = account.lock();
         let sign_outs = (!inner.saved.signing_out.is_empty()).then(|| inner.next_sign_out.saturating_duration_since(Instant::now()));
-        (inner.saved.signed_in(), inner.saved.revoked, sign_outs)
+        let approval = inner
+            .pending
+            .as_ref()
+            .and_then(|pending| pending.approval.as_ref())
+            .map(|approval| approval.next_poll.saturating_duration_since(Instant::now()));
+        (inner.saved.signed_in(), inner.saved.revoked, sign_outs, approval)
     };
     if !signed_in || revoked {
-        return sign_outs.map_or(IDLE, |due| due.clamp(Duration::from_millis(100), IDLE));
+        let due = [sign_outs, approval].into_iter().flatten().min();
+        return due.map_or(IDLE, |due| due.clamp(Duration::from_millis(100), IDLE));
     }
+    ring_bell(factory).await;
+    moves::take_approved(factory).await;
     // Moved here: new credentials first, so nothing more goes out with the old.
     let rotating = !after_move(factory).await;
     let locked = factory.vault.exists() && !factory.vault.is_open() && State::params(factory).is_some();
@@ -2108,6 +2676,16 @@ async fn tick(factory: &Arc<Factory>) -> Duration {
         next = next.min(due.saturating_duration_since(now));
     }
     if let Some(due) = sign_outs {
+        next = next.min(due);
+    }
+    if let Some(due) = approval {
+        next = next.min(due);
+    }
+    // The bell, asked again while an app is connected.
+    if factory.clients() > 0 {
+        next = next.min(inner.waiting_asked.map_or(Duration::ZERO, |asked| BELL_EVERY.saturating_sub(asked.elapsed())));
+    }
+    if let Some(due) = moves::next_due(&inner, factory.clients() > 0) {
         next = next.min(due);
     }
     next.max(Duration::from_millis(100))

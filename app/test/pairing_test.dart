@@ -273,12 +273,11 @@ void main() {
     await pumpFrames(tester);
     final shown = nameInText('Evil\u202EMac');
     expect(find.text('Waiting for $shown'), findsOneWidget);
-    expect(find.text('No screen on $shown?'), findsOneWidget);
     expect(find.textContaining('\u202E'), findsNothing);
   });
 
   testWidgets('a Mac waiting for another Claktory shows the number in its '
-      'content area', (tester) async {
+      'content area, and where to type it', (tester) async {
     // A Mac's words ("this Mac"); tests run as Android otherwise.
     debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
     addTearDown(() => debugDefaultTargetPlatformOverride = null);
@@ -301,23 +300,15 @@ void main() {
       findsOneWidget,
     );
     expect(find.text('0427'), findsOneWidget);
-    // A server has no screen: the command that allows it there, checking
-    // the number, to copy, folded away until asked for.
-    expect(find.text('factoryd allow d9 --number 0427'), findsNothing);
-    await tester.tap(find.text('No screen on Studio?'));
-    await pumpFrames(tester);
+    // Never a command to run: a terminal can't allow it.
+    expect(find.textContaining('factoryd allow'), findsNothing);
     expect(
-      find.text('No screen on Studio? Run this in a terminal there:'),
+      find.text(
+        'No other device connected yet? Use one that’s signed in to your '
+        'Claktory account.',
+      ),
       findsOneWidget,
     );
-    expect(find.text('factoryd allow d9 --number 0427'), findsOneWidget);
-    expect(
-      find.text('Over SSH, connect with ssh -t so it runs in a terminal.'),
-      findsOneWidget,
-    );
-    await tester.tap(find.text('Copy'));
-    await pumpFrames(tester);
-    expect(find.text('Copied'), findsOneWidget);
     await tester.tap(find.text('Cancel'));
     await pumpFrames(tester);
     expect(harness.connections.current, isNull);

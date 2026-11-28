@@ -100,7 +100,7 @@ pub(crate) async fn monitor(factory: Weak<Factory>) {
     loop {
         let Some(strong) = factory.upgrade() else { return };
         strong.check_usage(&mut tracked).await;
-        // Switches whose provider has room again go back (friend bug #8 A1).
+        // Switches whose provider has room again go back.
         crate::usage_switch::come_back(&strong).await;
         drop(strong);
         // A sign-in wakes it early.
@@ -257,8 +257,8 @@ impl Factory {
                         let full: Vec<String> =
                             usage.windows.iter().filter(|window| window.used_percent >= 100.0).map(|window| window.id.clone()).collect();
                         // Requests go to the provider's accounts with
-                        // room first while this one reads full (Bruno
-                        // 52170): shown at once as the account in use.
+                        // room first while this one reads full: shown
+                        // at once as the account in use.
                         let windows_full: Vec<(String, u64)> = usage
                             .windows
                             .iter()
@@ -274,7 +274,7 @@ impl Factory {
                             match self.models.forget_spent_with_room(&id, &account, &full).await {
                                 Ok(true) => {
                                     // Shown at once, not at the old reset time:
-                                    // agents switched away (#341) can go back.
+                                    // agents switched away can go back.
                                     self.refresh_models().await;
                                     self.capacity_changed();
                                 }
@@ -303,7 +303,7 @@ impl Factory {
     }
 
     /// Reads every signed-in account's usage now, as a check that its
-    /// sign-in works here (after a move, #243 S3): no model call, nothing
+    /// sign-in works here (after a move): no model call, nothing
     /// spent. A sign-in the provider refuses is marked so, as any usage read
     /// marks it, and shows Sign in again. Each account's outcome, in order.
     pub(crate) async fn check_sign_ins(&self) -> Vec<SignInCheck> {

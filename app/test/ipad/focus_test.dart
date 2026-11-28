@@ -1,4 +1,4 @@
-// Needs you's focus mode on an iPad (#514, the spec's §6): the queue, the
+// Needs you's focus mode on an iPad: the queue, the
 // stage and Context laid out for the window's tier, a finger's way to
 // everything the keys do, and focus mode's ⌘-commands in the system's
 // menu while it's on (the workbench's, with ⌘⇧N to enter, while it's off).
@@ -159,7 +159,7 @@ void main() {
     expect(_onStage('Question 7'), findsOneWidget);
 
     // Open, it leaves the stage's header in reach: its Context button
-    // hides it again (Zucchero's row 666), and so does its own close.
+    // hides it again, and so does its own close.
     await tester.tap(find.bySemanticsLabel(RegExp(r'^Context$')).first);
     await settle(tester);
     final header = find.descendant(
@@ -308,7 +308,7 @@ void main() {
     expect(_menu['focus.context']?.$2, isTrue);
 
     // A field has the keys: ⌘⌫, ⌥⌘↓ and ⌘⇧C reach it instead. The card
-    // docks its field in the stage's answer bar (Illuso's CardAnswer; a
+    // docks its field in the stage's answer bar (CardAnswer; a
     // stand-in here, as in needs_you_focus_test).
     final field = TextEditingController();
     addTearDown(field.dispose);

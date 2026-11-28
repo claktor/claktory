@@ -7,9 +7,11 @@
 #include <memory>
 
 #include "device_channel.h"
+#include "engine_channel.h"
 #include "network_channel.h"
 #include "notifications_channel.h"
 #include "presence.h"
+#include "setup_channel.h"
 #include "sight_channel.h"
 #include "win32_window.h"
 #include "window_channel.h"
@@ -46,6 +48,8 @@ class FlutterWindow : public Win32Window {
   std::unique_ptr<NetworkChannel> network_channel_;
   std::unique_ptr<NotificationsChannel> notifications_channel_;
   std::unique_ptr<SightChannel> sight_channel_;
+  std::unique_ptr<SetupChannel> setup_channel_;
+  std::unique_ptr<EngineChannel> engine_channel_;
 };
 
 #endif  // RUNNER_FLUTTER_WINDOW_H_

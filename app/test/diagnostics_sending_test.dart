@@ -38,6 +38,9 @@ const _allowedKeys = {
   'err',
   'reach',
   'bytes',
+  'rebuild_ms',
+  'dial_ms',
+  'relay_ms',
 };
 final _token = RegExp(r'^([a-z_]+)=([0-9]+|[a-z]+)$');
 
@@ -177,7 +180,6 @@ void main() {
           extensionView: ExtensionViewStore(),
           tunnels: tunnels = _Tunnels(far.server.port),
           diagnostics: recorder,
-          localPairing: () async => null,
         )
         ..deviceKey = ((_) => 'k' * 64)
         ..diagnosticsEvery = const Duration(milliseconds: 100);
@@ -218,7 +220,9 @@ void main() {
       await until(() => recorder.on);
       expect(File('${deviceFolder.path}/$_endpoint.on').existsSync(), isTrue);
 
-      // Away a while and back: the reconnect is recorded, then sent.
+      // Away a while and back: the reconnect is recorded, then sent, with
+      // where its connect went: the tunnel's rebuild, its dial, its relay.
+      tunnels.last!.status = tunnelStatus(dialMs: 640, relayUpMs: 120);
       app.hidden();
       app.resumed(now: DateTime.now().add(const Duration(minutes: 2)));
       await until(
@@ -241,7 +245,12 @@ void main() {
       );
       expect(
         far.received.lastWhere((e) => e.kind == 'connected').detail,
-        matches(RegExp(r'^attempt=\d+ route=(direct|relayed|tunnel)$')),
+        matches(
+          RegExp(
+            r'^attempt=\d+ route=direct( rebuild_ms=\d+)? dial_ms=640 '
+            r'relay_ms=120$',
+          ),
+        ),
       );
       expect(
         kinds,

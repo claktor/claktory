@@ -12,6 +12,7 @@ import 'forms.dart' show FormFrame;
 import 'identity.dart';
 import 'mobile/input.dart' show InputKind;
 import 'mobile/metrics.dart';
+import 'move_approval.dart' show AccountMoveApproval;
 import 'protocol/factory/v1/factory.pb.dart' as pb;
 import 'resources.dart' show formatBytes;
 import 'scan_code.dart';
@@ -1455,6 +1456,9 @@ class MoveSettingRow extends StatelessWidget {
                     : palette.textFaint,
               ),
             ),
+            // A move to another computer through the account, waiting for
+            // this device's approval: only ever here.
+            const AccountMoveApproval(),
             // Started by hand (friend bug #24), a move is refused: Restore
             // sits here too.
             const BackendServiceRestore(top: Space.m),

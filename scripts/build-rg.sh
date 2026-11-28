@@ -44,7 +44,10 @@ cleanup() { [[ -z "$FRESH" ]] || rm -rf "$FRESH"; }
 trap cleanup EXIT
 if ! $DEV; then
   source "$ROOT/scripts/lib.sh"
-  FRESH="$(mktemp -d /private/tmp/claktory-rg.XXXXXX)"
+  # The build service's builds stay in the job's own temporary folder:
+  # /private/tmp/.cargo is another user's there.
+  FRESH_BASE=/private/tmp; [[ "${CLAKTORY_BUILD_SERVICE:-}" != 1 ]] || FRESH_BASE="${TMPDIR%/}"
+  FRESH="$(mktemp -d "$FRESH_BASE/claktory-rg.XXXXXX")"
   cargo_parents_ok "$FRESH"
 fi
 

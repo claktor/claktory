@@ -587,6 +587,9 @@ impl Runner {
                 return Err(why);
             }
         };
+        if let Some(why) = &screen.without_window_manager {
+            self.error(why);
+        }
         let mut session =
             Session {
             name: profile.to_owned(),

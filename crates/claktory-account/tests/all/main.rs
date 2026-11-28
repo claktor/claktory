@@ -3,10 +3,12 @@
 
 mod ai_reports;
 mod analytics;
+mod authorize;
 mod devices;
 mod files;
 mod limits;
 mod live;
+mod moves;
 mod pipes;
 mod recovery_key;
 mod relay_token;

@@ -487,6 +487,49 @@ async fn the_review_box_signs_in_again_with_its_pinned_key_after_signing_out() {
     assert_eq!((answer.status, answer.error().as_str()), (409, "backend_key_retired"), "{}", answer.text());
 }
 
+/// A review email joins no Claktory but the review box by the
+/// no-code setup either. Another key's request is refused before anything
+/// waits for approval; one approved under another key (asked before the
+/// check) is refused where it would register, and ends.
+#[tokio::test]
+async fn a_review_email_asks_to_join_only_from_the_review_box() {
+    use crate::authorize::{ask, decide, poll, shown, word};
+    let mut review_box = Claktory::new("198.51.100.60");
+    let instance = with_review_box(&review_box).await;
+    review_box.token = sign_in_box(&instance, &review_box).await.json::<SignedIn>().machine_token;
+    // The reviewer's phone: the account has a device that may approve.
+    let phone = Device::new("198.51.100.61");
+    let request_id = device_start(&instance, &phone).await;
+    assert_eq!(device_verify(&instance, &phone, &request_id, CODE).await.status, 200);
+
+    let stranger = Claktory::new("203.0.113.70");
+    let answer = ask(&instance, &stranger, EMAIL, "Someone's server").await;
+    assert_eq!((answer.status, answer.error().as_str()), (403, "review_account"), "{}", answer.text());
+    assert!(shown(&instance, &phone).await.is_empty(), "nothing waits for approval");
+    assert_eq!(mails_to(&instance, EMAIL), 0, "no heads-up either");
+
+    // Asked before the check, as an account from before would have: an
+    // ordinary account's request, approved, then the review email's.
+    let mut studio = Claktory::new("203.0.113.71");
+    let account = instance.sign_in(&mut studio, "earlier@example.com", "Mac mini").await.account_id;
+    let earlier_phone = Device::new("203.0.113.72");
+    instance.sign_in_device(&earlier_phone, "earlier@example.com", "iPhone").await;
+    let started: AuthorizeStarted = ask(&instance, &stranger, "earlier@example.com", "Someone's server").await.json();
+    let card = shown(&instance, &earlier_phone).await.pop().expect("its card");
+    let allowed = word(&instance, &studio, &account, &earlier_phone, &started.request_id, None);
+    let approval = json!({"approve": true, "fingerprint": card.fingerprint, "allowed": allowed});
+    let approved = decide(&instance, &earlier_phone, &card.id, approval).await;
+    assert_eq!(approved.status, 200, "{}", approved.text());
+    let conn = rusqlite::Connection::open(&instance.db).expect("the database");
+    conn.execute("UPDATE authorizations SET email = ?1 WHERE id = ?2", [EMAIL, started.request_id.as_str()]).unwrap();
+    let (answer, _) = poll(&instance, &stranger, &started.request_id).await;
+    assert_eq!((answer.status, answer.error().as_str()), (403, "review_account"), "{}", answer.text());
+    let (again, _) = poll(&instance, &stranger, &started.request_id).await;
+    assert_eq!((again.status, again.error().as_str()), (410, "expired_token"), "ended: {}", again.text());
+    let claktories: i64 = conn.query_row("SELECT count(*) FROM claktories WHERE id = ?1", [&stranger.id], |row| row.get(0)).unwrap();
+    assert_eq!(claktories, 0, "never registered");
+}
+
 /// A service for the store reviewers alone (`--review-only`): the review
 /// accounts sign in as before, and every other email is refused on every
 /// route, with nothing sent, so it's no account service for anyone else.

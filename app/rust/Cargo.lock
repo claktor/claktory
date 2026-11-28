@@ -640,6 +640,7 @@ dependencies = [
  "claktory-dm-crypto",
  "flutter_rust_bridge",
  "hex",
+ "hkdf 0.13.0",
  "iroh",
  "jni-sys 0.4.1",
  "n0-dns-resolver",
@@ -649,11 +650,13 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "socket2",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "windows-sys 0.61.2",
+ "x25519-dalek",
  "zeroize",
 ]
 

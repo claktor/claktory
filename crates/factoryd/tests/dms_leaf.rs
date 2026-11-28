@@ -59,7 +59,7 @@ impl Account {
         tokio::spawn(worker::serve(listener, worker, uid));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("a port");
         let addr = listener.local_addr().expect("an address");
-        let secrets = Secrets::generate();
+        let secrets = dm_device::service_secrets();
         let mut account = Account {
             url: format!("http://{addr}"),
             addr,
@@ -954,17 +954,25 @@ async fn while_the_service_withholds_the_new_list_the_channel_waits_and_sends_no
     assert!(refused.contains("devices changed, and this Claktory is catching up"), "{refused}");
     assert_eq!(people.mailbox(&channel), sent);
 
-    // A list rolled back changes nothing; it still waits.
+    // A list rolled back changes nothing; it still waits. The home holds
+    // the phone's word too: by the list it has, the channel holds a device
+    // that's off it (E11-8), so nothing goes out there either.
     people.serve_list(&first, 1);
-    people.phone.share_pins(&channel, 2).await;
+    let (bytes, id) = people.phone.seal_pins(&channel, 2);
+    let held = people.phone.send_once(&channel, bytes, &id).await;
+    assert_eq!(v1::DmSendResult::try_from(held.result), Ok(v1::DmSendResult::RemovedDeviceInGroup), "{held:?}");
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     assert_eq!(factoryd::user_apps::dms::list_version(&factory, &matt), before.1, "an older list isn't taken");
     assert_eq!(people.channel_position(), position);
     assert!(factoryd::user_apps::dms::channel_waits(&factory));
 
-    // The newest list served: it reads on from the Add, and what the tablet
-    // says reaches it.
+    // The newest list served, and the devices told of it (the phone's next
+    // list): it reads on from the Add, and what the tablet says reaches it.
+    // Until then the home took nothing in the channel (E11-8: by the list
+    // it had, the tablet was off it), so nothing woke the leaf.
     people.serve_list(&newest.0, newest.1);
+    people.phone.publish_keys().await;
+    let newest = (people.phone.signed_list.clone(), people.phone.version);
     let mut cy = dm_device::Device::new(&people.dir, "cy", 11);
     cy.publish_keys().await;
     befriend(&people.phone, &cy, "Cy", 2).await;

@@ -40,8 +40,12 @@ import java.util.UUID
  * - "openSettings": the app's notification settings in Android's Settings.
  *
  * Firebase isn't started on its own (firebase_messaging_auto_init_enabled
- * is false in the manifest): this phone asks it for a token only once the
- * person allows notifications, so nothing reaches Google before then.
+ * is false in the manifest): this phone asks it for a token only while
+ * notifications are allowed. From Android 13 that's once the person allows
+ * them; before 13 they're allowed from install, so the token is asked for
+ * at the app's first start. Once asked, Firebase keeps auto-init on, and
+ * neither turning notifications off nor forgetting a Claktory deletes
+ * its token.
  */
 class PushChannel(messenger: BinaryMessenger, private val activity: Activity) :
     MethodChannel.MethodCallHandler, HostLifecycle, AutoCloseable {

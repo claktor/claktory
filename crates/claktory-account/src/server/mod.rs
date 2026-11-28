@@ -2,12 +2,13 @@
 
 mod api;
 mod apps;
+mod authorize;
 pub mod db;
 mod devices;
 pub mod geo;
 pub mod mail;
 mod pipes;
-mod reports;
+pub mod reports;
 pub mod relay_token;
 pub mod review;
 pub mod secrets;
@@ -70,9 +71,25 @@ fn signed(method: &Method, path: &str) -> bool {
                 | "/v1/devices/vouch"
                 | "/v1/pipe-identity"
                 | "/v1/claktories/sign-out"
+                | "/v1/claktories/authorize/poll"
         ) | (&Method::PUT, "/v1/endpoints" | "/v1/account/recovery-key")
-            | (&Method::GET, "/v1/devices/me" | "/v1/claktories")
+            | (
+                &Method::GET,
+                "/v1/devices/me"
+                    | "/v1/claktories"
+                    | "/v1/devices/authorizations"
+                    | "/v1/claktories/authorizations"
+                    | "/v1/devices/moves"
+                    | "/v1/claktories/moves"
+            )
     ) || path.starts_with("/v1/apps/")
+        || (method == Method::POST && path.starts_with("/v1/devices/authorizations/"))
+        || (method == Method::POST && take_path(path).is_some())
+}
+
+/// The move id of `POST /v1/claktories/moves/<id>/take`.
+fn take_path(path: &str) -> Option<&str> {
+    path.strip_prefix("/v1/claktories/moves/")?.strip_suffix("/take").filter(|id| !id.is_empty() && !id.contains('/'))
 }
 
 pub struct Config {
@@ -95,6 +112,9 @@ pub struct Config {
     pub admins: Vec<String>,
     /// Finds a Claktory's place from its IP.
     pub locator: Option<Arc<dyn geo::Locator>>,
+    /// Finds who owns the network an IP is in (an ASN file), for the card
+    /// a computer asking to join raises.
+    pub networks: Option<Arc<dyn geo::Locator>>,
     /// Relays Claktories should use, in check-in answers.
     pub relays: Vec<String>,
     /// An offline root's word for the service key, served at well-known
@@ -132,6 +152,7 @@ impl Default for Config {
             email_daily_cap: 90,
             admins: Vec::new(),
             locator: None,
+            networks: None,
             relays: Vec::new(),
             service_key_statement: None,
             user_apps: None,
@@ -316,6 +337,13 @@ impl Service {
         self.config.locator.as_ref().filter(|_| geo::public(ip))?.locate(ip)
     }
 
+    /// Who owns the network a request came from, when the service has an
+    /// ASN file and the IP is a public one.
+    fn network(&self, ip: &str) -> Option<String> {
+        let ip: IpAddr = ip.parse().ok()?;
+        self.config.networks.as_ref().filter(|_| geo::public(ip))?.network(ip)
+    }
+
     /// The public stats, counted at most once a minute.
     fn public_stats(&self) -> Result<protocol::PublicStats, ApiError> {
         let now = self.now();
@@ -416,6 +444,16 @@ impl Service {
             (&Method::POST, "/v1/move") => api::move_claktory(self, call).await,
             (&Method::POST, "/v1/claktories/sign-out") => api::sign_out(self, call).await,
             (&Method::PUT, "/v1/account/recovery-key") => api::set_recovery_key(self, call),
+            (&Method::POST, "/v1/claktories/authorize/start") => authorize::start(self, call).await,
+            (&Method::POST, "/v1/claktories/authorize/poll") => authorize::poll(self, call),
+            (&Method::GET, "/v1/claktories/authorizations") => authorize::waiting(self, call),
+            (&Method::GET, "/v1/devices/authorizations") => authorize::list(self, call),
+            (&Method::GET, "/v1/devices/moves") => authorize::moves(self, call),
+            (&Method::GET, "/v1/claktories/moves") => authorize::approved_moves(self, call),
+            (&Method::POST, path) if take_path(path).is_some() => authorize::take(self, call, take_path(path).unwrap_or_default()),
+            (&Method::POST, path) if path.starts_with("/v1/devices/authorizations/") => {
+                authorize::decide(self, call, &path["/v1/devices/authorizations/".len()..]).await
+            }
             (&Method::POST, "/v1/devices/sign-in/start") => devices::sign_in_start(self, call).await,
             (&Method::POST, "/v1/devices/sign-in/verify") => devices::sign_in_verify(self, call),
             (&Method::GET, "/v1/devices/me") => devices::me(self, call),
@@ -588,6 +626,7 @@ impl ApiError {
                 retry_after: None,
                 server_time: None,
                 recovery_key: None,
+                pending: None,
             },
         }
     }

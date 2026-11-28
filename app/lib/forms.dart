@@ -830,6 +830,7 @@ class _FolderEdit {
 class _ProjectSettingsFormState extends State<ProjectSettingsForm>
     with _Submitting {
   late final _name = TextEditingController(text: widget.project.name);
+  late final _brief = TextEditingController(text: widget.project.brief);
   late final _folders = [
     for (final folder in widget.project.folders) _FolderEdit(folder),
   ];
@@ -846,6 +847,7 @@ class _ProjectSettingsFormState extends State<ProjectSettingsForm>
   @override
   void dispose() {
     _name.dispose();
+    _brief.dispose();
     for (final folder in _folders) {
       folder.dispose();
     }
@@ -856,6 +858,7 @@ class _ProjectSettingsFormState extends State<ProjectSettingsForm>
 
   bool get _changed =>
       _name.text.trim() != widget.project.name ||
+      _brief.text.trim() != widget.project.brief ||
       _folders.any((folder) => folder.changed);
 
   bool get _valid =>
@@ -866,6 +869,7 @@ class _ProjectSettingsFormState extends State<ProjectSettingsForm>
     final backend = AppScope.of(context);
     final project = widget.project;
     final name = _name.text.trim();
+    final brief = _brief.text.trim();
     // Folders moved into a place macOS protects get its sheet first.
     final moved = {
       for (final edit in _folders)
@@ -873,10 +877,11 @@ class _ProjectSettingsFormState extends State<ProjectSettingsForm>
           edit.path.text.trim(): edit.name.text.trim(),
     };
     Future<void> save() async {
-      if (name != project.name) {
-        await backend.updateProject(
-          UpdateProject(projectId: project.id, name: name),
-        );
+      if (name != project.name || brief != project.brief) {
+        final update = UpdateProject(projectId: project.id);
+        if (name != project.name) update.name = name;
+        if (brief != project.brief) update.brief = brief;
+        await backend.updateProject(update);
       }
       for (final edit in _folders) {
         if (edit.removed) {
@@ -1023,6 +1028,7 @@ class _ProjectSettingsFormState extends State<ProjectSettingsForm>
     return ListenableBuilder(
       listenable: Listenable.merge([
         _name,
+        _brief,
         for (final folder in _folders) ...[folder.name, folder.path],
       ]),
       builder: (context, _) {
@@ -1054,6 +1060,20 @@ class _ProjectSettingsFormState extends State<ProjectSettingsForm>
                 autofocus: !isPhoneLayout(context),
                 kind: InputKind.text,
                 onSubmitted: (_) => _submit(),
+              ),
+            ),
+            Field(
+              label: 'Brief',
+              note:
+                  'Optional. Every agent in this project has it in its '
+                  'instructions.',
+              child: TextField(
+                controller: _brief,
+                placeholder: 'The outcome, the team and the rules',
+                semanticsLabel: 'Brief',
+                kind: InputKind.multiline,
+                minLines: 3,
+                maxLines: 12,
               ),
             ),
             Field(

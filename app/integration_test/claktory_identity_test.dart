@@ -33,7 +33,6 @@ void main() {
               explorer: ExplorerStore(),
               extensionView: ExtensionViewStore(),
               localBackend: false,
-              localPairing: () async => null,
             )
             ..deviceKey = ((_) => key)
             ..connectTo(target);

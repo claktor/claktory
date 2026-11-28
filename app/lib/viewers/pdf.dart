@@ -27,6 +27,7 @@ import 'package:url_launcher/url_launcher.dart' show launchUrl;
 
 import '../backend.dart';
 import '../controls.dart';
+import '../diagnostics_record.dart' show ViewedFrom;
 import '../find.dart';
 import '../identity.dart';
 import '../ipad/ink_bridge.dart';
@@ -59,9 +60,12 @@ Future<bool> Function(Uri url) openPdfLink = launchUrl;
 /// A PDF in a pane on a Mac, or a page on an iPhone: the pages, "Page 3
 /// of 12" in the header, and Search.
 class PdfViewer extends StatefulWidget {
-  const PdfViewer({super.key, required this.path});
+  const PdfViewer({super.key, required this.path, this.sealed});
 
   final String path;
+
+  /// The seal whose kept version shows, rather than the file.
+  final FileSeal? sealed;
 
   @override
   State<PdfViewer> createState() => _PdfViewerState();
@@ -70,6 +74,12 @@ class PdfViewer extends StatefulWidget {
 class _PdfViewerState extends State<PdfViewer> with FileLoading<PdfViewer> {
   @override
   String get path => widget.path;
+
+  @override
+  FileSeal? get sealed => widget.sealed;
+
+  @override
+  Widget sealedViewer(FileSeal sealed) => PdfViewer(path: path, sealed: sealed);
 
   @override
   String get loadingLabel => 'Loading PDF…';
@@ -157,6 +167,9 @@ class _PdfViewerState extends State<PdfViewer> with FileLoading<PdfViewer> {
           if (params == null || !mounted || generation != _generation) return;
           _show(params);
           _hold(_fetched);
+          if (file case final shown?) {
+            noteShown(shown, from: _from, bytes: _came);
+          }
           return;
         } on _Changed {
           if (attempt >= 2) {
@@ -212,13 +225,20 @@ class _PdfViewerState extends State<PdfViewer> with FileLoading<PdfViewer> {
 
     // From a Claktory on another machine, the copies this device keeps;
     // else the render cache.
-    final cache = FileCache.of(backend);
+    final cache = keptCopies(backend);
     _fetched = null;
+    _from = ViewedFrom.kept;
+    _came = 0;
+    askingFor(backend);
     // What it is first (its size and version), so one already in the
     // render cache isn't brought over the link again.
     final FileContent first;
     try {
-      first = await backend.readFile(path, maxBytes: 1);
+      first = await backend.readFile(
+        path,
+        maxBytes: 1,
+        sealedSha256: sealedSha256,
+      );
     } on RequestFailure {
       // Offline: the copy kept here, saying it may be out of date.
       final kept = await cache?.find(path, originalVariant);
@@ -229,6 +249,7 @@ class _PdfViewerState extends State<PdfViewer> with FileLoading<PdfViewer> {
       _fetched = (cache: cache, file: kept.file);
       setState(() {
         file = kept.content.deepCopy();
+        if (kept.content.hasSeals()) seals = kept.content.seals;
         showingUnchecked = true;
       });
       return _paramsFor(claktory, kept.content, kept.file.path);
@@ -238,6 +259,7 @@ class _PdfViewerState extends State<PdfViewer> with FileLoading<PdfViewer> {
     // bytes.
     setState(() {
       file = first.deepCopy()..data = const [];
+      seals = first.hasSeals() ? first.seals : null;
       showingUnchecked = false;
     });
     if (first.error.isNotEmpty) return null;
@@ -269,7 +291,9 @@ class _PdfViewerState extends State<PdfViewer> with FileLoading<PdfViewer> {
     if (stale()) return null;
     // A big one on a phone, or on a slow link: its pages as images at
     // once, while the PDF comes behind them.
+    // A sealed version comes only whole: the page images are the file's.
     if (cached == null &&
+        sealed == null &&
         size > pdfPagesFrom &&
         (touchDevice || slowFor(backend, size))) {
       final pages = _PagePreviews(
@@ -314,6 +338,7 @@ class _PdfViewerState extends State<PdfViewer> with FileLoading<PdfViewer> {
           setState(() => _progress = (received: offset, size: size));
           final chunk = await backend.readFile(
             path,
+            sealedSha256: sealedSha256,
             maxBytes: pdfChunk,
             offset: offset,
             expectedSha256: sha,
@@ -337,6 +362,8 @@ class _PdfViewerState extends State<PdfViewer> with FileLoading<PdfViewer> {
             sink!.add(chunk.data);
           }
           offset += chunk.data.length;
+          _from = ViewedFrom.read;
+          _came = offset;
         }
         if (writer != null) {
           cached = await writer.finish();
@@ -364,6 +391,11 @@ class _PdfViewerState extends State<PdfViewer> with FileLoading<PdfViewer> {
     }
     return _paramsFor(claktory, first, cached);
   }
+
+  /// Where what [_fetch] last showed came from, and how many of its
+  /// bytes came over the connection (diagnostics).
+  ViewedFrom _from = ViewedFrom.read;
+  var _came = 0;
 
   /// The copy this device keeps that [_fetch] found or made: held
   /// while the surface shows it.
@@ -598,7 +630,9 @@ class _PdfViewerState extends State<PdfViewer> with FileLoading<PdfViewer> {
       actions: [
         if (previewing) PaneAction('Search', searchEarly),
         PaneAction('Reload', reload),
+        ...sealActions(),
       ],
+      notice: sealNotice(),
       body: ColoredBox(color: palette.canvas, child: body),
     );
   }

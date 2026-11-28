@@ -1,5 +1,5 @@
 //! This computer's own app signs in to the account as a device through this
-//! Claktory's sign-in (#529): VouchDevice. The Claktory, signed in, asks its
+//! Claktory's sign-in: VouchDevice. The Claktory, signed in, asks its
 //! account service for a one-time code for the app's account key
 //! (`POST /v1/devices/vouch`, signed as this Claktory), and hands it to the
 //! app, which signs in with it at the service itself (sign-in/verify, signed

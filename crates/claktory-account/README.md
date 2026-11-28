@@ -34,6 +34,9 @@ account.db` prints the usage counts (accounts and Claktories in touch per
 day, week and month; tokens all time, per day and per model; agent hours by
 hour of the day; countries, versions, platforms; sign-ins per day), and the
 same report is at `/account/admin` for the `--admin-email` addresses.
+`claktory-account ai-reports --db account.db` prints the replies people
+reported with Report this reply that are still kept (30 days), oldest
+first, 50 at a time (`--after ID` for the next); it only reads.
 `--geoip FILE` takes a GeoIP city file (`.mmdb`: DB-IP's free "IP to City
 Lite", <https://db-ip.com/db/download/ip-to-city-lite>, CC BY 4.0, or
 GeoLite2 City) to know roughly where Claktories are.

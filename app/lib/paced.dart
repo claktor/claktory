@@ -70,6 +70,22 @@ class Pace {
   /// The size of the next piece.
   int get next => _next;
 
+  /// How long a piece takes on the link while the person is doing
+  /// something else on the same connection: what they asked for comes
+  /// after at most this much of a file.
+  static const quickTarget = Duration(milliseconds: 400);
+
+  /// The size of the next piece while the person is doing something else
+  /// ([pacedRead]'s hurry): about [quickTarget] at the link's speed, never
+  /// more than [next].
+  int get quick {
+    final bandwidth = _bandwidth;
+    final quick = bandwidth == null
+        ? _first
+        : (bandwidth * quickTarget.inMicroseconds / 1e6).round();
+    return math.min(math.max(quick, least), _next);
+  }
+
   /// About how long [bytes] would take to come over this link, in pieces:
   /// once both the round trip and the link's speed are known (a tiny read
   /// and a piece, or two pieces of different sizes), or once a piece took
@@ -215,7 +231,8 @@ typedef ReadFirst = bool Function(FileContent first);
 /// first name the version the first found, so a file that changes while
 /// it comes is read again from the start. Lost connection: once the read
 /// has begun, it waits up to [reconnectWithin] for [connected] and carries
-/// on from where it got, else fails with [lostWhileReading].
+/// on from where it got, else fails with [lostWhileReading]. While
+/// [hurry] says so, the pieces after the first are [Pace.quick] ones.
 Future<FileContent> pacedRead({
   required ReadRange range,
   required ValueListenable<bool> connected,
@@ -226,6 +243,7 @@ Future<FileContent> pacedRead({
   ReadProgress? onProgress,
   ReadOnward? carryOn,
   ReadFirst? onFirst,
+  bool Function()? hurry,
   Duration reconnectWithin = const Duration(seconds: 60),
 }) async {
   for (var attempt = 0; ; attempt++) {
@@ -239,6 +257,7 @@ Future<FileContent> pacedRead({
       onProgress: onProgress,
       carryOn: carryOn,
       onFirst: onFirst,
+      hurry: hurry,
       reconnectWithin: reconnectWithin,
     );
     // Changed under it, and the caller named no version: again, as it is
@@ -261,6 +280,7 @@ Future<FileContent?> _readOnce({
   required ReadProgress? onProgress,
   required ReadOnward? carryOn,
   required ReadFirst? onFirst,
+  required bool Function()? hurry,
   required Duration reconnectWithin,
 }) async {
   Future<FileContent> timed(int at, int asked, String expected) async {
@@ -297,7 +317,8 @@ Future<FileContent?> _readOnce({
   DateTime? lostSince;
   while (data.length < total) {
     final at = offset + data.length;
-    final asked = math.min(pace.next, total - data.length);
+    final wanted = (hurry?.call() ?? false) ? pace.quick : pace.next;
+    final asked = math.min(wanted, total - data.length);
     final FileContent piece;
     try {
       piece = await timed(at, asked, version);

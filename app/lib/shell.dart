@@ -8,6 +8,7 @@ import 'package:flutter/widgets.dart';
 
 import 'agent_view.dart';
 import 'android/pair_step.dart';
+import 'app_dock.dart' show AppHandOver;
 import 'backend.dart' show Backend, fireAndLog;
 import 'characters/clock.dart';
 import 'changelog.dart';
@@ -31,10 +32,12 @@ import 'marketplace.dart';
 import 'account.dart';
 import 'model_step.dart';
 import 'kept.dart';
+import 'mobile/device.dart' show windowControls;
 import 'mobile/back.dart' show BackHandle, CallbackBackToken, PhoneBack;
 import 'mobile/presentation.dart' show SheetOverlay;
 import 'move.dart' show BackendMove, MoveGate;
 import 'name_step.dart';
+import 'older_app.dart' show OlderAppPage, olderAppOf;
 import 'phone.dart';
 import 'pipes.dart';
 import 'controls.dart';
@@ -459,117 +462,123 @@ class _ShellState extends State<Shell> {
                 return _History(
                   back: back,
                   forward: forward,
-                  child: Stack(
-                    children: [
-                      Positioned.fill(child: row),
-                      Positioned(
-                        left:
-                            rail + sidebar - ResizeHandle.widthOf(context) / 2,
-                        top: 0,
-                        bottom: 0,
-                        child: ResizeHandle(
-                          key: const ValueKey('sidebar-edge'),
-                          onDragStart: () {
-                            _stopSettling(_sidebarDrag);
-                            _dragFrom = sidebar;
-                          },
-                          onDrag: (dx) => _sidebarDrag.value = (_dragFrom + dx)
-                              .clamp(sidebarMinWidth, sidebarMaxWidth)
-                              .roundToDouble(),
-                          onDragEnd: () {
-                            final width = _sidebarDrag.value;
-                            if (width == null) return;
-                            _keep(
-                              _sidebarDrag,
-                              UpdateSettings(sidebarWidth: width),
-                              (settings) => settings.sidebarWidth,
-                            );
-                          },
-                          onReset: () {
-                            _sidebarDrag.value = sidebarWidth;
-                            _keep(
-                              _sidebarDrag,
-                              UpdateSettings(sidebarWidth: 0),
-                              (settings) => settings.sidebarWidth,
-                            );
-                          },
-                        ),
-                      ),
-                      if (panelShown)
+                  child: _ClearOfSystemBars(
+                    child: Stack(
+                      children: [
+                        Positioned.fill(child: row),
                         Positioned(
-                          right: panelAt - ResizeHandle.widthOf(context) / 2,
+                          left:
+                              rail +
+                              sidebar -
+                              ResizeHandle.widthOf(context) / 2,
                           top: 0,
                           bottom: 0,
                           child: ResizeHandle(
-                            key: const ValueKey('panel-edge'),
+                            key: const ValueKey('sidebar-edge'),
                             onDragStart: () {
-                              _stopSettling(_panelDrag);
-                              _dragFrom = panelAt;
+                              _stopSettling(_sidebarDrag);
+                              _dragFrom = sidebar;
                             },
-                            onDrag: (dx) => _panelDrag.value = (_dragFrom - dx)
-                                .clamp(
-                                  panelMinWidth,
-                                  math.max(panelMinWidth, panelRoom),
-                                )
-                                .roundToDouble(),
+                            onDrag: (dx) =>
+                                _sidebarDrag.value = (_dragFrom + dx)
+                                    .clamp(sidebarMinWidth, sidebarMaxWidth)
+                                    .roundToDouble(),
                             onDragEnd: () {
-                              final width = _panelDrag.value;
+                              final width = _sidebarDrag.value;
                               if (width == null) return;
                               _keep(
-                                _panelDrag,
-                                UpdateSettings(panelWidth: width),
-                                (settings) => settings.panelWidth,
+                                _sidebarDrag,
+                                UpdateSettings(sidebarWidth: width),
+                                (settings) => settings.sidebarWidth,
                               );
                             },
                             onReset: () {
-                              _panelDrag.value = panelWidth;
+                              _sidebarDrag.value = sidebarWidth;
                               _keep(
-                                _panelDrag,
-                                UpdateSettings(panelWidth: 0),
-                                (settings) => settings.panelWidth,
+                                _sidebarDrag,
+                                UpdateSettings(sidebarWidth: 0),
+                                (settings) => settings.sidebarWidth,
                               );
                             },
                           ),
                         ),
-                      // No room beside the conversation: over it, from the
-                      // right edge, as an iPad's
-                      // workbench shows it.
-                      if (panel != null && agent != null && !panelShown)
-                        Positioned(
-                          key: const ValueKey('panel-over'),
-                          right: 0,
-                          top: 0,
-                          bottom: keyboard,
-                          child: part(
-                            behind(
-                              DecoratedBox(
-                                decoration: const BoxDecoration(
-                                  boxShadow: floatingShadow,
-                                ),
-                                child: EscClosesPanel(
-                                  agent: agent,
-                                  child: ExtensionPanel(
-                                    key: ValueKey('${panel.id}/${agent.id}'),
-                                    extension: panel,
-                                    agent: agent,
-                                    // At most 85% of the window, as on an
-                                    // iPad.
-                                    width: math.min(
-                                      keptWidth(
-                                        settings.panelWidth,
-                                        panelWidth,
+                        if (panelShown)
+                          Positioned(
+                            right: panelAt - ResizeHandle.widthOf(context) / 2,
+                            top: 0,
+                            bottom: 0,
+                            child: ResizeHandle(
+                              key: const ValueKey('panel-edge'),
+                              onDragStart: () {
+                                _stopSettling(_panelDrag);
+                                _dragFrom = panelAt;
+                              },
+                              onDrag: (dx) =>
+                                  _panelDrag.value = (_dragFrom - dx)
+                                      .clamp(
                                         panelMinWidth,
-                                        panelMaxWidth,
+                                        math.max(panelMinWidth, panelRoom),
+                                      )
+                                      .roundToDouble(),
+                              onDragEnd: () {
+                                final width = _panelDrag.value;
+                                if (width == null) return;
+                                _keep(
+                                  _panelDrag,
+                                  UpdateSettings(panelWidth: width),
+                                  (settings) => settings.panelWidth,
+                                );
+                              },
+                              onReset: () {
+                                _panelDrag.value = panelWidth;
+                                _keep(
+                                  _panelDrag,
+                                  UpdateSettings(panelWidth: 0),
+                                  (settings) => settings.panelWidth,
+                                );
+                              },
+                            ),
+                          ),
+                        // No room beside the conversation: over it, from the
+                        // right edge, as an iPad's
+                        // workbench shows it.
+                        if (panel != null && agent != null && !panelShown)
+                          Positioned(
+                            key: const ValueKey('panel-over'),
+                            right: 0,
+                            top: 0,
+                            bottom: keyboard,
+                            child: part(
+                              behind(
+                                DecoratedBox(
+                                  decoration: const BoxDecoration(
+                                    boxShadow: floatingShadow,
+                                  ),
+                                  child: EscClosesPanel(
+                                    agent: agent,
+                                    child: ExtensionPanel(
+                                      key: ValueKey('${panel.id}/${agent.id}'),
+                                      extension: panel,
+                                      agent: agent,
+                                      // At most 85% of the window, as on an
+                                      // iPad.
+                                      width: math.min(
+                                        keptWidth(
+                                          settings.panelWidth,
+                                          panelWidth,
+                                          panelMinWidth,
+                                          panelMaxWidth,
+                                        ),
+                                        constraints.maxWidth * 0.85,
                                       ),
-                                      constraints.maxWidth * 0.85,
                                     ),
                                   ),
                                 ),
                               ),
                             ),
                           ),
-                        ),
-                    ],
+                      ],
+                    ),
                   ),
                 );
               },
@@ -620,7 +629,10 @@ class _WindowOverlayState extends State<_WindowOverlay> {
     builder: (context) => SheetOverlay(
       overlay: Overlay.of(context),
       // A Mac's places macOS protects, never checked: the sheet once.
-      child: ProtectedPlacesAtLaunch(child: Builder(builder: widget.builder)),
+      child: ProtectedPlacesAtLaunch(
+        // An app's view open as the phone's layout went opens again here.
+        child: AppHandOver(child: Builder(builder: widget.builder)),
+      ),
     ),
   );
 
@@ -788,6 +800,7 @@ class NoAgentView extends StatelessWidget {
         backend.workspace,
         backend.connected,
         backend.refused,
+        backend.olderApp,
         // The drawer's "Can't connect" shows here too.
         Connection.of(backend),
       ]),
@@ -806,6 +819,12 @@ class NoAgentView extends StatelessWidget {
             return ClaktorySignedOutPage(backend: backend);
           }
           return NoLongerAllowedPage(backend: backend);
+        }
+        // An update that failed went back to a version this app can't
+        // reach: its own app is the way back.
+        if (olderAppOf(backend) case final offer?
+            when !backend.connected.value) {
+          return OlderAppPage(offer: offer);
         }
         // Until this Claktory's workspace is here, nothing is known about
         // it: an empty one isn't "no agents yet".
@@ -1042,6 +1061,43 @@ class _History extends StatelessWidget {
         if (event.buttons & kBackMouseButton != 0) back();
         if (event.buttons & kForwardMouseButton != 0) forward();
       },
+      child: child,
+    ),
+  );
+}
+
+/// The wide layout clear of the system's bars at the top and the sides,
+/// as an Android tablet draws its window under them: the status bar's
+/// clock and battery would sit over the header's controls. The window
+/// still reaches the bottom edge, under the navigation bar, where what's
+/// inside keeps clear of it by the bottom padding it's left with. Window
+/// controls the native side adds to the top padding are left to what
+/// goes beside them, as an iPad's [SafeWindow] does.
+class _ClearOfSystemBars extends StatelessWidget {
+  const _ClearOfSystemBars({required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => ValueListenableBuilder(
+    valueListenable: windowControls,
+    builder: (context, controls, child) {
+      final padding = MediaQuery.paddingOf(context);
+      return Padding(
+        padding: EdgeInsets.fromLTRB(
+          padding.left,
+          math.max(0.0, padding.top - controls.top),
+          padding.right,
+          0,
+        ),
+        child: child,
+      );
+    },
+    child: MediaQuery.removePadding(
+      context: context,
+      removeLeft: true,
+      removeTop: true,
+      removeRight: true,
       child: child,
     ),
   );

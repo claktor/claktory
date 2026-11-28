@@ -1,5 +1,7 @@
 import 'package:factory_app/backend.dart';
 import 'package:factory_app/controls.dart';
+import 'package:factory_app/highlights.dart' show HighlightStore;
+import 'package:factory_app/open_place.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/tasks.dart';
 import 'package:factory_app/transcript.dart';
@@ -310,6 +312,46 @@ void main() {
       await tester.tap(inPanel(find.text('Stop')));
       await tester.pump();
       expect(inPanel(find.text('task-3 is not running')), findsOneWidget);
+    });
+
+    testWidgets('opened at a task, it shows open, scrolled to, glowing', (
+      tester,
+    ) async {
+      final harness = Harness(tasksWorkspace()..highlights = true);
+      harness.backend.extensionView.apply(
+        tasksView([
+          for (var n = 30; n >= 1; n--)
+            _task(
+              id: 'task-$n',
+              command: 'job $n',
+              startedAgo: Duration(hours: n),
+              ran: const Duration(seconds: 5),
+              status: 'exit 0',
+              tail: 'output $n',
+            ),
+        ]),
+      );
+      await harness.show(tester);
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(inPanel(find.text('output 1')), findsNothing);
+
+      openTarget(
+        tester.element(find.byType(TasksView)),
+        const OpenTask('a1', 'task-1'),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+      final output = inPanel(find.text('output 1'));
+      expect(output, findsOneWidget);
+      final panel = tester.getRect(find.byType(TasksView));
+      expect(tester.getRect(output).bottom, lessThanOrEqualTo(panel.bottom));
+      expect(tester.getRect(output).top, greaterThanOrEqualTo(panel.top));
+      expect(
+        harness.backend.highlights.glows.map((glow) => glow.key),
+        contains('task:a1/task-1'),
+      );
+      expect(inPanel(find.text('output 2')), findsNothing);
+      await tester.pump(HighlightStore.duration);
     });
 
     testWidgets('says when there are none', (tester) async {

@@ -1,6 +1,5 @@
-// Item 12, Polnareff's half (Lucy's permissions.md P2): a place macOS
-// refused Claktory Agents is a Needs you item in Claktory's words, with
-// Open System Settings on the Mac that runs the Claktory and OK
+// A place macOS refused Claktory Agents is a Needs you item in Claktory's
+// words, with Open System Settings on the Mac that runs the Claktory and OK
 // everywhere; Settings → This Mac's Permissions has a row for each place
 // checked ("Documents · On"); and back at the front, the refused places
 // are read again.
@@ -84,7 +83,7 @@ void main() {
       find.textContaining('On Studio, open System Settings'),
       findsNothing,
     );
-    // OK quiet first, Open System Settings filled at the end (Lucy 51316).
+    // OK quiet first, Open System Settings filled at the end.
     expect(
       tester.getTopLeft(_button('OK')).dx,
       lessThan(tester.getTopLeft(_button('Open System Settings')).dx),

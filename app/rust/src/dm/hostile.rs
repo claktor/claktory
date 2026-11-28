@@ -264,7 +264,7 @@ fn test_1_a_substituted_key_package_or_identity_is_refused_and_never_silent() {
     w.phone.key_changed("ana".into(), made.identity_public).unwrap();
     let pin = w.phone.pin("ana".into()).unwrap();
     assert!(pin.changed_unseen && !pin.can_send && !pin.verified);
-    assert!(w.phone.send(w.id.clone(), text("m1", "hi"), 2).is_err());
+    assert!(w.phone.send(w.id.clone(), text("m1", "hi"), 2, vec![]).is_err());
 }
 
 /// Test 2: The service adds a device or Claktory leaf: every client refuses it.
@@ -297,7 +297,7 @@ fn test_2_a_leaf_the_service_adds_is_refused_by_every_member() {
     assert_eq!((w.epoch(&w.phone), w.epoch(&w.ipad)), (1, 1));
     assert_eq!((members(&w.phone), members(&w.ipad)), (2, 2));
     // Nothing forked: they still talk, and no member line was kept.
-    let said = w.phone.send(w.id.clone(), text("m1", "still us"), 3).unwrap();
+    let said = w.phone.send(w.id.clone(), text("m1", "still us"), 3, vec![]).unwrap();
     assert_eq!(w.feed(&said, &[&w.ipad])[0].outcome, DmOutcome::Message);
     assert!(w.ipad.history(w.id.clone(), None, 100).unwrap().iter().all(|message| message.members.is_none()));
 
@@ -371,7 +371,7 @@ fn held_then_served(leaf_id: &str) {
     w.ipad.accept_list("matt".into(), served).unwrap();
     let pin = w.ipad.pin("matt".into()).unwrap();
     assert!(pin.changed_unseen && !pin.verified && !pin.can_send, "{leaf_id}: {pin:?}");
-    assert!(w.ipad.send(w.id.clone(), text("m1", "hi"), 2).is_err(), "sending waits until Ana has seen it");
+    assert!(w.ipad.send(w.id.clone(), text("m1", "hi"), 2, vec![]).is_err(), "sending waits until Ana has seen it");
     let taken = w.at(held, &forced, &[&w.ipad]);
     assert_eq!(taken[0].outcome, DmOutcome::Committed, "{leaf_id}: {taken:?}");
     let line = taken[0].message.as_ref().and_then(|message| message.members.as_ref()).expect("a member line");
@@ -384,7 +384,7 @@ fn held_then_served(leaf_id: &str) {
 #[test]
 fn test_3_a_replayed_message_or_commit_is_refused() {
     let w = world();
-    let said = w.phone.send(w.id.clone(), text("m1", "once"), 2).unwrap();
+    let said = w.phone.send(w.id.clone(), text("m1", "once"), 2, vec![]).unwrap();
     assert_eq!(w.feed(&said, &[&w.phone, &w.ipad]).iter().map(|done| done.outcome).collect::<Vec<_>>(), [DmOutcome::Message; 2]);
     // Again at a later seq: the generation was used.
     assert!(dropped(&w.feed(&said, &[&w.phone, &w.ipad])));
@@ -412,7 +412,7 @@ fn test_3_a_replayed_message_or_commit_is_refused() {
     assert!(w.ipad.history(other, None, 10).unwrap().is_empty());
 
     // Still in step: a new message reads.
-    let next = w.ipad.send(w.id.clone(), text("a1", "after"), 10).unwrap();
+    let next = w.ipad.send(w.id.clone(), text("a1", "after"), 10, vec![]).unwrap();
     assert_eq!(w.feed(&next, &[&w.phone])[0].outcome, DmOutcome::Message);
 }
 
@@ -424,12 +424,12 @@ fn test_3_a_replayed_message_or_commit_is_refused() {
 fn test_3_a_home_serving_again_what_was_read_is_refused() {
     const FIRST_HOME_SEQ: i64 = (1 << 32) + 1;
     let w = world();
-    let said = w.phone.send(w.id.clone(), text("m1", "before the home"), 2).unwrap();
+    let said = w.phone.send(w.id.clone(), text("m1", "before the home"), 2, vec![]).unwrap();
     assert_eq!(w.feed(&said, &[&w.ipad])[0].outcome, DmOutcome::Message);
     // The home's log starts past the service's seqs, with the same message.
     assert!(dropped(&w.at(FIRST_HOME_SEQ, &said, &[&w.ipad])));
     // The home's own next message, then that one again under a later seq.
-    let next = w.phone.send(w.id.clone(), text("m2", "from the home"), 3).unwrap();
+    let next = w.phone.send(w.id.clone(), text("m2", "from the home"), 3, vec![]).unwrap();
     assert_eq!(w.at(FIRST_HOME_SEQ + 1, &next, &[&w.ipad])[0].outcome, DmOutcome::Message);
     assert!(dropped(&w.at(FIRST_HOME_SEQ + 2, &next, &[&w.ipad])));
     // Served again at a seq the device already read: not even looked at.
@@ -444,7 +444,7 @@ fn test_4_a_format_1_body_is_never_shown() {
     let own = b"self-group".to_vec();
     let mine = DmGroupKind { kind: DmGroupType::SelfGroup, accounts: vec!["matt".into()], claktory_id: String::new() };
     w.phone.create_group(own.clone(), mine).unwrap();
-    let said = w.phone.send(w.id.clone(), text("m1", "in format 2"), 2).unwrap();
+    let said = w.phone.send(w.id.clone(), text("m1", "in format 2"), 2, vec![]).unwrap();
     let bytes = serde_json::from_str::<serde_json::Value>(&said).unwrap()["bytes"].as_str().unwrap().to_owned();
     // The same MLS bytes, and a plain body, each called format 1.
     let plain = URL_SAFE_NO_PAD.encode(br#"{"text":"hello in the clear"}"#);
@@ -467,7 +467,7 @@ fn test_4_a_format_1_body_is_never_shown() {
 fn test_5_a_removed_device_reads_nothing_new_and_cant_rejoin() {
     let w = world();
     let tablet = w.tablet();
-    let before = w.ipad.send(w.id.clone(), text("a1", "before"), 3).unwrap();
+    let before = w.ipad.send(w.id.clone(), text("a1", "before"), 3, vec![]).unwrap();
     assert!(w.feed(&before, &[&w.phone, &tablet]).iter().all(|done| done.outcome == DmOutcome::Message));
 
     // Lost: the phone lists Matt's devices without it and removes it.
@@ -488,7 +488,7 @@ fn test_5_a_removed_device_reads_nothing_new_and_cant_rejoin() {
     assert_eq!(w.phone.leaves(w.id.clone()).unwrap(), w.phone.members(w.id.clone()).unwrap(), "gone, checked or not");
 
     // What's said after: the tablet can't open it.
-    let after = w.ipad.send(w.id.clone(), text("a2", "after"), 4).unwrap();
+    let after = w.ipad.send(w.id.clone(), text("a2", "after"), 4, vec![]).unwrap();
     let processed = w.feed(&after, &[&w.phone, &tablet]);
     assert_eq!(processed[0].outcome, DmOutcome::Message);
     assert!(dropped(&processed[1..]));
@@ -535,7 +535,7 @@ fn test_7_a_stale_or_forked_device_list_is_refused() {
     let kept = w.ipad.device_list("matt".into()).unwrap().unwrap();
     assert_eq!((kept.version, kept.leaves.len()), (2, 2));
     // The tablet is still a member to Ana: nothing went stale.
-    let said = tablet.send(w.id.clone(), text("t1", "from the tablet"), 5).unwrap();
+    let said = tablet.send(w.id.clone(), text("t1", "from the tablet"), 5, vec![]).unwrap();
     assert_eq!(w.feed(&said, &[&w.ipad])[0].outcome, DmOutcome::Message);
 }
 
@@ -555,7 +555,7 @@ fn test_8_two_commits_at_once_converge() {
     let again = w.ipad.update_group(w.id.clone()).unwrap();
     assert!(w.commit(again, &[&w.phone, &w.ipad]).iter().all(|done| (done.outcome, done.epoch) == (DmOutcome::Committed, 3)));
     for (from, to, id) in [(&w.phone, &w.ipad, "m1"), (&w.ipad, &w.phone, "a1")] {
-        let said = from.send(w.id.clone(), text(id, id), 6).unwrap();
+        let said = from.send(w.id.clone(), text(id, id), 6, vec![]).unwrap();
         assert_eq!(w.feed(&said, &[from, to]).iter().map(|done| done.outcome).collect::<Vec<_>>(), [DmOutcome::Message; 2]);
     }
 }
@@ -692,7 +692,7 @@ fn test_19_after_a_rotation_the_old_key_signs_nothing() {
     let refused = w.phone.add_members(fresh, w.ipad.key_packages(1).unwrap()).unwrap_err();
     assert!(refused.to_string().contains("was replaced"), "{refused}");
     assert!(w.phone.add_members(w.id.clone(), w.ipad.key_packages(1).unwrap()).unwrap().is_none());
-    let said = w.ipad.send(w.id.clone(), text("a1", "under the old key"), 3).unwrap();
+    let said = w.ipad.send(w.id.clone(), text("a1", "under the old key"), 3, vec![]).unwrap();
     assert!(dropped(&w.feed(&said, &[&w.phone])));
     assert!(w.texts(&w.phone).is_empty());
 

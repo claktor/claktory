@@ -10,6 +10,7 @@ import '../controls.dart';
 import '../identity.dart';
 import '../mobile/metrics.dart';
 import '../move.dart' show MoveMeter;
+import 'calendar.dart';
 import 'charts.dart';
 import 'controller.dart';
 import 'menu.dart';
@@ -202,11 +203,17 @@ class _Renderer {
     );
   }
 
+  /// [id] drawn on a bar: a Button one line, as wide as its words.
+  Widget _barNode(BuildContext context, String id, String scope, int depth) {
+    _inBar = true;
+    return node(context, id, scope, depth);
+  }
+
   Widget node(BuildContext context, String id, String scope, int depth) {
-    final component = surface.components[id];
-    if (component == null || depth > _maxDepth) return const SizedBox.shrink();
     final bar = _inBar;
     _inBar = false;
+    final component = surface.components[id];
+    if (component == null || depth > _maxDepth) return const SizedBox.shrink();
     final built = _component(context, id, component, scope, depth, bar: bar);
     return _accessible(component, scope, built);
   }
@@ -289,7 +296,13 @@ class _Renderer {
             // phone's width breaks words mid-word.
             final grow = MediaQuery.textScalerOf(context).scale(14) / 14;
             final least = minRowChildWidth * grow;
-            final squeezed = anyWeight && weighted.length > 1 && each < least;
+            // A row of Stat cards' titles, or null for any other row.
+            final stats = _statTitles(c['children'], weighted.length, scope);
+            final squeezed =
+                stats == null &&
+                anyWeight &&
+                weighted.length > 1 &&
+                each < least;
             // Narrower than the app asks (a dashboard on a phone, as
             // Grafana's under 768; more at a larger text size), or
             // squeezed: every child full width, one under another, without
@@ -324,6 +337,28 @@ class _Renderer {
                   ],
                 ),
               );
+            }
+            // A row of Stat cards too narrow for each to be 160 wide with
+            // its title on 2 lines: fewer to a line, the lines balanced.
+            if (stats != null && constraints.hasBoundedWidth) {
+              final lines = _statLines(context, constraints.maxWidth, stats, [
+                for (final (_, weight) in weighted) weight ?? 0,
+              ]);
+              if (lines != null) {
+                return Column(
+                  spacing: Space.s,
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    for (final line in lines)
+                      _EvenRow(
+                        weights: [for (final _ in line) 1],
+                        spacing: Space.s,
+                        children: [for (final i in line) weighted[i].$1],
+                      ),
+                  ],
+                );
+              }
             }
             if (squeezed) {
               return Column(
@@ -697,6 +732,84 @@ class _Renderer {
             _ => null,
           },
         );
+      case 'Calendar':
+        final action = c['action'];
+        final event = action is Map<String, Object?> ? action['event'] : null;
+        final act = onAction;
+        final zone = c['macZone'];
+        final label = string(c['label'], scope);
+        final calendar = AppCalendar(
+          entries: calendarEntries(
+            AppTable.from(resolveValue(surface, c['data'], scope)),
+          ),
+          view: switch (c['view']) {
+            final String view => view,
+            _ => 'week',
+          },
+          anchor: switch (c['anchor']) {
+            final num n when n >= 0 && n <= 8.64e15 =>
+              DateTime.fromMillisecondsSinceEpoch(n.toInt()),
+            _ => null,
+          },
+          weekStart: switch (c['weekStart']) {
+            'monday' => DateTime.monday,
+            'sunday' => DateTime.sunday,
+            'saturday' => DateTime.saturday,
+            _ => null,
+          },
+          macZone: switch (zone) {
+            {'start': final int start, 'end': final int end}
+                when start.abs() <= 840 && end.abs() <= 840 =>
+              (
+                start: start,
+                end: end,
+                name: switch (zone['name']) {
+                  final String name when name.length <= 64 => name,
+                  _ => '',
+                },
+              ),
+            _ => null,
+          },
+          tools: [
+            if (c['tools'] case final List ids)
+              for (final id in ids.take(8))
+                if (id is String) _barNode(context, id, scope, depth + 1),
+          ],
+          emptyTitle: string(c['emptyTitle'], scope),
+          agendaEmptyTitle: string(c['agendaEmptyTitle'], scope),
+          emptyBody: string(c['emptyBody'], scope),
+          height: switch (c['height']) {
+            final num n when n >= 240 && n <= 2000 => n.toDouble(),
+            _ => null,
+          },
+          // Every move goes to the app with where to and how, after what
+          // the app's own context holds.
+          onMove: act != null && event is Map<String, Object?>
+              ? (anchor, view) => act(id, {
+                  ...event,
+                  'context': <String, Object?>{
+                    if (event['context'] case final Map context)
+                      for (final MapEntry(:key, :value) in context.entries)
+                        if (key is String) key: value,
+                    'anchor': anchor.millisecondsSinceEpoch,
+                    'view': view,
+                  },
+                }, scope)
+              : null,
+        );
+        if (label.isEmpty) return calendar;
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: MainAxisSize.min,
+          spacing: Space.xs,
+          children: [
+            Semantics(
+              header: true,
+              child: Text(label, style: panelTitle(context)),
+            ),
+            calendar,
+          ],
+        );
       case 'Table':
         final table = AppTable.from(resolveValue(surface, c['data'], scope));
         final columns = c['columns'];
@@ -768,6 +881,70 @@ class _Renderer {
     String scope,
     int depth,
   ) => [for (final (child, _) in _weighted(context, list, scope, depth)) child];
+
+  /// A Row's Stat cards (a Stat, or a Card around one) by their place in
+  /// [list], each with its title, when every child but a grid's gaps is
+  /// one and there are two or more; else null.
+  Map<int, String>? _statTitles(Object? list, int count, String scope) {
+    if (list is! List || list.length != count) return null;
+    final titles = <int, String>{};
+    for (final (i, id) in list.indexed) {
+      var one = id is String ? surface.components[id] : null;
+      if (_isGap(one)) continue;
+      if (one?['weight'] is! num) return null;
+      if (one?['component'] == 'Card') {
+        final inner = one!['child'];
+        one = inner is String ? surface.components[inner] : null;
+      }
+      if (one == null || one['component'] != 'Stat') return null;
+      titles[i] = string(one['label'], scope);
+    }
+    return titles.length < 2 ? null : titles;
+  }
+
+  /// A row of Stat cards' lines, each the children's places in it, when
+  /// they don't all fit side by side (each [minStatCardWidth] wide, its
+  /// title on 2 lines at most): as few lines as let them, balanced (4 as
+  /// 2 + 2, 5 as 3 + 2), the grid's gaps left out. Null when they fit.
+  List<List<int>>? _statLines(
+    BuildContext context,
+    double width,
+    Map<int, String> titles,
+    List<int> weights,
+  ) {
+    final grow = MediaQuery.textScalerOf(context).scale(14) / 14;
+    final least = minStatCardWidth * grow;
+    bool fits(int i, double w) =>
+        w >= least && statTitleFits(context, titles[i]!, w);
+    // Side by side, as the weights share the row.
+    final total = weights.fold(0, (sum, w) => sum + w);
+    final room = width - Space.s * (weights.length - 1);
+    if (total > 0 &&
+        titles.keys.every((i) => fits(i, room * weights[i] / total))) {
+      return null;
+    }
+    final tiles = titles.keys.toList();
+    for (var count = 2; count <= tiles.length; count++) {
+      final lines = <List<int>>[];
+      var at = 0;
+      for (var line = 0; line < count; line++) {
+        final size =
+            tiles.length ~/ count + (line < tiles.length % count ? 1 : 0);
+        lines.add(tiles.sublist(at, at + size));
+        at += size;
+      }
+      if (count == tiles.length ||
+          lines.every((line) {
+            final w = (width - Space.s * (line.length - 1)) / line.length;
+            return line.every((i) => fits(i, w));
+          })) {
+        return lines;
+      }
+    }
+    return [
+      for (final i in tiles) [i],
+    ];
+  }
 
   /// Whether Button [id] shows words: a Text, or one in its List.
   bool _hasWords(String id) {
@@ -1318,6 +1495,10 @@ class _MenuRowState extends State<_MenuRow> {
     );
   }
 }
+
+/// The least a Stat card gets side by side with others, at the standard
+/// text size (more as the text grows).
+const minStatCardWidth = 160.0;
 
 /// The least each of a weighted Row's children gets side by side, at the
 /// standard text size (more as the text grows); narrower, they go one

@@ -87,7 +87,7 @@ async fn a_claktory_has_one_name_and_color_for_every_device() {
     assert_eq!(identity(&view.workspace), ("Lee's Mac".to_owned(), "amber".to_owned()));
 }
 
-/// Row 1730 (Fugo): a name that could reorder or hide what's around it where
+/// A name that could reorder or hide what's around it where
 /// it shows (bidi controls, zero widths, the BOM) is refused from a device,
 /// and taken out of one written in config.json, which still reads; an
 /// emoji's own variation selector stays.

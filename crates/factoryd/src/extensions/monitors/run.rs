@@ -240,7 +240,7 @@ async fn tick_once(factory: &Arc<Factory>) -> rusqlite::Result<()> {
 /// When a monitor due further ahead than it can be should be due instead:
 /// the wall clock was set back (NTP stepping back a fast clock, a clock
 /// put right, a VM restored), and a time counted from the old clock would
-/// keep it silent for as long as the step (Abbacchio's row 1413). Never
+/// keep it silent for as long as the step. Never
 /// later than one period from now; cron's next time from now. An `at`, and
 /// an `every`'s first fire at the start it was given, are times of their
 /// own and stay.
@@ -325,7 +325,7 @@ fn trigger(factory: &Arc<Factory>, monitor: &mut Monitor, trigger: Trigger, now:
         pipe_seqs: Vec::new(),
         provenance: None,
     };
-    // Another agent's prompt carries what that agent read (row 1721).
+    // Another agent's prompt carries what that agent read.
     crate::errands::relayed(factory, &monitor.agent, &monitor.created_by);
     factory.deliver_event(&monitor.agent, text, event);
     monitor.last_fired = Some(now);

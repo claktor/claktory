@@ -264,9 +264,23 @@ impl Factoryd {
         error(self.ask(Body::Stop(factory_protocol::apps::Stop { app_id: app_id.into() })).await)
     }
 
-    /// Calls a tool as the agent "builder".
+    /// Calls a tool as the agent "builder", of the project "site", which
+    /// has read outside content.
     pub async fn call(&mut self, app_id: &str, tool: &str, args: &str) -> Body {
-        let call = factory_protocol::apps::Call { app_id: app_id.into(), tool: tool.into(), args: args.into(), caller: "builder".into() };
+        let call = factory_protocol::apps::Call {
+            app_id: app_id.into(),
+            tool: tool.into(),
+            args: args.into(),
+            caller: "builder".into(),
+            caller_project: "site".into(),
+            caller_admin: false,
+            caller_tainted: true,
+        };
+        self.ask(Body::Call(call)).await
+    }
+
+    /// Calls a tool as `call` says.
+    pub async fn call_with(&mut self, call: factory_protocol::apps::Call) -> Body {
         self.ask(Body::Call(call)).await
     }
 

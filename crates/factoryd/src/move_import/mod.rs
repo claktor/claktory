@@ -39,7 +39,6 @@ use std::process::Command;
 
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::config::Config;
 use crate::home::Home;
@@ -52,9 +51,6 @@ pub use map::parse_pair;
 
 /// The bundle formats this reads (`manifest.json`'s `format`).
 const FORMAT: u32 = 1;
-/// How long the code for the old computer's app works, when that app never
-/// connected through the tunnel: it's allowed like any new device.
-const OLD_APP_CODE_DAYS: i64 = 7;
 
 /// Records of the moves this Claktory came through, in factory.db.
 pub(crate) const SCHEMA: &str = "
@@ -182,8 +178,9 @@ pub struct Request {
 #[derive(Debug, Default)]
 pub struct Imported {
     pub text: String,
-    /// The pairing code for the old computer's own app, if it had one.
-    pub old_app_code: Option<String>,
+    /// The old computer's own app came over as a device, let in once it
+    /// shows the account key it was signed in with there.
+    pub old_app: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -259,7 +256,9 @@ struct State {
     done: Vec<PathBuf>,
     /// Agents whose checkouts are made, and what each needs to know.
     checkouts: Vec<(String, String)>,
-    old_app_code: Option<String>,
+    /// The old computer's app came over as a device (`old_app`). An import
+    /// state from before kept `old_app_code` instead, which is ignored.
+    old_app: bool,
 }
 
 fn load_state(home: &Home) -> Result<Option<State>, ImportError> {
@@ -462,7 +461,7 @@ fn steps(home: &Home, mut state: State, given: &[(PathBuf, PathBuf)], hold: bool
     if state.step == Step::Prepare {
         progress("prepare", "Checking and preparing the settings and records…");
         check(home, &manifest, &map, &bundle, hold)?;
-        state.old_app_code = prepare(home, &manifest, &map, &bundle)?;
+        state.old_app = prepare(home, &manifest, &map, &bundle)?;
         state.step = Step::Switch;
         save_state(home, &state)?;
     }
@@ -792,7 +791,7 @@ const CHANGED: [&str; 5] = ["config.json", "factory.db", "vault", "remote", "ann
 
 /// Makes the changed copies in `<home>/import/work` from the bundle, anew;
 /// returns the code for the old computer's app, if it had one.
-fn prepare(home: &Home, manifest: &Manifest, map: &PathMap, bundle: &Path) -> Result<Option<String>, ImportError> {
+fn prepare(home: &Home, manifest: &Manifest, map: &PathMap, bundle: &Path) -> Result<bool, ImportError> {
     let work = dir(home).join("work");
     if work.exists() {
         std::fs::remove_dir_all(&work).map_err(|error| failed("Can't clear the import's work folder", error))?;
@@ -816,10 +815,10 @@ fn prepare(home: &Home, manifest: &Manifest, map: &PathMap, bundle: &Path) -> Re
         let vault = crate::vault::Vault::open(work.join("vault"));
         vault.rotate_auto_key().map_err(|error| failed("Can't give the vault a new key", error))?;
     }
-    let code = old_app(&work_home)?;
+    let old_app = old_app(&work_home)?;
     crate::remote::write_private(&work.join("move-epoch"), format!("{}\n", manifest.epoch).as_bytes())
         .map_err(|error| failed("Can't write the move's epoch", error))?;
-    Ok(code)
+    Ok(old_app)
 }
 
 fn copy_all(from: &Path, to: &Path) -> std::io::Result<()> {
@@ -954,60 +953,50 @@ fn repath_json(value: serde_json::Value, map: &PathMap) -> serde_json::Value {
     }
 }
 
-/// The old computer's own app becomes an ordinary paired device: its token
-/// (from the old local pairing code) is kept, so its saved connection keeps
-/// working through the tunnel, and a code with it is returned to give it.
-/// This computer's app gets a new local pairing when Claktory starts.
-fn old_app(work: &Home) -> Result<Option<String>, ImportError> {
+/// The old computer's own app (server-authorize.md Moves 3): when it was
+/// signed in to the person's account there (the local device kept the
+/// account key its assertion proved), it becomes a device of the moved
+/// Claktory, allowed as the person's (`ALLOWED_BY_MOVED`) and bound to the
+/// first tunnel key that comes with an assertion proving that account key;
+/// nothing else of it comes over (no token, no tunnel key, no code). An app
+/// that never signed in, or whose key was removed from the account, is left
+/// out: it's paired again like any device. Whether it came over.
+fn old_app(work: &Home) -> Result<bool, ImportError> {
     let devices_path = work.root().join("remote/devices.json");
-    let Ok(bytes) = std::fs::read(&devices_path) else { return Ok(None) };
+    let Ok(bytes) = std::fs::read(&devices_path) else { return Ok(false) };
     let mut devices: Vec<crate::remote::Device> =
         serde_json::from_slice(&bytes).map_err(|error| failed("The bundle's devices can't be read", error))?;
-    let pairing = work.root().join("remote/local-pairing");
-    let token = std::fs::read_to_string(&pairing)
-        .ok()
-        .and_then(|code| crate::remote::code_values(&code, "t").next())
-        .filter(|token| !token.is_empty());
-    let mut code = None;
+    let mut carried = false;
     if let Some(index) = devices.iter().position(|device| device.local) {
-        let mut device = devices.remove(index);
-        let base = {
-            let base: String = device.name.to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
-            let base = base.trim_matches('-').to_owned();
-            if base.is_empty() || base == crate::remote::LOCAL_DEVICE { "old-computer".to_owned() } else { base }
-        };
-        let mut id = base.clone();
-        let mut n = 2;
-        while devices.iter().any(|known| known.id == id) {
-            id = format!("{base}-{n}");
-            n += 1;
-        }
-        device.id = id;
-        device.local = false;
-        match &token {
-            Some(token) if sha256_hex(token) == device.token_sha256 => {
-                if device.endpoint_id.is_empty() {
-                    // Never connected through the tunnel: its code lets it in,
-                    // allowed like any new device's.
-                    device.code_expires = Some(now_ms() + OLD_APP_CODE_DAYS * 24 * 60 * 60 * 1000);
-                }
-                let key = crate::remote::secret_key(work).map_err(|error| failed("The bundle's tunnel key can't be read", error))?;
-                let config = std::fs::read_to_string(work.config_path())
-                    .ok()
-                    .and_then(|text| Config::parse(&text, work.root()).ok())
-                    .unwrap_or_default();
-                let relays = config.remote.as_ref().map(|remote| remote.relays.clone()).unwrap_or_default();
-                let identity = crate::remote::Identity {
-                    name: config.claktory_name(),
-                    color: config.claktory_color(crate::remote::key_color(work)).to_owned(),
-                };
-                code = Some(crate::remote::pairing_code(token, &key.public().to_string(), &relays, &[], &identity));
+        let local = devices.remove(index);
+        if crate::remote::is_account_key(&local.account_key) && !crate::remote::key_removed(work, &local.account_key) {
+            let base = {
+                let base: String = local.name.to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+                let base = base.trim_matches('-').to_owned();
+                if base.is_empty() || base == crate::remote::LOCAL_DEVICE { "old-computer".to_owned() } else { base }
+            };
+            let mut id = base.clone();
+            let mut n = 2;
+            while devices.iter().any(|known| known.id == id) {
+                id = format!("{base}-{n}");
+                n += 1;
             }
-            // No token to give it: it's paired again like any device.
-            _ => {}
-        }
-        if code.is_some() {
-            devices.push(device);
+            devices.push(crate::remote::Device {
+                id,
+                name: local.name.clone(),
+                created: now_ms(),
+                discovered: true,
+                allowed_ms: Some(now_ms()),
+                allowed_by: crate::remote::ALLOWED_BY_MOVED.to_owned(),
+                allowed_by_name: local.name,
+                allow_confirmed: true,
+                app_kind: local.app_kind,
+                app_platform: local.app_platform,
+                app_version: local.app_version,
+                account_key: local.account_key,
+                ..crate::remote::Device::default()
+            });
+            carried = true;
         }
     }
     let mut json = serde_json::to_string_pretty(&devices).map_err(|error| failed("Can't write the devices", error))?;
@@ -1017,7 +1006,7 @@ fn old_app(work: &Home) -> Result<Option<String>, ImportError> {
     for name in ["local-pairing", "remote-port"] {
         let _ = std::fs::remove_file(work.root().join("remote").join(name));
     }
-    Ok(code)
+    Ok(carried)
 }
 
 // ---- 4. switch ----
@@ -1447,10 +1436,10 @@ fn report(home: &Home, manifest: &Manifest, map: &PathMap, state: &State) -> Imp
     if !manifest.tasks.is_empty() {
         let _ = writeln!(text, "Background tasks stopped by the move: {}. Each agent was told.", manifest.tasks.len());
     }
-    if let Some(code) = &state.old_app_code {
+    if state.old_app {
         let _ = writeln!(
             text,
-            "\nOn {}, Claktory's app can reach this Claktory with this code (Add a Claktory, the + at the far left of the window):\n\n{code}\n",
+            "\nClaktory's app on {} connects to this Claktory through your Claktory account if it does so within half an hour; after that, allow it like any new device.\n",
             manifest.source.machine
         );
     }
@@ -1460,7 +1449,7 @@ fn report(home: &Home, manifest: &Manifest, map: &PathMap, state: &State) -> Imp
         );
     }
     text.push_str("Start Claktory to carry on: its agents are told where they are now.");
-    Imported { text, old_app_code: state.old_app_code.clone() }
+    Imported { text, old_app: state.old_app }
 }
 
 /// Undoes an unfinished import: what it put in the home goes, what it put
@@ -1544,11 +1533,6 @@ pub fn ask_passphrase() -> Result<String, String> {
     }
     read.map_err(|error| format!("Can't read the passphrase: {error}"))?;
     Ok(line.trim().to_owned())
-}
-
-/// The SHA-256 of `text`, in hex.
-pub(crate) fn sha256_hex(text: &str) -> String {
-    crate::encoding::hex(&Sha256::digest(text.as_bytes()))
 }
 
 #[cfg(test)]

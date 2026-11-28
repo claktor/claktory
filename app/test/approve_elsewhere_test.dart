@@ -38,6 +38,7 @@ import 'package:factory_app/pipes.dart'
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart' hide MovePhase;
 import 'package:factory_app/recovery_key.dart';
 import 'package:factory_app/scope.dart' show AppPage;
+import 'package:factory_app/transcript.dart' show ProposalCard;
 import 'package:factory_app/report_types.dart' show ReportTypesSettings;
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/foundation.dart';
@@ -506,6 +507,7 @@ void main() {
       tester,
       TargetPlatform.windows,
       SingleChildScrollView(child: AccountSettings(account: account)),
+      workspace: _workspace()..vault = VaultState(exists: true, unlocked: true),
     );
     // Never signed in: the documented first sign-in stays.
     await settings(
@@ -536,6 +538,7 @@ void main() {
     // Nor another account service (SetAccountService).
     expect(_buttons(tester), isNot(contains('Change…')));
     expect(_buttons(tester), isNot(contains('Show recovery key…')));
+    expect(_buttons(tester), isNot(contains('Make a new recovery key…')));
     // Removed at the account: not signed in again from here.
     await settings(
       ClaktoryAccount(
@@ -970,5 +973,51 @@ void main() {
       findsOneWidget,
     );
     expect(find.textContaining('password manager'), findsNothing);
+  });
+
+  _windows("a proposal that would widen a pipe is only dismissed here", (
+    tester,
+  ) async {
+    Proposal proposal({required bool widens}) => Proposal(
+      id: '7',
+      text: 'Give the Acme pipe the Web Site project.',
+      grants: [
+        ProposalGrant(summary: 'Widen the Acme pipe', widensPipe: widens),
+      ],
+    );
+    // A Mac approves it, with a comment field (the control).
+    await _pump(
+      tester,
+      TargetPlatform.macOS,
+      ProposalCard(proposal(widens: true), agentId: 'a1'),
+    );
+    expect(find.text('Approve'), findsOneWidget);
+    expect(find.byType(EditableText), findsOneWidget);
+    // Windows approves one that widens no pipe as before.
+    await _pump(
+      tester,
+      TargetPlatform.windows,
+      ProposalCard(proposal(widens: false), agentId: 'a1'),
+    );
+    expect(find.text('Approve'), findsOneWidget);
+    // One that widens a pipe: no Approve and no reply, only Dismiss and
+    // where to approve it (authority::local_may refuses the rest).
+    final harness = await _pump(
+      tester,
+      TargetPlatform.windows,
+      ProposalCard(proposal(widens: true), agentId: 'a1'),
+    );
+    expect(find.text('Approve'), findsNothing);
+    expect(find.byType(EditableText), findsNothing);
+    expect(find.text(approveElsewhereText), findsOneWidget);
+    expect(
+      find.textContaining('Widen the Acme pipe', findRichText: true),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Dismiss'));
+    await pumpFrames(tester);
+    final decided = harness.backend.sent.last.decideProposal;
+    expect(decided.proposalId, '7');
+    expect(decided.approve || decided.reply, isFalse);
   });
 }

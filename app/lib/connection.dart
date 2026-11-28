@@ -78,6 +78,9 @@ class Connection {
         case LocalEngine.running:
           break;
       }
+      // Its socket turned this app away: it says why while it
+      // keeps trying.
+      if (backend.localRefused.value != null) return Link.failing;
     }
     final tunnel = backend.tunnel.value;
     // Back from the background or a network change, it reconnects without
@@ -102,6 +105,7 @@ class Connection {
     backend.connectedSince,
     backend.reconnecting,
     backend.refused,
+    backend.localRefused,
     backend.movedAway,
     backend.tunnel,
     backend.lastConnected,
@@ -206,7 +210,8 @@ class Connection {
   /// What went wrong exactly, for whoever looks into it, while it can't
   /// connect; empty otherwise.
   String get error => switch (link) {
-    Link.failing => _cause(_failed),
+    // This Mac's refusal is in the details already.
+    Link.failing => _localRefusal != null ? '' : _cause(_failed),
     Link.refused => _cause(backend.tunnel.value ?? idleTunnel),
     _ => '',
   };
@@ -256,10 +261,16 @@ class Connection {
 
   /// Under "Can't connect" where nothing else shows (the main pane): when
   /// it was last seen, and that it keeps trying.
-  String get stillTrying => switch (lastSeen) {
-    null => 'Trying again…',
-    final seen => 'Last seen ${_ago(seen)}. Trying again…',
+  String get stillTrying => switch ((_localRefusal, lastSeen)) {
+    (final refusal?, _) => '$refusal Trying again…',
+    (null, null) => 'Trying again…',
+    (null, final seen?) => 'Last seen ${_ago(seen)}. Trying again…',
   };
+
+  /// What this Mac's own Claktory said when it turned this app away on
+  /// its socket, while it does; null otherwise.
+  String? get _localRefusal =>
+      backend.target == null ? backend.localRefused.value : null;
 
   /// How it connects, and since when.
   String get details {
@@ -299,6 +310,7 @@ class Connection {
             '${to.isEmpty ? 'another computer' : to}. The copy it left here '
             'doesn’t run.';
       case Link.failing:
+        if (_localRefusal case final refusal?) return refusal;
         final tunnel = _failed;
         return [
           _failingFacts(tunnel),

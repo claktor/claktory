@@ -183,6 +183,7 @@ impl TunnelHandle {
             received: status.received,
             link_received: status.link_received,
             dial_timeout_ms: status.dial_timeout_ms,
+            dial_ms: status.dial_ms,
             reach: match status.reach {
                 Reach::None => TunnelReach::None,
                 Reach::Local => TunnelReach::Local,
@@ -323,6 +324,9 @@ pub struct TunnelStatus {
     /// How long the next dial has, in ms: it grows after dials that timed
     /// out, and the app's connect window with it.
     pub dial_timeout_ms: u32,
+    /// How long the dial that made the open connection took, in ms, to the
+    /// connection made on its first path; 0 while there's none.
+    pub dial_ms: u32,
     /// What a direct path crosses, from its address (never the address):
     /// for diagnostics, per route.
     pub reach: TunnelReach,

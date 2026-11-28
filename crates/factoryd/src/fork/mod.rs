@@ -154,6 +154,70 @@ pub(crate) async fn switch(factory: &Arc<Factory>, id: &str, branch: &str, by: B
     .await
 }
 
+/// Clears `id`'s conversation at its own asking (`extensions::start_over`):
+/// all of it is set aside as another version, which the person can switch
+/// back to, and a new one begins. Its run calls this between jobs, after the
+/// step that asked, so nothing runs and what's queued waits for the new
+/// conversation. Cards it opened close, as /clear closes them; whether
+/// anything was set aside.
+pub(crate) async fn start_over(factory: &Arc<Factory>, id: &str, reason: &str) -> Result<bool, RequestError> {
+    let writes = factory.lock().agents.entry(id.to_owned()).or_default().writes.clone();
+    let _writing = writes.lock().await;
+    let persist = {
+        let mut inner = factory.lock();
+        let runtime = inner.agents.entry(id.to_owned()).or_default();
+        let persist = runtime.transcript.as_mut().map(|transcript| transcript.persist());
+        // What it was handed that its conversation doesn't hold goes to the new one.
+        let saved = runtime.transcript.as_ref().map_or(0, |transcript| saved(transcript.messages(), &runtime.taken));
+        let unsaved: Vec<Queued> = runtime.taken.drain(saved..).map(|(queued, _)| queued).collect();
+        runtime.queue.splice(0..0, unsaved);
+        persist
+    };
+    if let Some(persist) = persist {
+        persist.write().await?;
+    }
+    let dir = factory.home.agent_dir(id);
+    let made_by = id.to_owned();
+    let set_aside = blocking(move || {
+        let segments = segments(&dir)?;
+        let Some((&first, path)) = segments.iter().next() else { return Ok(None) };
+        let ms = messages(path)?.0.first().and_then(|message| i64::try_from(message.timestamp()).ok()).unwrap_or_else(now_ms);
+        let set_aside = set_aside(&dir, Point { segment: first, index: 0, ms }, &made_by, now_ms())?;
+        if set_aside.is_some() {
+            for path in segments.values() {
+                std::fs::remove_file(path)?;
+            }
+        }
+        Ok(set_aside)
+    })
+    .await?;
+    let Some(branch) = set_aside else { return Ok(false) };
+    let name = factory.lock().config.agent(id).map_or_else(|| id.to_owned(), |agent| agent.name.clone());
+    close_cards(factory, id, branch.fork.ms, &format!("{name} started over, so this is no longer needed."));
+    history::record(factory, id, id, history::Kind::StartedOver, reason, 0);
+    let persist = {
+        let mut inner = factory.lock();
+        let reason = reason.trim_end();
+        let stop = if reason.ends_with(['.', '!', '?']) { "" } else { "." };
+        let said = format!("{name} started over: {reason}{stop} Its earlier conversation is kept in its other versions.");
+        let (transcript, persist) =
+            crate::transcript::Transcript::begun(factory.home.agent_dir(id), id.to_owned(), factory.old_segments.clone(), said);
+        let runtime = inner.agents.entry(id.to_owned()).or_default();
+        runtime.transcript = Some(transcript);
+        // What the run before still reports belongs to the conversation set aside.
+        runtime.epoch += 1;
+        if inner.state.selected_agent.as_deref() == Some(id)
+            && let Some(transcript) = transcript_of(&inner, id)
+        {
+            factory.send_transcript(&inner, transcript);
+        }
+        factory.broadcast_workspace(&inner);
+        persist
+    };
+    persist.write().await?;
+    Ok(true)
+}
+
 /// Runs `work` on `id`'s conversation with its queue held: no run takes
 /// what's queued until it's done (`Runtime::forking`), not even the stopped
 /// run winding down, which would hand it to the conversation as it was.
@@ -353,7 +417,7 @@ async fn settle(
 ) -> Result<bool, RequestError> {
     let kept = set_aside.is_some();
     let closed = match &set_aside {
-        Some(branch) => close_cards(factory, id, branch.fork.ms),
+        Some(branch) => close_cards(factory, id, branch.fork.ms, "Its conversation went back to before it asked."),
         None => 0,
     };
     factory.lock().agents.entry(id.to_owned()).or_default().transcript = None;
@@ -415,8 +479,9 @@ async fn settle(
 }
 
 /// Closes `id`'s cards made at `since` or later: its questions, secret
-/// requests and proposals of app access, as /clear does. How many questions.
-fn close_cards(factory: &Factory, id: &str, since: i64) -> usize {
+/// requests and proposals of app access, as /clear does, a secret request
+/// with `why` as its comment. How many questions.
+fn close_cards(factory: &Factory, id: &str, since: i64, why: &str) -> usize {
     let questions = crate::extensions::ask::cleared_since(&factory.store, id, since).unwrap_or_else(|error| {
         tracing::warn!(agent = %id, %error, "could not dismiss its questions");
         0
@@ -430,7 +495,7 @@ fn close_cards(factory: &Factory, id: &str, since: i64) -> usize {
     let waiting = factory.vault.waiting_requests().unwrap_or_default();
     let mut withdrew = false;
     for (request, at) in waiting.into_iter().filter(|(request, at)| request.agent_id == id && *at >= since) {
-        match factory.vault.withdraw_request(id, &request.id, "Its conversation went back to before it asked.") {
+        match factory.vault.withdraw_request(id, &request.id, why) {
             Ok(request) => {
                 crate::vault::requests::show_everywhere(factory, request);
                 withdrew = true;

@@ -52,7 +52,7 @@ pub(crate) enum Power {
     File(std::path::PathBuf),
 }
 
-/// macOS 14 or later (Fugo, 23220): the floor the lid-closed setting kept from its helper.
+/// macOS 14 or later: the floor the lid-closed setting kept from its helper.
 #[cfg(target_os = "macos")]
 fn macos_14() -> bool {
     let mut buffer = [0u8; 64];
@@ -113,7 +113,7 @@ pub(crate) struct KeepAwake {
     state: Mutex<State>,
     /// A run started or ended: whether to hold the Mac awake is looked at again.
     changed: Arc<tokio::sync::Notify>,
-    /// Keeping agents working with the lid closed (#371).
+    /// Keeping agents working with the lid closed.
     pub(crate) lid: Arc<crate::lid_closed::Lid>,
 }
 

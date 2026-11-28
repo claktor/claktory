@@ -319,13 +319,17 @@ impl Standin {
             .map_err(|error| format!("couldn't start Chrome: {error}"))?;
         let crate::errands::cdp::Pipe { send, mut receive } = local.connect()?;
         let to_host = self.to_host.clone();
+        let page_session = Arc::new(std::sync::OnceLock::<String>::new());
+        let ours = page_session.clone();
         tokio::spawn(async move {
             while let Some(message) = receive.recv().await {
                 let Ok(value) = serde_json::from_slice::<Value>(&message) else { continue };
-                // Its own calls' answers and the screencast go to the
-                // stand-in; the rest to whoever drives it.
+                // Its own calls' answers and its page's screencast go to
+                // the stand-in; the rest (a live view's screencast on a
+                // session of the host's too) to whoever drives it.
                 let own = value["id"].as_u64().is_some_and(|id| (OWN_IDS..=super::sites::HOST_IDS).contains(&id))
-                    || value["method"].as_str().is_some_and(|method| method.starts_with("Page.screencast"));
+                    || (value["method"].as_str().is_some_and(|method| method.starts_with("Page.screencast"))
+                        && ours.get().is_some_and(|session| value["sessionId"] == session.as_str()));
                 // A page that navigated: the stand-in hears it too (a
                 // screencast refused mid-navigation starts then).
                 let navigated = matches!(value["method"].as_str(), Some("Page.frameNavigated" | "Page.loadEventFired"));
@@ -350,6 +354,7 @@ impl Standin {
         };
         let attached = self.call_wait("Target.attachToTarget", json!({"targetId": page, "flatten": true}), false).await;
         self.session = attached["result"]["sessionId"].as_str().unwrap_or_default().to_owned();
+        let _ = page_session.set(self.session.clone());
         self.call("Page.enable", json!({})).await;
         let params = json!({"width": width, "height": height, "deviceScaleFactor": 1, "mobile": false});
         self.call("Emulation.setDeviceMetricsOverride", params).await;

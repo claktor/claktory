@@ -210,6 +210,10 @@ fn settings_key(config: &Config, agent: &AgentConfig, cwd: &Path, quarantined: b
     if let Some(name) = config.user_name() {
         key["user"] = name.into();
     }
+    // Its project's brief, only when there is one, the same way.
+    if let Some(brief) = project_brief(config, agent) {
+        key["brief"] = brief.into();
+    }
     // Quarantined for a pipe, the same way: its tools and places change.
     if quarantined {
         key["quarantined"] = true.into();
@@ -219,6 +223,12 @@ fn settings_key(config: &Config, agent: &AgentConfig, cwd: &Path, quarantined: b
         key["curator"] = true.into();
     }
     key.to_string()
+}
+
+/// The brief of the agent's project, if it has one.
+fn project_brief<'a>(config: &'a Config, agent: &AgentConfig) -> Option<&'a str> {
+    let project = config.project(agent.project.as_deref()?)?;
+    (!project.brief.is_empty()).then_some(project.brief.as_str())
 }
 
 /// bash, taking `secrets` (see `factory_agent::tools::secrets`).
@@ -505,7 +515,10 @@ fn settings_note(
         }
     }
     let new_instructions = text("prompt") != agent.prompt;
-    if said.is_empty() && !new_instructions {
+    // Moved, its project's brief is part of where it is now.
+    let brief = project_brief(config, agent).unwrap_or_default();
+    let new_brief = !moved && text("brief") != brief;
+    if said.is_empty() && !new_instructions && !new_brief {
         return None;
     }
     // Its checkout applies now, not with the next context: say what it is.
@@ -527,6 +540,11 @@ fn settings_note(
         note.push_str(" Your instructions were removed: you have none from now on.");
     } else if new_instructions {
         note.push_str(" Your instructions changed; the new ones are in your system prompt from now on.");
+    }
+    if new_brief && brief.is_empty() {
+        note.push_str(" Your project's brief was removed: it has none from now on.");
+    } else if new_brief {
+        note.push_str(" Your project's brief changed; the new one is in your system prompt from now on.");
     }
     if let Some(section) = checkout {
         let _ = write!(note, "\n\n{section}");
@@ -618,9 +636,29 @@ impl Factory {
                 return;
             }
             self.ensure_checkout(&id).await;
+            self.start_over_if_asked(&id).await;
             let current = self.extension_specs(&id);
             let Some(job) = self.next_job(&id, &current) else { return };
             self.execute(&id, job).await;
+        }
+    }
+
+    /// Clears the agent's conversation when its last step asked to start
+    /// over, in the conversation it's still in (not one the person cleared
+    /// or took back since).
+    async fn start_over_if_asked(self: &Arc<Self>, id: &str) {
+        let reason = {
+            let mut inner = self.lock();
+            let Some(runtime) = inner.agents.get_mut(id) else { return };
+            match runtime.start_over.take() {
+                Some((epoch, reason)) if epoch == runtime.epoch => reason,
+                _ => return,
+            }
+        };
+        if let Err(error) = crate::fork::start_over(self, id, &reason).await {
+            tracing::error!(agent = %id, %error, "could not start the agent over");
+            let epoch = self.lock().agents.get(id).map_or(0, |runtime| runtime.epoch);
+            self.notice(id, epoch, format!("Couldn't start over: {error}"), NoticeLevel::Error);
         }
     }
 
@@ -1028,7 +1066,8 @@ impl Factory {
             stream: self.models.stream_noting(notes),
             session_id: Some(id.to_owned()),
             transform_context: None,
-            should_stop_after_turn: None,
+            // Its run ends with the step that asked to start over.
+            should_stop_after_turn: Some(self.starting_over(id)),
             // Once it has read a web page, its secrets wait for the person.
             before_tool_call: Some(crate::pipes::agents::gate(self, id)),
             compact_at: Some(job.compact_at),
@@ -1249,7 +1288,7 @@ impl Factory {
             let Some(frame) = self.new_frame(id, epoch, specs, Vec::new()).await else { return settings };
             settings.system_prompt = Some(frame.system_prompt);
             settings.tools = Some(tools);
-        } else if changed(&["name", "role", "prompt"])
+        } else if changed(&["name", "role", "prompt", "brief"])
             && let Some(frame) = self.new_frame(id, epoch, frame.tools.clone(), frame.announced.clone()).await
         {
             settings.system_prompt = Some(frame.system_prompt);
@@ -1463,7 +1502,8 @@ impl Factory {
                 let images = factory.takes_images(&agent);
                 let messages = {
                     let mut inner = factory.lock();
-                    if inner.agents.get(&agent).is_none_or(|runtime| runtime.abort.is_none()) {
+                    // Starting over, what came waits for the new conversation.
+                    if inner.agents.get(&agent).is_none_or(|runtime| runtime.abort.is_none() || runtime.start_over.is_some()) {
                         return Arrived::default();
                     }
                     let note = factory.take_changes(&mut inner, &agent, &current);
@@ -1484,6 +1524,15 @@ impl Factory {
                 let settings = factory.settings_now(&agent, epoch).await;
                 Arrived { messages, settings }
             })
+        })
+    }
+
+    /// Whether the agent asked to start over (`extensions::start_over`).
+    fn starting_over(self: &Arc<Self>, id: &str) -> factory_agent::agent::ShouldStop {
+        let factory = Arc::downgrade(self);
+        let agent = id.to_owned();
+        Arc::new(move |_| {
+            factory.upgrade().is_some_and(|factory| factory.lock().agents.get(&agent).is_some_and(|runtime| runtime.start_over.is_some()))
         })
     }
 
@@ -1613,6 +1662,9 @@ async fn system_prompt(render: &Render<'_>, folder: &Path, home: &Home, extra_di
             let _ = writeln!(prompt, "- {line}");
         }
         prompt.push_str("Read anything in them, but change files only in yours, with bash too.\n");
+    }
+    if let Some(brief) = render.project.map(|project| project.brief.as_str()).filter(|brief| !brief.is_empty()) {
+        let _ = write!(prompt, "\n## Your project's brief\n\n{}\n", crate::manual::render(brief, home, render.user));
     }
     if !agent.prompt.is_empty() {
         // Placeholders as in the manual ({{user}}, {{home}}…), filled in here

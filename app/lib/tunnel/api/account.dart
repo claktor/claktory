@@ -15,3 +15,11 @@ Uint8List accountPublicKey({required String key}) =>
 /// bytes.
 Uint8List accountSign({required String key, required List<int> message}) =>
     RustLib.instance.api.crateApiAccountAccountSign(key: key, message: message);
+
+/// The public half of the X25519 pair the account recovery key [key] (its
+/// 20 bytes) stands for: the secret is HKDF-SHA256 of the key, with salt
+/// "claktory account recovery key" and info "x25519 v1", and the public
+/// half X25519 of it and the base point. factoryd opens a vault with a
+/// typed key the same way, so only the public half ever leaves the device.
+Uint8List recoveryPublicKey({required List<int> key}) =>
+    RustLib.instance.api.crateApiAccountRecoveryPublicKey(key: key);

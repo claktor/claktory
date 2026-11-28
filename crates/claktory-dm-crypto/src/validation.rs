@@ -52,6 +52,14 @@ pub trait Trust {
     fn refused(&self, _account: &str, _key: &IdentityPublic) -> bool {
         false
     }
+    /// Whether a list `account`'s current identity signed, taken here, named
+    /// a leaf under `signature_key` that a later one it signed dropped: the
+    /// person took that device off since (`Pin::taken_off`). What lets a
+    /// rejoin tell a device taken off from one added on a list withheld
+    /// from it (E11-8, Fugo's liveness question after a Lock out).
+    fn taken_off(&self, _account: &str, _signature_key: &[u8]) -> bool {
+        false
+    }
 }
 
 /// A leaf that passed: who it is.
@@ -465,6 +473,32 @@ pub fn stale(trust: &impl Trust, credential: &Credential, signature_key: &[u8]) 
     (relisted && !itself).then_some(certificate)
 }
 
+/// A removed device: a device leaf under its account's
+/// current identity whose leaf id that identity's current list, as taken
+/// here, names under no key at all: the person took it off (Lock out,
+/// Remove) and the group still holds it. A leaf comes into a group only
+/// while its list names it (`commit` refuses one it doesn't), and lists
+/// only move forward, so one the list stopped naming was taken off since.
+/// Treated as `dead`: its account's own devices take it out at once
+/// (`Group::remove_dead`), and nobody sends to the group until it's out
+/// (`Group::send`), whether or not its person's commit reached the group.
+/// Never a Claktory's leaf (a grant taken back is its own path), and
+/// nothing for an account with no list taken.
+pub fn removed(trust: &impl Trust, credential: &Credential, signature_key: &[u8]) -> Option<LeafCertificate> {
+    let certificate = LeafCertificate::from_credential(credential).ok()?;
+    let leaf = &certificate.leaf;
+    if leaf.kind != LeafKind::Device || leaf.signature_key.as_slice() != signature_key {
+        return None;
+    }
+    let (identity, list) = trust.current(&leaf.account_id)?;
+    let list = list?;
+    if certificate.identity != identity || list.identity != identity || list.list.account_id != leaf.account_id {
+        return None;
+    }
+    let named = list.list.leaves.iter().any(|listed| listed.kind == leaf.kind && listed.leaf_id == leaf.leaf_id);
+    (!named).then_some(certificate)
+}
+
 /// Why a group holds sends (`Error::Waiting`, `Group::held`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Held {
@@ -472,6 +506,8 @@ pub enum Held {
     Replaced,
     /// A stale leaf: a reinstalled device's former install (`stale`).
     Reinstalled,
+    /// A device its person took off their list (`removed`).
+    Removed,
 }
 
 impl std::fmt::Display for Held {
@@ -479,6 +515,7 @@ impl std::fmt::Display for Held {
         f.write_str(match self {
             Held::Replaced => "new security key",
             Held::Reinstalled => "reinstalled device",
+            Held::Removed => "removed device",
         })
     }
 }
@@ -504,6 +541,10 @@ impl<T: Trust> Trust for Rejoining<'_, T> {
 
     fn refused(&self, account: &str, key: &IdentityPublic) -> bool {
         self.trust.refused(account, key)
+    }
+
+    fn taken_off(&self, account: &str, signature_key: &[u8]) -> bool {
+        self.trust.taken_off(account, signature_key)
     }
 }
 
@@ -551,7 +592,20 @@ pub struct Pin {
     /// never dropped, unless the person verifies that very key as current.
     #[serde(default)]
     pub refused: Vec<IdentityPublic>,
+    /// The signature keys of leaves a list this identity signed named and a
+    /// later one it signed dropped, as `accept_list` saw them go (at most
+    /// `TAKEN_OFF_MOST`, the latest kept): devices the person took off
+    /// (Lock out, Remove). Both lists are the person's own signatures, so
+    /// the service can't put a key here; it can only withhold the later
+    /// list, which leaves the key out. Cleared when the key changes, since
+    /// they're that identity's lists'; taken from the person's other
+    /// devices when they pin the same key (`import`).
+    #[serde(default)]
+    pub taken_off: Vec<[u8; 32]>,
 }
+
+/// The most taken-off leaves a pin keeps (`Pin::taken_off`).
+pub const TAKEN_OFF_MOST: usize = 128;
 
 /// A key an account had before, as it was when the person's devices moved
 /// off it (`Pin::previous`).
@@ -603,6 +657,16 @@ impl Pins {
         self.pins.get(account)
     }
 
+    /// Every pinned account, in order.
+    pub fn accounts(&self) -> impl Iterator<Item = &str> {
+        self.pins.keys().map(String::as_str)
+    }
+
+    /// The version of `account`'s device list taken here, if any.
+    pub fn list_version(&self, account: &str) -> Option<u64> {
+        self.lists.get(account).map(|list| list.list.version)
+    }
+
     /// Pins `identity` for `account` at first contact (trust on first use):
     /// only when nothing is pinned for it yet. The same key again is fine; a
     /// different one is a key change, which `key_changed` makes visible.
@@ -625,6 +689,7 @@ impl Pins {
                         changed_from: None,
                         mismatched: false,
                         refused: Vec::new(),
+                        taken_off: Vec::new(),
                     },
                 );
                 Ok(())
@@ -699,6 +764,7 @@ impl Pins {
         pin.device_list = back.as_ref().and_then(|back| back.device_list.clone());
         pin.highest_version = back.as_ref().map_or(0, |back| back.highest_version);
         pin.mismatched = back.as_ref().is_some_and(|back| back.mismatched);
+        pin.taken_off.clear();
         pin.changed_unseen = true;
         pin.verified = false;
         self.lists.remove(account);
@@ -736,6 +802,7 @@ impl Pins {
         pin.changed_unseen = false;
         pin.changed_from = None;
         pin.mismatched = false;
+        pin.taken_off.clear();
         if !pin.refused.contains(&refused_key.identity) {
             pin.refused.push(refused_key.identity);
         }
@@ -803,6 +870,21 @@ impl Pins {
         if version == pin.highest_version && pin.device_list.as_deref().is_some_and(|kept| kept != bytes) {
             return Err(refused("a different device list with the same version"));
         }
+        // The leaves the list taken before (this identity's) named and this
+        // one doesn't: taken off since; one named again isn't any more.
+        let named = |leaves: &[crate::device_list::Listed], leaf: &crate::device_list::Listed| {
+            leaves.iter().any(|each| each.kind == leaf.kind && each.leaf_id == leaf.leaf_id && each.signature_key == leaf.signature_key)
+        };
+        if let Some(before) = self.lists.get(account).filter(|before| before.identity == list.identity) {
+            for gone in before.list.leaves.iter().filter(|leaf| !named(&list.list.leaves, leaf)) {
+                if !pin.taken_off.contains(&gone.signature_key) {
+                    pin.taken_off.push(gone.signature_key);
+                }
+            }
+        }
+        pin.taken_off.retain(|key| !list.list.leaves.iter().any(|leaf| leaf.signature_key == *key));
+        let over = pin.taken_off.len().saturating_sub(TAKEN_OFF_MOST);
+        pin.taken_off.drain(..over);
         pin.highest_version = version;
         pin.device_list = Some(bytes.to_vec());
         self.lists.insert(account.to_owned(), list);
@@ -832,6 +914,15 @@ impl Pins {
                         pin.changed_unseen = ours.changed_unseen && their.changed_unseen;
                         pin.changed_from = ours.changed_from.or(their.changed_from);
                         pin.mismatched = (ours.mismatched || their.mismatched) && !pin.verified;
+                        // What either device saw taken off under this key,
+                        // never a leaf the list kept names.
+                        let listed = pin.device_list.as_deref().and_then(|bytes| SignedDeviceList::from_bytes(bytes).ok());
+                        let mut taken_off = ours.taken_off.clone();
+                        taken_off.extend(their.taken_off.iter().filter(|key| !ours.taken_off.contains(key)));
+                        taken_off.retain(|key| !listed.as_ref().is_some_and(|list| list.list.leaves.iter().any(|leaf| leaf.signature_key == *key)));
+                        let over = taken_off.len().saturating_sub(TAKEN_OFF_MOST);
+                        taken_off.drain(..over);
+                        pin.taken_off = taken_off;
                         pin
                     } else if their.replaced(&ours.identity) && !ours.replaced(&their.identity) {
                         // That device saw this key replaced: its newer one
@@ -909,6 +1000,10 @@ impl Trust for Pins {
     fn refused(&self, account: &str, key: &IdentityPublic) -> bool {
         self.pins.get(account).is_some_and(|pin| pin.refused.contains(key))
     }
+
+    fn taken_off(&self, account: &str, signature_key: &[u8]) -> bool {
+        self.pins.get(account).is_some_and(|pin| pin.taken_off.iter().any(|key| key.as_slice() == signature_key))
+    }
 }
 
 #[cfg(test)]
@@ -965,6 +1060,51 @@ mod tests {
         assert!(application(&channel, &pins, &mini, &[3; 32]).is_ok());
         let other = GroupKind::Channel { account: "matt".to_owned(), claktory_id: "studio".to_owned() };
         assert!(member(&other, &pins, &mini, &[3; 32]).is_err());
+    }
+
+    /// Fugo's liveness question (E11-8): a leaf one of the identity's lists
+    /// named and a later one dropped is taken off; one named again, one on
+    /// no list taken here (the newest withheld) or on a list under another
+    /// key isn't. Another of the person's devices that pins the same key
+    /// shares what it saw go; a key change forgets it.
+    #[test]
+    fn a_device_taken_off_is_known_only_from_two_lists_the_identity_signed() {
+        let (ana, other) = (IdentityKey::generate().unwrap(), IdentityKey::generate().unwrap());
+        let (ipad, c, d) = ((LeafKind::Device, "ipad", [2; 32]), (LeafKind::Device, "c", [3; 32]), (LeafKind::Device, "d", [4; 32]));
+        let mut pins = Pins::default();
+        pins.first_contact("ana", ana.public()).unwrap();
+        pins.accept_list("ana", &list(&ana, "ana", 1, &[ipad])).unwrap();
+        assert!(!pins.taken_off("ana", &[3; 32]), "never named");
+        pins.accept_list("ana", &list(&ana, "ana", 2, &[ipad, c])).unwrap();
+        pins.accept_list("ana", &list(&ana, "ana", 3, &[ipad])).unwrap();
+        assert!(pins.taken_off("ana", &[3; 32]));
+        assert!(!pins.taken_off("ana", &[2; 32]) && !pins.taken_off("bo", &[3; 32]));
+        let saw = pins.clone();
+        pins.accept_list("ana", &list(&ana, "ana", 4, &[ipad, c])).unwrap();
+        assert!(!pins.taken_off("ana", &[3; 32]), "named again");
+        pins.accept_list("ana", &list(&ana, "ana", 5, &[ipad, c, d])).unwrap();
+
+        // A device that took only v6: C and D are on no list it took.
+        let mut late = Pins::default();
+        late.first_contact("ana", ana.public()).unwrap();
+        late.accept_list("ana", &list(&ana, "ana", 6, &[ipad])).unwrap();
+        assert!(!late.taken_off("ana", &[3; 32]) && !late.taken_off("ana", &[4; 32]), "off its list, on none it took");
+        late.import(&saw).unwrap();
+        assert!(late.taken_off("ana", &[3; 32]), "what another of the person's devices saw go");
+        let mut back = late.clone();
+        back.import(&pins).unwrap();
+        assert!(back.taken_off("ana", &[3; 32]), "kept from either side");
+
+        // Read back from an older store without the field: nothing taken off.
+        let mut old = serde_json::to_value(&saw).unwrap();
+        old["pins"]["ana"].as_object_mut().unwrap().remove("taken_off");
+        let mut old: Pins = serde_json::from_value(old).unwrap();
+        old.reparse().unwrap();
+        assert!(!old.taken_off("ana", &[3; 32]));
+
+        // Another key's lists.
+        late.key_changed("ana", other.public()).unwrap();
+        assert!(!late.taken_off("ana", &[3; 32]), "the old key's lists");
     }
 
     /// Fugo's E11-3: one lying keys answer moves a device off a friend's

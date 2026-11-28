@@ -274,10 +274,27 @@ pub(crate) fn set_permission(factory: &Factory, device: &str, permission: v1::No
     factory.broadcast_workspace(&factory.lock());
 }
 
-/// Seals `notify` for each registered device it should be pushed to, and
-/// queues it for the relay: devices that aren't in use, while the person
-/// isn't using another (`State::push_waits`); every device for a test. How many it was queued for.
-pub(crate) fn queue(factory: &Factory, config: &Config, settings: &super::NotificationsConfig, notify: &v1::Notify, now: i64) -> usize {
+/// Which registered devices `queue` pushes to.
+#[derive(Clone, Copy)]
+pub(crate) enum Reach<'a> {
+    /// Each one, unless the person is using a device now (a test, always).
+    UnlessInUse,
+    /// Every one but this device, in use or not.
+    AllBut(&'a str),
+}
+
+/// Seals `notify` for each registered device `reach` takes in, and queues
+/// it for the relay: with `UnlessInUse`, devices that aren't in use, while
+/// the person isn't using another (`State::push_waits`), and every device
+/// for a test. How many it was queued for.
+pub(crate) fn queue(
+    factory: &Factory,
+    config: &Config,
+    settings: &super::NotificationsConfig,
+    notify: &v1::Notify,
+    now: i64,
+    reach: Reach<'_>,
+) -> usize {
     let test = notify.kind() == Kind::Test;
     let paired: HashSet<String> = match crate::remote::devices(&factory.home) {
         Ok(devices) => devices.into_iter().map(|device| device.id).collect(),
@@ -300,7 +317,11 @@ pub(crate) fn queue(factory: &Factory, config: &Config, settings: &super::Notifi
             registrations.remove(device);
         }
         for (device, registration) in registrations.iter_mut() {
-            if !test && factory.notify.push_waits(device, now) {
+            let skipped = match reach {
+                Reach::UnlessInUse => !test && factory.notify.push_waits(device, now),
+                Reach::AllBut(except) => device == except,
+            };
+            if skipped {
                 continue;
             }
             // Its system wouldn't show it (item 13).

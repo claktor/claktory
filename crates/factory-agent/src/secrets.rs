@@ -18,9 +18,13 @@ use zeroize::Zeroizing;
 use crate::stream::BoxFuture;
 use crate::types::{ToolResult, ToolResultPart};
 
-/// Values shorter than this many bytes aren't hidden: they'd mask ordinary
-/// text everywhere.
+/// Values this many bytes long or more are hidden wherever they appear.
 pub const MIN_REDACTED: usize = 8;
+
+/// Shorter values from this many bytes are hidden only as a whole word
+/// (`opens_token`, `closes_token`): inside a word, host or path they'd hide
+/// ordinary text. Shorter still, they aren't hidden at all.
+pub const MIN_TOKEN: usize = 4;
 
 /// One variable a secret sets for a command.
 #[derive(Clone)]
@@ -183,8 +187,9 @@ pub struct Secrets {
     pub save: Option<Save>,
 }
 
-/// Hides secret values in text: each value of at least `MIN_REDACTED`
-/// bytes, raw, line by line (PEM keys), in base64 (standard and URL-safe, at
+/// Hides secret values in text: each value of `MIN_TOKEN` to `MIN_REDACTED`
+/// bytes as it is, only where it stands as a word of its own; each longer
+/// one wherever it appears, raw, line by line (PEM keys), in base64 (standard and URL-safe, at
 /// each of the 3 alignments it can have inside longer data, without
 /// padding), hex (lower and upper case), percent-encoded and JSON-escaped,
 /// becomes "[secret AWS/AWS_SECRET_ACCESS_KEY]". Forms of `LONG` bytes or
@@ -199,6 +204,12 @@ pub struct Redactor {
     automaton: Option<AhoCorasick>,
     /// Each pattern's replacement.
     replacements: Arc<Vec<Arc<str>>>,
+    /// The values hidden only as a word of their own; None when there are
+    /// none. Every match is looked at, overlapping ones too, since one
+    /// that isn't a word may hide one that is.
+    tokens: Option<AhoCorasick>,
+    /// Each token's replacement.
+    token_replacements: Arc<Vec<Arc<str>>>,
     /// The same patterns, to tell whether the end of a stream could still
     /// become one (`undecided`).
     prefixes: Option<Arc<aho_corasick::nfa::contiguous::NFA>>,
@@ -446,11 +457,19 @@ impl Redactor {
 
     fn build(values: Vec<Hidden>) -> Redactor {
         let mut short: Vec<(Zeroizing<Vec<u8>>, Arc<str>)> = Vec::new();
+        let mut tokens: Vec<(Zeroizing<Vec<u8>>, Arc<str>)> = Vec::new();
         let mut pieces = Pieces::default();
         let mut plain = Plain::default();
         let mut seen = hashbrown::HashSet::new();
         for (label, value, text) in &values {
             let replacement: Arc<str> = format!("[secret {label}]").into();
+            if *text {
+                for base in [value.as_slice(), value.trim_ascii()] {
+                    if (MIN_TOKEN..MIN_REDACTED).contains(&base.len()) && seen.insert(base.to_vec()) {
+                        tokens.push((Zeroizing::new(base.to_vec()), replacement.clone()));
+                    }
+                }
+            }
             for form in forms(value, *text) {
                 if form.len() < MIN_REDACTED || !seen.insert(form.to_vec()) {
                     continue;
@@ -473,7 +492,8 @@ impl Redactor {
             short.retain(|(form, _)| form.len() < 2 * PIECE - 1 || !pieces.covers(form));
         }
         let (patterns, replacements): (Vec<Zeroizing<Vec<u8>>>, Vec<Arc<str>>) = short.into_iter().unzip();
-        let longest = patterns.iter().map(|pattern| pattern.len()).max().unwrap_or(0);
+        let (token_patterns, token_replacements): (Vec<Zeroizing<Vec<u8>>>, Vec<Arc<str>>) = tokens.into_iter().unzip();
+        let longest = patterns.iter().chain(&token_patterns).map(|pattern| pattern.len()).max().unwrap_or(0);
         let automaton = if patterns.is_empty() {
             None
         } else {
@@ -485,15 +505,30 @@ impl Redactor {
                 }
             }
         };
-        let prefixes = if patterns.is_empty() {
+        let token_automaton = if token_patterns.is_empty() {
             None
         } else {
-            aho_corasick::nfa::contiguous::NFA::new(patterns.iter().map(|pattern| pattern.as_slice())).ok().map(Arc::new)
+            match AhoCorasick::builder().match_kind(MatchKind::Standard).build(token_patterns.iter().map(|pattern| pattern.as_slice())) {
+                Ok(automaton) => Some(automaton),
+                Err(error) => {
+                    tracing::error!(%error, "could not build the secrets redactor's short values");
+                    None
+                }
+            }
+        };
+        // A stream holds back a token at its end too: what follows decides
+        // whether it's a word of its own.
+        let prefixes = if patterns.is_empty() && token_patterns.is_empty() {
+            None
+        } else {
+            aho_corasick::nfa::contiguous::NFA::new(patterns.iter().chain(&token_patterns).map(|pattern| pattern.as_slice())).ok().map(Arc::new)
         };
         Redactor {
             values: Arc::new(values),
             automaton,
             replacements: Arc::new(replacements),
+            tokens: token_automaton,
+            token_replacements: Arc::new(token_replacements),
             prefixes,
             pieces: Arc::new(pieces),
             plain: Arc::new(plain),
@@ -532,12 +567,13 @@ impl Redactor {
 
     /// Whether it hides anything.
     pub fn is_empty(&self) -> bool {
-        self.automaton.is_none() && self.pieces.is_empty() && self.plain.is_empty()
+        self.automaton.is_none() && self.tokens.is_none() && self.pieces.is_empty() && self.plain.is_empty()
     }
 
     /// What to hide in `bytes`, in order and apart. `text`: `bytes` is
-    /// UTF-8, and each stretch is widened to whole characters.
-    fn spans(&self, bytes: &[u8], text: bool) -> Vec<Span<'_>> {
+    /// UTF-8, and each stretch is widened to whole characters. `before`:
+    /// the byte just before `bytes`, when they go on from earlier ones.
+    fn spans(&self, bytes: &[u8], text: bool, before: Option<u8>) -> Vec<Span<'_>> {
         let mut spans: Vec<Span<'_>> = match &self.automaton {
             Some(automaton) => automaton
                 .find_iter(bytes)
@@ -551,7 +587,18 @@ impl Redactor {
             None => Vec::new(),
         };
         spans.extend(self.plain.spans(bytes));
-        if self.pieces.is_empty() && self.plain.is_empty() && !text {
+        let long = spans.len();
+        if let Some(tokens) = &self.tokens {
+            for found in tokens.find_overlapping_iter(bytes) {
+                let (start, end) = (found.start(), found.end());
+                let ahead = if start == 0 { before } else { Some(bytes[start - 1]) };
+                if opens_token(ahead) && closes_token(bytes.get(end).copied()) {
+                    spans.push(Span { start, end, replacement: &self.token_replacements[found.pattern().as_usize()], open: false });
+                }
+            }
+        }
+        // The automaton's alone are in order and apart already.
+        if self.pieces.is_empty() && self.plain.is_empty() && !text && spans.len() == long {
             return spans;
         }
         spans.extend(self.pieces.runs(bytes));
@@ -588,7 +635,7 @@ impl Redactor {
         if self.is_empty() {
             return Cow::Borrowed(text);
         }
-        let spans = self.spans(text.as_bytes(), true);
+        let spans = self.spans(text.as_bytes(), true, None);
         if spans.is_empty() {
             return Cow::Borrowed(text);
         }
@@ -608,7 +655,7 @@ impl Redactor {
         if self.is_empty() {
             return Cow::Borrowed(bytes);
         }
-        let spans = self.spans(bytes, false);
+        let spans = self.spans(bytes, false, None);
         if spans.is_empty() {
             return Cow::Borrowed(bytes);
         }
@@ -658,6 +705,18 @@ impl Redactor {
         let longest = self.longest.max(self.plain.longest());
         if self.pieces.is_empty() { longest } else { longest.max(2 * PIECE) }
     }
+}
+
+/// Whether a short value may start after `byte` (None: the start of the
+/// text): a space, a quote, `=` or `:`, as in `pin=1234` or `"1234"`.
+fn opens_token(byte: Option<u8>) -> bool {
+    byte.is_none_or(|byte| byte.is_ascii_whitespace() || matches!(byte, b'"' | b'\'' | b'`' | b'=' | b':'))
+}
+
+/// Whether a short value may end before `byte` (None: the end of the text):
+/// a space, a quote, `,`, `;` or `&`.
+fn closes_token(byte: Option<u8>) -> bool {
+    byte.is_none_or(|byte| byte.is_ascii_whitespace() || matches!(byte, b'"' | b'\'' | b'`' | b',' | b';' | b'&'))
 }
 
 /// A value as the redactor keeps it: its label, bytes, and whether they're
@@ -797,11 +856,14 @@ pub struct StreamRedactor {
     /// What it holds is the end of a long form's part whose replacement
     /// went out already.
     inside: bool,
+    /// The last byte that went out, which decides whether a short value
+    /// right after it stands as a word of its own.
+    before: Option<u8>,
 }
 
 impl StreamRedactor {
     pub fn new(redactor: Arc<Redactor>) -> StreamRedactor {
-        StreamRedactor { redactor, pending: Vec::new(), inside: false }
+        StreamRedactor { redactor, pending: Vec::new(), inside: false, before: None }
     }
 
     /// What can be shown of the text so far, redacted.
@@ -846,7 +908,7 @@ impl StreamRedactor {
         let mut out = Vec::new();
         let mut last = 0;
         let mut inside = false;
-        for (index, span) in self.redactor.spans(&self.pending, text).into_iter().enumerate() {
+        for (index, span) in self.redactor.spans(&self.pending, text, self.before).into_iter().enumerate() {
             if span.start >= cut {
                 break;
             }
@@ -877,6 +939,9 @@ impl StreamRedactor {
             cut = cut.max(span.end);
         }
         out.extend_from_slice(&self.pending[last..cut.max(last)]);
+        if let Some(&byte) = self.pending[..cut.max(last)].last() {
+            self.before = Some(byte);
+        }
         self.pending.drain(..cut.max(last));
         self.inside = inside;
         out
@@ -1024,7 +1089,7 @@ mod tests {
     const KEY: &str = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
 
     fn redactor() -> Redactor {
-        Redactor::new(&[variable("AWS", "AWS_SECRET_ACCESS_KEY", KEY), variable("Short", "PIN", "1234567")])
+        Redactor::new(&[variable("AWS", "AWS_SECRET_ACCESS_KEY", KEY), variable("Short", "PIN", "123")])
     }
 
     #[test]
@@ -1061,12 +1126,57 @@ mod tests {
     }
 
     #[test]
-    fn skips_short_values_and_borrows_when_nothing_matches() {
+    fn skips_values_under_4_and_borrows_when_nothing_matches() {
         let redactor = redactor();
-        assert!(matches!(redactor.redact("pin 1234567 stays"), Cow::Borrowed("pin 1234567 stays")));
+        assert!(matches!(redactor.redact("pin 123 stays"), Cow::Borrowed("pin 123 stays")));
         let empty = Redactor::default();
         assert!(empty.is_empty());
         assert!(matches!(empty.redact(KEY), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn a_value_of_4_to_7_is_hidden_only_as_a_word_of_its_own() {
+        let redactor = Redactor::new(&[variable("Bank", "PIN", "123456")]);
+        let hidden = "[secret Bank/PIN]";
+        assert_eq!(redactor.redact("pin=123456"), format!("pin={hidden}"));
+        assert_eq!(redactor.redact("123456"), hidden);
+        assert_eq!(redactor.redact("{\"pin\": \"123456\", \"to\": 'x:123456;'}"), format!("{{\"pin\": \"{hidden}\", \"to\": 'x:{hidden};'}}"));
+        assert_eq!(redactor.redact("?pin=123456&next"), format!("?pin={hidden}&next"));
+        for kept in ["a1234567b", "order 1234567", "https://123456.example.com/123456/x", "v123456", "123456.5"] {
+            assert!(matches!(redactor.redact(kept), Cow::Borrowed(_)), "{kept}");
+        }
+        // Inside a longer match that isn't a word, a word is still found.
+        assert_eq!(redactor.redact("1234567 123456"), format!("1234567 {hidden}"));
+    }
+
+    #[test]
+    fn a_value_of_8_or_more_is_hidden_inside_an_address_too() {
+        let redactor = Redactor::new(&[variable("Site", "PASSWORD", "hunter22")]);
+        assert_eq!(redactor.redact("https://matt:hunter22@example.com/a"), "https://matt:[secret Site/PASSWORD]@example.com/a");
+        assert_eq!(redactor.redact("xhunter22y"), "x[secret Site/PASSWORD]y");
+    }
+
+    #[test]
+    fn a_stream_knows_what_came_before_and_after_a_short_value() {
+        let redactor = Arc::new(Redactor::new(&[variable("Bank", "PIN", "123456")]));
+        let mut stream = StreamRedactor::new(redactor.clone());
+        let shown = [stream.push("order x12"), stream.push("3456 and 1234"), stream.push("567\n"), stream.finish()].concat();
+        assert_eq!(shown, "order x123456 and 1234567\n");
+        let mut stream = StreamRedactor::new(redactor);
+        let shown = [stream.push("pin=12"), stream.push("3456"), stream.push(" ok"), stream.finish()].concat();
+        assert_eq!(shown, "pin=[secret Bank/PIN] ok");
+    }
+
+    #[test]
+    fn a_short_value_before_a_long_one_in_bytes_hides_both() {
+        let redactor = Arc::new(Redactor::new(&[variable("PIN6", "PIN", "123456"), variable("Expand login", "PASSWORD", "Zq7Pw-long")]));
+        let output = b"T2 pin=123456\nT3 Zq7Pw-long\n";
+        let hidden = b"T2 pin=[secret PIN6/PIN]\nT3 [secret Expand login/PASSWORD]\n".to_vec();
+        assert_eq!(redactor.redact_bytes(output).into_owned(), hidden);
+        let mut stream = StreamRedactor::new(redactor);
+        let mut shown = stream.push_bytes(output);
+        shown.extend(stream.finish_bytes());
+        assert_eq!(shown, hidden);
     }
 
     #[test]

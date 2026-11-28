@@ -31,6 +31,7 @@ pub(crate) mod keys;
 pub(crate) mod log;
 pub(crate) mod pace;
 pub(crate) mod reader;
+pub(crate) mod screenshot;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -188,7 +189,7 @@ pub(crate) fn relayed(factory: &Factory, recipient: &str, sender: &str) {
 
 /// What `agent` read from outside since its conversation started afresh,
 /// if it did. An unreadable record counts as read.
-fn outside_read(factory: &Factory, agent: &str) -> Option<String> {
+pub(crate) fn outside_read(factory: &Factory, agent: &str) -> Option<String> {
     use rusqlite::OptionalExtension;
     match factory.store.db().query_row("SELECT what FROM errand_outside_read WHERE agent = ?1", [agent], |row| row.get(0)).optional() {
         Ok(what) => what,
@@ -252,8 +253,8 @@ pub(crate) struct Errands {
     /// Each agent's browser, once it browsed, by agent.
     seats: Mutex<std::collections::HashMap<String, Arc<Seat>>>,
     /// The sessions waiting to try a page again for a check that the
-    /// visitor is a person, by session, and how long they wait.
-    checking: Mutex<std::collections::HashMap<String, checks::Waiting>>,
+    /// visitor is a person, by session and the site that waits, and how
+    /// long they wait.
     check_timing: Mutex<checks::Timing>,
     /// How long a session may go unused before it ends.
     unused_after: Mutex<UnusedAfter>,
@@ -301,6 +302,24 @@ pub(crate) struct Seat {
     /// When its agent last used it: a session unused for
     /// `Errands::unused_after` ends.
     used: Mutex<Instant>,
+    /// A check that the visitor is a person, handed to the person.
+    held: Mutex<Option<Held>>,
+}
+
+/// A check handed to the person: its tab is theirs until it ends, and
+/// meanwhile the agent drives a tab of its own in another window, never on
+/// the check's site.
+pub(crate) struct Held {
+    pub(crate) ask: i64,
+    pub(crate) site: String,
+    /// The check's tab.
+    pub(crate) target: String,
+    /// The agent's page on the check's tab, driven again once it ends.
+    page: Arc<Page>,
+    /// The tab the agent drives meanwhile, closed once it ends.
+    side: String,
+    /// Its card in the conversation, once there: its live view's key.
+    seq: Option<u64>,
 }
 
 impl Seat {
@@ -312,6 +331,7 @@ impl Seat {
             last: Mutex::default(),
             lane: tokio::sync::Mutex::default(),
             used: Mutex::new(Instant::now()),
+            held: Mutex::default(),
         }
     }
 
@@ -380,7 +400,7 @@ async fn close_when_unused(factory: std::sync::Weak<Factory>, seat: std::sync::W
         if *crate::locking::lock(&seat.used) + unused_after > Instant::now() {
             continue;
         }
-        let waits = State::from_wire(session.state) != State::Running || factory.check_waiting(&errand).is_some();
+        let waits = State::from_wire(session.state) != State::Running;
         if waits || seat.lane.try_lock().is_err() {
             drop(seat.using());
             continue;
@@ -402,9 +422,8 @@ struct Pacing {
     errand: String,
     person: pace::Person,
     rng: pace::Rng,
+    /// Where its mouse last was, kept for a new tab too.
     pointer: Option<pace::Point>,
-    /// The page the pointer is on: a new connection puts it nowhere.
-    page: usize,
     /// No change to the page before then: the time to read what the last
     /// read showed.
     ready_at: Instant,
@@ -416,7 +435,7 @@ impl Pacing {
     fn new(errand: &str) -> Pacing {
         let mut rng = pace::Rng::fresh();
         let person = pace::Person::drawn(&mut rng);
-        Pacing { errand: errand.to_owned(), person, rng, pointer: None, page: 0, ready_at: Instant::now(), read: Default::default() }
+        Pacing { errand: errand.to_owned(), person, rng, pointer: None, ready_at: Instant::now(), read: Default::default() }
     }
 }
 
@@ -798,6 +817,10 @@ impl Factory {
         record.ended_ms = now_ms();
         record.end_reason = reason.to_owned();
         let handoff = record.handoff.take();
+        let held = self.errands.seat_for(&record).and_then(|seat| crate::locking::lock(&seat.held).take());
+        if let Some(Held { seq: Some(seq), .. }) = held {
+            crate::browser_host::tab_view::end_check(self, &record.agent_id, seq);
+        }
         let ended = record.clone();
         self.save_errand(record, None);
         withdraw_handoffs(self, &ended);
@@ -846,6 +869,14 @@ impl Factory {
             return Ok(live.page.clone());
         }
         *live = None;
+        // A check's tab isn't the connection's to hand back once it went.
+        let held = crate::locking::lock(&seat.held).take();
+        if let Some(held) = held {
+            crate::extensions::ask::withdraw_for(self, held.ask, "Claktory's browser started again.");
+            if let Some(seq) = held.seq {
+                crate::browser_host::tab_view::end_check(self, &errand.agent_id, seq);
+            }
+        }
         let transport = seat.browser.clone();
         // Starting (for the errand, or driven again after the person's
         // turn): connected once it's driven.
@@ -873,7 +904,7 @@ impl Factory {
         let blocked = Arc::new(Mutex::new(None));
         let hops = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let fetching = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        fence::guard(page.clone(), blocked.clone(), hops.clone(), fetching.clone()).await.map_err(gone)?;
+        fence::guard(page.clone(), blocked.clone(), hops.clone(), fetching.clone(), None).await.map_err(gone)?;
         // Downloads go to the runner's folder, each under its GUID, never a
         // name the page chose (R9); none where it has no folder.
         let behavior = match transport.download_dir() {
@@ -919,15 +950,22 @@ impl Factory {
     /// downloads it made; or the failure, as the extension's are.
     ///
     /// A check that the visitor is a person that doesn't clear by itself
-    /// makes the errand wait and try again later (W5): its steps meanwhile
-    /// are refused.
+    /// is the agent's to get past (`checks`), or to hand to the person.
     pub(crate) async fn errand_step(self: &Arc<Self>, agent: &str, step: Step) -> Result<(String, serde_json::Value), String> {
         let errand = self.driving(agent).map_err(said)?;
-        if let Some(waiting) = self.check_waiting(&errand.id) {
-            return Err(said(("paused".to_owned(), waiting)));
-        }
         let seat = self.seat(agent)?;
         let _using = seat.using();
+        self.settle_held(&seat, agent).await;
+        if let Step::Navigate { address } = &step
+            && let Some(site) = crate::locking::lock(&seat.held).as_ref().map(|held| held.site.clone())
+            && crate::browser_host::tab_view::site_of(address) == site
+        {
+            let person = self.lock().config.person().to_owned();
+            return Err(said((
+                "paused".to_owned(),
+                format!("{person} is getting past a check on {site} in its own tab: go elsewhere meanwhile, or wait for their answer"),
+            )));
+        }
         // One step at a time, the lane before the connection.
         let mut lane = seat.lane.lock().await;
         if lane.as_ref().is_some_and(|pacing| pacing.errand != errand.id) {
@@ -936,6 +974,7 @@ impl Factory {
         let pacing = lane.get_or_insert_with(|| Pacing::new(&errand.id));
         let mut live = seat.live.lock().await;
         let page = self.page(&seat, &mut live, &errand).await.map_err(said)?;
+        Self::close_popups(&page).await;
         let Some((stops, tracker, hops, fetching)) =
             live.as_ref().map(|live| (live.blocked.clone(), live.downloads.clone(), live.hops.clone(), live.fetching.clone()))
         else {
@@ -946,10 +985,6 @@ impl Factory {
         // event.
         drop(live);
         let earlier = crate::locking::lock(&stops).take();
-        if pacing.page != Arc::as_ptr(&page) as usize {
-            pacing.page = Arc::as_ptr(&page) as usize;
-            pacing.pointer = None;
-        }
         let browser = Some(seat.browser.clone());
         let still = {
             let (factory, id, page, person) = (self.clone(), errand.id.clone(), page.clone(), self.lock().config.person().to_owned());
@@ -971,12 +1006,6 @@ impl Factory {
             }
         };
         let mut hand = reader::Hand { person: &pacing.person, rng: &mut pacing.rng, pointer: &mut pacing.pointer, still: &still };
-        // A change to the page waits until what was read last had a
-        // person's time to be read (R11.4).
-        let changes = matches!(step, Step::Scroll { .. } | Step::Act(_) | Step::Dismiss { .. } | Step::Navigate { .. } | Step::Download { .. });
-        if changes {
-            hand.wait_until(pacing.ready_at).await.map_err(said)?;
-        }
         // Agent input (Input.*) reaches Chrome only under a lease (R11.3
         // #5), held for this step alone and for the longest it may take: a
         // fill types at the person's pace.
@@ -984,15 +1013,29 @@ impl Factory {
             Some(browser) => browser.input_lease(until).map_err(|why| ("interrupted".to_owned(), schema::one_line(&why, 200))),
             None => Ok(None),
         };
+        // A change to the page waits until what was read last had a
+        // person's time to be read (R11.4).
+        let changes = matches!(step, Step::Scroll { .. } | Step::Act(_) | Step::Point { .. } | Step::Dismiss { .. } | Step::Navigate { .. } | Step::Download { .. });
+        // A click that would leave for where the fence never goes is
+        // refused at once, with nothing to wait for.
+        let refused_click = match &step {
+            Step::Act(Op::Click { document, target, .. }) => page.fenced_click(document, target).await,
+            _ => None,
+        };
+        if changes && refused_click.is_none() {
+            page.reading_pause(&mut hand, pacing.ready_at, lease).await.map_err(said)?;
+        }
         let until = match &step {
             Step::Act(Op::Fill { text, .. }) => pace::typing_time(&pacing.person, text) * 2 + ONE_ACTION,
+            Step::Point { hold, to, .. } => ONE_ACTION * if to.is_some() { 3 } else { 1 } + std::time::Duration::from_secs_f64(hold.clamp(0.0, screenshot::HOLD_MAX)),
             _ => ONE_ACTION,
         };
         let (action, target) = step.logged();
         // A download is the agent's only when it asked for one: a file, or
         // a click, which may start one (R9).
-        let asks_file = matches!(step, Step::Download { .. } | Step::Act(Op::Click { .. }));
+        let asks_file = matches!(step, Step::Download { .. } | Step::Act(Op::Click { .. }) | Step::Point { .. });
         let before = tracker.count();
+        let mut loads = page.cdp().events();
         // Cleared whenever the step ends, finished or dropped midway (an
         // errand stopped, the connection gone): never left on for the next
         // step (Fugo 41301).
@@ -1001,15 +1044,15 @@ impl Factory {
         // page: never a tab somewhere else the fence didn't see it go (Fugo
         // 38499).
         let elsewhere = match &step {
-            Step::Act(_) | Step::Dismiss { .. } if page.flagged().await => Some(("error_page".to_owned(), FLAGGED.to_owned())),
-            Step::Read { .. } | Step::Scroll { .. } | Step::Act(_) | Step::Dismiss { .. } => match page.elsewhere().await {
+            Step::Act(_) | Step::Point { .. } | Step::Dismiss { .. } if page.flagged().await => Some(("error_page".to_owned(), FLAGGED.to_owned())),
+            Step::Read { .. } | Step::Scroll { .. } | Step::Act(_) | Step::Point { .. } | Step::Dismiss { .. } => match page.elsewhere().await {
                 Ok(None) => None,
                 Ok(Some(origin)) => Some(("off_site".to_owned(), format!("this tab is on {origin}, where Claktory's browser doesn't go: go to another page with browser_open"))),
                 Err(error) => Some(("interrupted".to_owned(), schema::one_line(&error.to_string(), 200))),
             },
             Step::Navigate { .. } | Step::Download { .. } => None,
         };
-        let outcome = match (&step, elsewhere) {
+        let outcome = match (&step, elsewhere.or(refused_click)) {
             (_, Some(refused)) => Err(refused),
             (Step::Read { limit }, None) => page.read(*limit).await.map(Some),
             (Step::Scroll { direction, pages }, None) => match lease(until) {
@@ -1020,6 +1063,13 @@ impl Factory {
                 Some(refused) => Err(refused),
                 None => match lease(until) {
                     Ok(_held) => page.act(&mut hand, op).await.map(Some),
+                    Err(refused) => Err(refused),
+                },
+            },
+            (Step::Point { x, y, hold, to }, None) => match self.while_signing_out(seat.browser.as_ref(), &page).await {
+                Some(refused) => Err(refused),
+                None => match lease(until) {
+                    Ok(_held) => screenshot::click_at(&page, &mut hand, *x, *y, *hold, *to).await.map(|()| Some(Answer::Clicked(schema::Clicked { done: true }))),
                     Err(refused) => Err(refused),
                 },
             },
@@ -1050,15 +1100,25 @@ impl Factory {
             let wait = if matches!(step, Step::Download { .. }) { downloads::BEGINS } else { downloads::AFTER_CLICK };
             let until = Instant::now() + wait;
             tracker.expect(until);
-            began = outcome.is_ok() && tracker.begun_since(before, until).await;
+            began = outcome.is_ok()
+                && match step {
+                    Step::Download { .. } => tracker.begun_since(before, until).await,
+                    // A click that loaded nothing starts no download: only
+                    // one that did is given the time a file takes to begin.
+                    _ => {
+                        tracker.begun_since(before, Instant::now() + downloads::CLICK_LOADS).await
+                            || (started_loading(&mut loads, page.session()) && tracker.begun_since(before, until).await)
+                    }
+                };
         }
+        drop(loads);
         drop(asking);
         // What the fence stopped during this step is said in its answer.
         let during = crate::locking::lock(&stops).take();
         let frame = page.frame().await.ok();
         let error_page = frame.as_ref().is_some_and(|frame| frame.url.starts_with("chrome-error:"));
-        let during_fence = during.is_some();
-        let stopped = during_fence && error_page;
+        let fence_stopped = during.is_some();
+        let stopped = fence_stopped && error_page;
         let blocked = during.or(earlier);
         if let Some(frame) = &frame {
             *crate::locking::lock(&seat.last) = Some((errand.id.clone(), frame.url.clone()));
@@ -1070,13 +1130,19 @@ impl Factory {
         // not a file at all.
         let outcome = match outcome {
             // Blocked, and not by the fence: Chrome's Safe Browsing.
-            Err((blocked, why)) if blocked == fence::BLOCKED => match during_fence {
+            Err((blocked, why)) if blocked == fence::BLOCKED => match fence_stopped {
                 true => Err(("outcome_unknown".to_owned(), why)),
                 false => Err(("unsafe_site".to_owned(), fence::DANGEROUS.to_owned())),
             },
+            Err((aborted, why)) if aborted == fence::ABORTED => match fence_stopped {
+                true => Err(("outcome_unknown".to_owned(), fence::WENT_FENCED.to_owned())),
+                false => Err(("outcome_unknown".to_owned(), why)),
+            },
+            Ok(None) if !began && fence_stopped => Err(("outcome_unknown".to_owned(), "no file came".to_owned())),
             Ok(None) if !began => Err(("not_a_file".to_owned(), "that address opened a page, not a file: read it with browser_read".to_owned())),
             outcome => outcome,
         };
+        Self::close_popups(&page).await;
         // What a dismiss cleared, in Claktory's words: never the page's.
         let dismissed = match &outcome {
             Ok(Some(Answer::Dismissed(dismissed))) => Some(dismissed),
@@ -1120,20 +1186,29 @@ impl Factory {
         let moved = !began
             && !error_page
             && match &outcome {
-                Ok(_) => matches!(step, Step::Read { .. } | Step::Navigate { .. } | Step::Act(Op::Click { .. })),
+                Ok(_) => matches!(step, Step::Read { .. } | Step::Navigate { .. } | Step::Act(Op::Click { .. }) | Step::Point { .. }),
                 Err((error, _)) => error == "not_a_file",
             };
-        if moved && page.check().await.is_some() {
-            let until = Instant::now() + crate::locking::lock(&self.errands.check_timing).clears;
-            while page.check().await.is_some() && Instant::now() < until {
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let mut check_note = String::new();
+        if moved && let Some(who) = page.check().await {
+            if checks::clears_by_itself(&who) {
+                let until = Instant::now() + crate::locking::lock(&self.errands.check_timing).clears;
+                while page.check().await.is_some() && Instant::now() < until {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
             }
             let site = if origin.is_empty() { "The page" } else { origin.as_str() };
-            if page.check().await.is_some() {
-                let address = frame.as_ref().map(|frame| frame.url.clone()).unwrap_or_default();
-                return Ok((self.check_wait(&errand, agent, &origin, &address), json!({})));
+            match page.check().await {
+                Some(who) => {
+                    log::write(
+                        &self.store,
+                        &log::Entry { errand: errand.id.clone(), agent: agent.to_owned(), origin: origin.clone(), action: "Met a check that it's a person".to_owned(), ..Default::default() },
+                    );
+                    let person = self.lock().config.person().to_owned();
+                    check_note = format!("{}\n", checks::found(&origin, &who, &person));
+                }
+                None => return Ok((format!("{site} showed a check that you're a person, which cleared by itself: read the page again."), json!({}))),
             }
-            return Ok((format!("{site} showed a check that you're a person, which cleared by itself: read the page again."), json!({})));
         }
         // The downloads it made, or earlier ones that finished since.
         let until = if began { Instant::now() + downloads::FINISHES } else { Instant::now() };
@@ -1152,7 +1227,7 @@ impl Factory {
         // A step whose page the fence stopped is only that: Chrome's error
         // page in its place says nothing more.
         let page_said = answer.filter(|_| !stopped).map(|answer| schema::fenced(&shown, &answer)).unwrap_or_default();
-        Ok((format!("{notice}{page_said}{files}").trim_start_matches('\n').to_owned(), json!({})))
+        Ok((format!("{check_note}{notice}{page_said}{files}").trim_start_matches('\n').to_owned(), json!({})))
     }
 
     /// browser_upload: attaches `path` (in `agent`'s own folder or its
@@ -1163,11 +1238,9 @@ impl Factory {
     pub(crate) async fn browser_upload(self: &Arc<Self>, agent: &str, document: &str, target: &str, path: &str) -> Result<String, String> {
         let (file, roots) = self.uploadable(agent, path)?;
         let errand = self.driving(agent).map_err(said)?;
-        if let Some(waiting) = self.check_waiting(&errand.id) {
-            return Err(said(("paused".to_owned(), waiting)));
-        }
         let seat = self.seat(agent)?;
         let _using = seat.using();
+        self.settle_held(&seat, agent).await;
         let _lane = seat.lane.lock().await;
         let mut live = seat.live.lock().await;
         let page = self.page(&seat, &mut live, &errand).await.map_err(said)?;
@@ -1224,6 +1297,175 @@ impl Factory {
         Ok(format!("Attached {name} ({}) to the file field. Read the page to see what it did.", downloads::size(bytes)))
     }
 
+    /// While a check request waits (`on`), no download starts in `agent`'s
+    /// browser: the person's live view of the tab can't fetch a file. After,
+    /// downloads go to the runner's folder again, as `page` set them.
+    /// Hands `agent`'s tab with a check to the person (request `ask`): the
+    /// errand drives a new tab in a window of its own meanwhile. The check
+    /// tab's target.
+    pub(crate) async fn hold_check(&self, agent: &str, errand: &v1::Errand, ask: i64, site: &str) -> Result<String, (String, String)> {
+        let gone = |error: cdp::Error| ("interrupted".to_owned(), schema::one_line(&error.to_string(), 200));
+        let seat = self.errands.seat_of(agent).ok_or_else(|| ("no_browser".to_owned(), "open a page with browser_open first".to_owned()))?;
+        let mut live = seat.live.lock().await;
+        let Some(current) = live.as_mut().filter(|live| live.errand == errand.id && !live.page.cdp().closed()) else {
+            return Err(("interrupted".to_owned(), "the browser's connection went".to_owned()));
+        };
+        let check = current.page.clone();
+        let info = check.call("Target.getTargetInfo", json!({})).await.map_err(gone)?;
+        let target = info["targetInfo"]["targetId"].as_str().filter(|id| !id.is_empty() && id.len() <= 128).map(str::to_owned);
+        let Some(target) = target else { return Err(("interrupted".to_owned(), "the check's tab can't be found".to_owned())) };
+        let cdp = check.cdp().clone();
+        let made = cdp.call("Target.createTarget", json!({"url": "about:blank", "newWindow": true}), None).await.map_err(gone)?;
+        let side = made["targetId"].as_str().filter(|id| !id.is_empty() && id.len() <= 128).unwrap_or_default().to_owned();
+        let attached = cdp.call("Target.attachToTarget", json!({"targetId": side, "flatten": true}), None).await.map_err(gone)?;
+        let session = attached["sessionId"].as_str().filter(|id| id.len() <= 128).unwrap_or_default().to_owned();
+        let page = Arc::new(Page::new(cdp.clone(), session));
+        if let Err(error) = fence::guard(page.clone(), current.blocked.clone(), current.hops.clone(), current.fetching.clone(), Some(site.to_owned())).await {
+            let _ = cdp.call("Target.closeTarget", json!({"targetId": side}), None).await;
+            return Err(gone(error));
+        }
+        page.set_two_step(code::two_step_origins(self, &errand.id));
+        seat.browser.on_release(&errand.id, vec![check.session().to_owned(), page.session().to_owned()]);
+        current.page = page;
+        *crate::locking::lock(&seat.held) = Some(Held { ask, site: site.to_owned(), target: target.clone(), page: check, side, seq: None });
+        Ok(target)
+    }
+
+    /// Closes the windows the errand's page opened (a link to a new window,
+    /// a page's window.open): Claktory's fence holds only the page it
+    /// drives, so a window it doesn't would run a site outside the fence.
+    async fn close_popups(page: &Page) {
+        let Ok(info) = page.call("Target.getTargetInfo", json!({})).await else { return };
+        let Some(own) = info["targetInfo"]["targetId"].as_str().filter(|id| !id.is_empty()) else { return };
+        let Ok(targets) = page.cdp().call("Target.getTargets", json!({}), None).await else { return };
+        let pages: Vec<(String, String)> = targets["targetInfos"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|target| target["type"] == "page")
+            .filter_map(|target| Some((target["targetId"].as_str()?.to_owned(), target["openerId"].as_str().unwrap_or_default().to_owned())))
+            .collect();
+        // Its windows' windows too.
+        fn opened_by<'a>(pages: &'a [(String, String)], mut target: &'a str, own: &str) -> bool {
+            for _ in 0..pages.len() {
+                let Some((_, opener)) = pages.iter().find(|(id, _)| id == target) else { return false };
+                if opener == own {
+                    return true;
+                }
+                target = opener;
+            }
+            false
+        }
+        let opened: Vec<String> = pages.iter().filter(|(id, _)| opened_by(&pages, id, own)).map(|(id, _)| id.clone()).collect();
+        for popup in opened {
+            let _ = page.cdp().call("Target.closeTarget", json!({"targetId": popup}), None).await;
+        }
+    }
+
+    /// A held check whose request no longer waits (its agent took it back)
+    /// ends.
+    async fn settle_held(&self, seat: &Seat, agent: &str) {
+        let ask = crate::locking::lock(&seat.held).as_ref().map(|held| held.ask);
+        if ask.is_some_and(|ask| !ask_pending(self, ask)) {
+            self.end_held_check(agent).await;
+        }
+    }
+
+    /// The check `agent` handed to the person ends, if one was held: the
+    /// agent drives the check's tab again and its own tab closes. The
+    /// request it was, and its site.
+    pub(crate) async fn end_held_check(&self, agent: &str) -> Option<(i64, String)> {
+        let seat = self.errands.seat_of(agent)?;
+        let held = crate::locking::lock(&seat.held).take()?;
+        if let Some(seq) = held.seq {
+            crate::browser_host::tab_view::end_check(self, agent, seq);
+        }
+        let mut live = seat.live.lock().await;
+        if let Some(current) = live.as_mut()
+            && Arc::ptr_eq(current.page.cdp(), held.page.cdp())
+            && !held.page.cdp().closed()
+        {
+            let cdp = held.page.cdp().clone();
+            let _ = cdp.call("Target.closeTarget", json!({"targetId": held.side}), None).await;
+            let _ = cdp.call("Target.activateTarget", json!({"targetId": held.target}), None).await;
+            seat.browser.on_release(&current.errand, vec![held.page.session().to_owned()]);
+            current.page = held.page.clone();
+        }
+        drop(live);
+        self.downloads_while_checked(agent, false).await;
+        Some((held.ask, held.site))
+    }
+
+    /// The held check of request `ask` has its card at `seq`; false if
+    /// it's no longer held.
+    pub(crate) fn held_check_seq(&self, agent: &str, ask: i64, seq: u64) -> bool {
+        let Some(seat) = self.errands.seat_of(agent) else { return false };
+        let mut held = crate::locking::lock(&seat.held);
+        match held.as_mut().filter(|held| held.ask == ask) {
+            Some(held) => {
+                held.seq = Some(seq);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The check `agent` handed to the person, if one is held: its request
+    /// and its tab.
+    pub(crate) fn held_check(&self, agent: &str) -> Option<(i64, String)> {
+        let seat = self.errands.seat_of(agent)?;
+        crate::locking::lock(&seat.held).as_ref().map(|held| (held.ask, held.target.clone()))
+    }
+
+    pub(crate) async fn downloads_while_checked(&self, agent: &str, on: bool) {
+        let Some(seat) = self.errands.seat_of(agent) else { return };
+        let page = seat.live.lock().await.as_ref().map(|live| live.page.clone()).filter(|page| !page.cdp().closed());
+        let Some(page) = page else { return };
+        let behavior = match seat.browser.download_dir().filter(|_| !on) {
+            Some(folder) => json!({"behavior": "allowAndName", "downloadPath": folder, "eventsEnabled": true}),
+            None => json!({"behavior": "deny"}),
+        };
+        if let Err(error) = page.cdp().call("Browser.setDownloadBehavior", behavior, None).await {
+            tracing::warn!(%error, "the browser's downloads weren't set for a check request");
+        }
+    }
+
+    /// browser_screenshot: the agent's own tab as a person sees it, for its
+    /// model alone (`screenshot::take`): the picture, its size, and where.
+    pub(crate) async fn browser_screenshot(self: &Arc<Self>, agent: &str) -> Result<(screenshot::Picture, String), String> {
+        let errand = self.driving(agent).map_err(said)?;
+        let seat = self.seat(agent)?;
+        let _using = seat.using();
+        self.settle_held(&seat, agent).await;
+        let _lane = seat.lane.lock().await;
+        let mut live = seat.live.lock().await;
+        let page = self.page(&seat, &mut live, &errand).await.map_err(said)?;
+        drop(live);
+        let frame = page.frame().await.map_err(|error| said(("interrupted".to_owned(), schema::one_line(&error.to_string(), 200))))?;
+        let url = url::Url::parse(&frame.url).ok();
+        let origin = url.as_ref().map(|url| url.origin().ascii_serialization()).filter(|origin| origin != "null").unwrap_or_default();
+        let path = url.as_ref().map(fence::path_of).unwrap_or_default();
+        let picture = screenshot::take(&page).await;
+        log::write(
+            &self.store,
+            &log::Entry {
+                errand: errand.id.clone(),
+                agent: agent.to_owned(),
+                origin: origin.clone(),
+                path: path.clone(),
+                action: "Took a screenshot".to_owned(),
+                outcome: picture.as_ref().err().map(|(error, why)| format!("{error}: {why}")).unwrap_or_default(),
+                ..Default::default()
+            },
+        );
+        let picture = picture.map_err(said)?;
+        if !origin.is_empty() {
+            read_outside(self, agent, "a web page in Claktory's browser");
+        }
+        let at = if origin.is_empty() { frame.url.chars().take(100).collect() } else { format!("{origin}{path}") };
+        Ok((picture, at))
+    }
+
     /// The file `path` names, if `agent` may upload it: a file (symlinks
     /// followed) inside its own folder or its uploads folder, at most
     /// `UPLOAD_MAX`.
@@ -1263,11 +1505,9 @@ impl Factory {
         reason: &str,
     ) -> Result<(String, serde_json::Value), String> {
         let errand = self.driving(agent).map_err(said)?;
-        if let Some(waiting) = self.check_waiting(&errand.id) {
-            return Err(said(("paused".to_owned(), waiting)));
-        }
         let seat = self.seat(agent)?;
         let _using = seat.using();
+        self.settle_held(&seat, agent).await;
         if seat.browser.lists_missing() {
             return Err(said(("paused".to_owned(), LISTS_MISSING.to_owned())));
         }
@@ -1279,10 +1519,6 @@ impl Factory {
         let mut live = seat.live.lock().await;
         let page = self.page(&seat, &mut live, &errand).await.map_err(said)?;
         drop(live);
-        if pacing.page != Arc::as_ptr(&page) as usize {
-            pacing.page = Arc::as_ptr(&page) as usize;
-            pacing.pointer = None;
-        }
         if page.flagged().await {
             return Err(said(("error_page".to_owned(), on_error_page("sign in there"))));
         }
@@ -2051,6 +2287,38 @@ pub async fn show_for_test(factory: &Factory, html: &str) {
     page.call("Page.setDocumentContent", json!({"frameId": frame.id, "html": html})).await.expect("its content");
 }
 
+/// Tests: the tab of `agent`'s check that a live view may show, once its
+/// card is in the conversation.
+#[doc(hidden)]
+pub fn check_view_for_test(factory: &Factory, agent: &str) -> Option<String> {
+    crate::browser_host::tab_view::check_tab(factory, agent)
+}
+
+/// Tests: the tab of `agent`'s check left its site, as its live view
+/// tells.
+#[doc(hidden)]
+pub async fn check_left_for_test(factory: &Arc<Factory>, agent: &str) {
+    let ask = factory.held_check(agent).map(|(ask, _)| ask).expect("a check handed over");
+    handoff::check_left(factory.clone(), agent.to_owned(), ask).await;
+}
+
+/// Tests: how many tabs the browser has.
+#[doc(hidden)]
+pub async fn page_tabs_for_test(factory: &Factory) -> usize {
+    let page = any_live_page(factory).await.expect("a session's page");
+    let targets = page.cdp().call("Target.getTargets", json!({}), None).await.expect("its targets");
+    targets["targetInfos"].as_array().into_iter().flatten().filter(|info| info["type"] == "page").count()
+}
+
+/// Tests: the tab of the check `agent` handed to the person shows `html`.
+#[doc(hidden)]
+pub async fn show_held_for_test(factory: &Factory, agent: &str, html: &str) {
+    let seat = factory.errands.seat_of(agent).expect("a browser");
+    let page = crate::locking::lock(&seat.held).as_ref().map(|held| held.page.clone()).expect("a check handed over");
+    let frame = page.frame().await.expect("its frame");
+    page.call("Page.setDocumentContent", json!({"frameId": frame.id, "html": html})).await.expect("its content");
+}
+
 /// Tests: the sweep of recovery codes whose card no longer waits.
 #[doc(hidden)]
 pub fn sweep_codes_for_test(factory: &Factory) {
@@ -2123,6 +2391,11 @@ pub fn code_cards_anywhere_for_test(factory: &Arc<Factory>) {
 /// (Fugo 50825, Abbacchio 1719): once the errand is over, approving one
 /// does nothing. A recovery-codes card stays: its codes wait for the
 /// person's I saved them, whatever became of the errand.
+/// Whether request `id` still waits for the person.
+fn ask_pending(factory: &Factory, id: i64) -> bool {
+    factory.store.db().query_row("SELECT 1 FROM asks WHERE id = ?1 AND state = 'pending'", [id], |_| Ok(())).is_ok()
+}
+
 fn withdraw_handoffs(factory: &Factory, errand: &v1::Errand) {
     let pending: Vec<(i64, String)> = crate::store::query(
         &factory.store.db(),
@@ -2218,6 +2491,30 @@ pub(crate) fn load_agents(_store: &crate::store::Store) -> rusqlite::Result<std:
     Ok(std::collections::BTreeSet::new())
 }
 
+/// Whether `events`, since they were subscribed, show the page loading
+/// something: a document requested in one of its frames, a navigation, a
+/// new tab or window, a download. Events missed count as loading.
+fn started_loading(events: &mut tokio::sync::broadcast::Receiver<cdp::Event>, session: &str) -> bool {
+    use tokio::sync::broadcast::error::TryRecvError;
+    loop {
+        let event = match events.try_recv() {
+            Ok(event) => event,
+            Err(TryRecvError::Lagged(_)) => return true,
+            Err(TryRecvError::Empty | TryRecvError::Closed) => return false,
+        };
+        let on_page = event.session.as_deref() == Some(session);
+        let loads = match event.method.as_str() {
+            "Fetch.requestPaused" => on_page && event.params.get("responseStatusCode").is_none() && event.params.get("responseErrorReason").is_none(),
+            "Page.frameRequestedNavigation" | "Page.frameStartedLoading" | "Page.downloadWillBegin" => on_page,
+            "Browser.downloadWillBegin" | "Target.targetCreated" => true,
+            _ => false,
+        };
+        if loads {
+            return true;
+        }
+    }
+}
+
 /// A step that may bring a file (R9): the fence lets the page's redirects
 /// hop to a file, and with browser_download a PDF comes as
 /// one, until it's dropped, however the step ends; then the tracker expects
@@ -2260,6 +2557,10 @@ pub(crate) enum Step {
     Navigate { address: String },
     /// browser_download: the file at `address`.
     Download { address: String },
+    /// browser_act's click_at: a point of the viewport, inside a check's
+    /// frame, held `hold` seconds (0: a click).
+    /// Given `to`, a drag there instead.
+    Point { x: f64, y: f64, hold: f64, to: Option<(f64, f64)> },
 }
 
 impl Step {
@@ -2277,6 +2578,9 @@ impl Step {
                 (format!("Typed {count} character{}", if count == 1 { "" } else { "s" }), None)
             }
             Step::Act(_) => ("Acted".to_owned(), None),
+            Step::Point { to: Some(_), .. } => ("Dragged in a frame".to_owned(), None),
+            Step::Point { hold, .. } if *hold > 0.0 => ("Pressed and held a point in a frame".to_owned(), None),
+            Step::Point { .. } => ("Clicked a point in a frame".to_owned(), None),
             Step::Dismiss { .. } => ("Cleared what covered the page".to_owned(), None),
             Step::Navigate { address } => {
                 let to = url::Url::parse(address).map(|url| format!("{}{}", url.origin().ascii_serialization(), fence::path_of(&url)));
@@ -2298,6 +2602,28 @@ pub(crate) fn said((error, why): (String, String)) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_click_counts_as_loading_only_when_the_page_requested_something() {
+        let event = |method: &str, session: &str, params: serde_json::Value| cdp::Event { method: method.to_owned(), params, session: Some(session.to_owned()) };
+        let seen = |events: Vec<cdp::Event>| {
+            let (send, mut receive) = tokio::sync::broadcast::channel(4);
+            for event in events {
+                send.send(event).unwrap();
+            }
+            started_loading(&mut receive, "page")
+        };
+        assert!(!seen(vec![]), "nothing happened");
+        assert!(!seen(vec![event("Page.lifecycleEvent", "page", json!({})), event("Runtime.consoleAPICalled", "page", json!({}))]), "the page only ran");
+        assert!(!seen(vec![event("Fetch.requestPaused", "page", json!({"requestId": "1", "responseStatusCode": 200}))]), "a response to an earlier request");
+        assert!(!seen(vec![event("Page.frameRequestedNavigation", "another tab", json!({}))]), "another tab's navigation");
+        assert!(seen(vec![event("Fetch.requestPaused", "page", json!({"requestId": "1", "frameId": "inner"}))]), "a document requested in a frame");
+        assert!(seen(vec![event("Page.frameRequestedNavigation", "page", json!({}))]), "a navigation");
+        assert!(seen(vec![event("Target.targetCreated", "", json!({}))]), "a new window");
+        assert!(seen(vec![event("Browser.downloadWillBegin", "", json!({}))]), "a download");
+        let many: Vec<cdp::Event> = (0..6).map(|_| event("Runtime.consoleAPICalled", "page", json!({}))).collect();
+        assert!(seen(many), "events missed count as loading");
+    }
 
     #[test]
     fn states_read_back_as_written() {

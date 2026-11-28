@@ -78,6 +78,16 @@ never change what a field means.
   offline with its pinned service key, that the account is its own and that
   `device_key` is the key the device connected with, with 60 s of leeway on
   the times (`protocol::verify_device_assertion`).
+- **A Claktory's word for a device** (#546): `b64(payload) "." b64(sig)`,
+  where payload is the JSON `{"v": 1, "account_id", "claktory_id",
+  "account_key", "request_id", "iat"}` and sig the Claktory's backend key's
+  signature over `"claktory allowed device v1\n" ‖ payload`. It says that
+  the device with `account_key` is allowed on that Claktory now, for the
+  approval of `request_id` only. A Claktory makes one only for a paired,
+  allowed device that asks over its own tunnel connection (a Person
+  connection, never a Tool's), and only for the account key that device
+  proved on that connection with its own device assertion. It's good for
+  120 s from `iat` (the service's clock, with the same 120 s either way).
 - **The service share** `S` (32 bytes) = HMAC-SHA256(K_share,
   `"claktory share v1" 0x00 claktory_id 0x00 u64be(epoch)`). Never stored;
   only ever sent sealed.
@@ -206,6 +216,10 @@ Neither is a relay credential (Fugo 34608):
   the same key, its verify signed as above; any other retired key is
   still `409 backend_key_retired`, and with any email but a review one so
   is the box's;
+  nor does it join with no code
+  (#546): `POST /v1/claktories/authorize/start` for a review email from any
+  other key is `403 review_account`, and the poll checks it again before it
+  registers;
 - the web pages don't remove a review account's Claktories: `/account`
   shows no Remove, and `/account/remove` answers `403` with a page saying
   so. Delete account works as for any account (Apple's review needs it):
@@ -318,12 +332,29 @@ At start, then hourly while running. Everything but `version` and
     days ago, a malformed id, an hour outside it, more `agent_minutes` than
     `agents_working` × 60, a value no Claktory could have) is left out and
     counted in `periods_ignored`; the rest are recorded. Don't send it again.
+- `removed_since` (E11-8): the `removed_cursor` of the last answer, as it
+  was, or `""` for none yet. The answer then lists the account's devices
+  removed since (lost, stolen, given away), so the Claktory unpairs any of
+  its paired devices with one of those keys, including those it couldn't
+  hear of while it was off. Left out, the answer leaves them out.
 
 `200 {"relays": ["https://relay-eu.claktory.com"], "server_time": 1763647200, "epoch": 4, "periods_recorded": 1, "periods_ignored": 0, "recovery_key": {…} | null}`
 (relays empty until Claktory runs its own; `epoch` is the current one, so a
 backend notices a new one it missed; `periods_recorded` counts the periods
 new to the service; `recovery_key` is the account's recovery key, below, or
-`null` while it has none: newer, a client reads its absence as none). Updates the Claktory's last contact, version,
+`null` while it has none: newer, a client reads its absence as none). Also, when there's something to say:
+- `authorizations_waiting`: `["<id>"]`, the account's computer asking to
+  join, waiting for the person's approval (#546), by id only, as
+  `GET /v1/claktories/authorizations` gives it.
+- `removed_device_keys` and `removed_cursor`, for a check-in that sent
+  `removed_since`: the account keys of the account's devices removed since
+  that cursor (all of them for `""`, a cursor it can't read, or one from
+  another account, as after a move), keys only, oldest first; and the
+  cursor to send next time, an opaque word. Removals in the few minutes
+  before the cursor come again, so one may be listed twice: unpairing is
+  the same either way.
+
+Updates the Claktory's last contact, version,
 platform, counts, setup and devices. The service also notes where the request came from:
 country, region and city, from its IP with an offline GeoIP file, keeping
 only the place, never the IP.
@@ -523,7 +554,9 @@ Signed by a signed-in Claktory, unsigned by one that isn't.
 
 `200 {"keep_days": 30}`. The service keeps exactly those fields and the hour
 the report arrived in (never the second), for 30 days (the hourly purge), for Claktory's team to read
-on the server; no route serves them. Nothing of who sent it is kept with it:
+on the server with `claktory-account ai-reports --db FILE` (read only;
+`--after ID` and `--most N` page through them oldest first, `--format json`
+for a program); no route serves them. Nothing of who sent it is kept with it:
 not the address, account, Claktory or key, signed or not. Who sent it
 counts only toward the limits, by a hash, which the purge forgets after
 two days. It sends no email and reaches no one.
@@ -641,11 +674,14 @@ key, or the caller's own: that's sign-out), `401 unauthorized`, `429
 rate_limited` (10 an hour per device).
 
 #### `GET /v1/claktories` (device signed)
-`200 {"claktories": [{"claktory_id", "name", "color", "machine", "platform", "version", "endpoint_id", "relays": [], "last_contact_ms"}]}`:
+`200 {"claktories": [{"claktory_id", "name", "color", "machine", "platform", "version", "endpoint_id", "relays": [], "last_contact_ms", "fingerprint"}]}`:
 the account's Claktories that aren't removed, newest contact first. `name`
 and `color` are the Claktory's own (until it sends them, its computer's name
 and ""); `machine` is its computer's name; `endpoint_id` and `relays` are what
 its pairing codes give (`e=`, `r=`), empty if it never registered.
+`fingerprint` is `hex(sha256(backend key))[..16]`, as a request to join
+showed it: a device that approved a computer joining connects only to the
+Claktory with that request's fingerprint.
 
 #### `POST /v1/devices/assertion` (device signed)
 `{"device_key": "<64 hex>"}` → `200 {"assertion", "expires_in": 3600}`, for
@@ -655,6 +691,171 @@ for a transfer, such as a DM history transfer's (a fresh one each time).
 60 an hour per account key. Its `device_key` goes on the
 relay allowlist for a day after its last assertion. Errors: `400
 invalid_request`, `401 unauthorized`, `429 rate_limited`.
+
+### Adding a computer with the person's approval (#546)
+
+A computer an agent sets up (a server) signs in to the account with no
+code anywhere: it asks, the service shows the person what it saw on their
+devices, and the person approves it on one of them. Once the account has a
+device that may approve (below), an emailed code alone no longer signs in a
+further Claktory either: its verify waits for the same approval (path 4b).
+
+**Who may approve**: a device signed in to the account by email itself (never
+one a Claktory vouched for, `/v1/devices/vouch`) that is, today, an allowed
+device of one of the account's Claktories (its word, above, sent with the
+approval); and, once the account has a DM identity set up before the request
+by a device that wasn't vouched for, a device on the account's current
+signed DM device list too. Approving takes the device owner's own
+authentication on the device (Face ID, Touch ID, the passcode or the login
+password), never a notification, a link or the Claktory: the app's part.
+
+**One at a time**: an account has at most one request waiting. Another
+start (or a verify that waits, below) while one waits cancels both, and
+both say so: two computers asked at once, so neither was added; start again.
+
+#### `POST /v1/claktories/authorize/start` (signed by the key it names, without a token)
+```json
+{"email": "…", "claktory_id": "…", "backend_key": b64, "name": "hetzner-box", "version": "v0.1.21", "platform": "linux-x86_64"}
+```
+with `Claktory-Time` and `Claktory-Signature` by `backend_key` (no
+`Authorization`). Asks the account's devices to approve this computer for 10
+minutes. Emails the person a heads-up with no code and no link that
+approves anything. `200 {"request_id", "expires_in": 600, "interval": 5}`.
+Errors: `400 invalid_email`, `400 invalid_request`, `401` (not signed by
+`backend_key`), `403 review_account` (a review email, from a key other
+than the review box's: nothing waits), `409 backend_key_retired`, `409
+no_device_to_approve` (the
+account has no Claktory signed in or no device that may approve: sign in on
+your own computer with the emailed code instead), `409 two_at_once` (another
+was waiting: both are cancelled), `429 rate_limited` (5 an hour per email,
+10 an hour per IP), `503 email_unavailable`.
+
+#### `POST /v1/claktories/authorize/poll` (signed by the start's key, without a token)
+`{"request_id", "eph_pub"}`, at most every `interval` seconds. While it
+waits: `409 authorization_pending`. Approved: what sign-in verify answers
+(`account_id`, `email`, `claktory_id`, `machine_token`, `epoch`,
+`sealed_share`, `service_key`), plus `first_device`: the account key of the
+device that approved, the only one the new Claktory lets in at once (for 30
+minutes; not the generic first-device window). Spent then: polled again,
+`410 expired_token`. Errors: `401` (another key), `403 access_denied` (the
+person declined), `409 two_at_once` (cancelled: another computer asked at
+the same time), `410 expired_token` (10 minutes passed, or spent), and
+sign-in verify's `409 claktory_taken`, `403 too_many_claktories`, `409
+backend_key_retired`, and `403 review_account` (a review email's request
+under a key other than the review box's: ended, never registered).
+
+#### Email-code sign-in once the account has a device (path 4b)
+`POST /v1/sign-in/verify` with a right code, for an account that has a
+Claktory signed in and a device that may approve, answers `409
+authorization_pending` with `request_id`, `expires_in` and `interval`: the
+code is spent, the request now waits for the person's approval as a
+start's does, and the Claktory polls as above. The account's first
+Claktory, and a Claktory signing in again to its account with the backend
+key it has there now (proven as for a move), are signed in by the code
+alone.
+
+#### `GET /v1/devices/authorizations` (device signed)
+`200 {"authorizations": [{"id", "kind": "claktory", "state": "waiting" | "two_at_once" | "approved" | "declined", "started", "expires_in", "seen": {"ip", "network", "place"}, "says": {"name", "platform", "version"}, "fingerprint", "may_approve", "answered_by"?, "answered_at"?}]}`:
+the account's request waiting, if any, and those cancelled or answered in
+the last 10 minutes (so a card can say why it ended, on every device). One
+answered says `"approved"` (whether or not the computer has polled since)
+or `"declined"`, with `answered_by`, the name of the device that answered,
+cleaned as `says.name` is ("" when that device is no longer on the
+account), and `answered_at`, when (unix seconds). It carries nothing to act
+on: `fingerprint` is "", `may_approve` false and `expires_in` 0, and
+deciding it again is `410 expired_token`. `seen` is what the service saw, to lead
+the card: the address it came from, its network's owner (`network`, such as
+"Hetzner Online GmbH"; "" when unknown) and its place ("" when unknown).
+`says` is what the computer calls itself, cleaned (printable, at most 40
+characters), to show after, labelled as its own words. `fingerprint` is
+`hex(sha256(backend key))[..16]`, shown small, and sent back with the
+decision. `may_approve` is whether this device signed in by email itself;
+the Claktory's word and the DM list are checked when it approves. `kind`
+is `"claktory"`: a move's destination is never listed here (see Moves
+with an account).
+
+#### `POST /v1/devices/authorizations/<id>` (device signed)
+`{"approve": true, "fingerprint", "allowed": "<a Claktory's word>"}`, or
+`{"approve": false, "fingerprint"}` to decline (any device of the account
+may decline). `200 {}`. Errors: `401`, `403 not_allowed_to_approve`
+(vouched for, no Claktory's word or a wrong one, or not on the DM list),
+`404 not_found` (not this account's), `409 fingerprint_changed` (not the
+computer the card showed), `410 expired_token` (no longer waiting), `503
+unavailable` (the DM list couldn't be read: nothing was decided).
+
+#### `GET /v1/claktories/authorizations` (signed)
+`200 {"waiting": ["<id>"]}`: the account's request waiting, by id only, for
+a Claktory to ring the bell on the person's devices. It never carries the
+request or its answer. The check-in's answer carries the same list, as
+`authorizations_waiting`.
+
+### Moves with an account (#546 moves)
+
+A move to another computer, with the account, needs no code and no digits:
+`factoryd receive --email` asks the service to receive one of the
+account's Claktories, the person approves it on a device connected to the
+Claktory that moves, that Claktory (the source) takes the move, and the
+destination lets only the source's endpoint dial in. The source moves only
+on the device's own signed approval, checked against its own devices,
+never on the service's word (Giorno 49219, Fugo 49225).
+
+**Never pushed** (Fugo 49225 A): a move request is in no card, bell or
+notification: not in `GET /v1/devices/authorizations`, nor in a
+Claktory's `authorizations_waiting`. The person finds it deliberately, in
+Settings → Move on a device connected to the source (`GET
+/v1/devices/moves`). The heads-up email says "move" plainly.
+
+**Start**: `POST /v1/claktories/authorize/start` as above, with `"kind":
+"move"`, `"claktory_id": ""`, `backend_key` the destination's receive key
+(it signs the polls), and `"receive": {"endpoint": "<64 hex, the same
+key>", "relays": ["https://…"]}`. No secret. A move shares the account's
+one request waiting with joins (a join and a move at once end both), and
+its limits, `no_device_to_approve` and review-email rules. Errors also:
+`400 invalid_request` when `receive.endpoint` isn't the receive key.
+
+#### `GET /v1/devices/moves` (device signed)
+`200 {"moves": [<as GET /v1/devices/authorizations' entries, "kind": "move", plus "endpoint": "<64 hex>">]}`:
+the account's move waiting, if any (and one cancelled in the last 10
+minutes). `endpoint` is the destination's receive key, for the device's
+approval to name.
+
+#### Approving a move: `POST /v1/devices/authorizations/<id>`
+As for a join, with `allowed` the word of the Claktory that moves (the
+source is the Claktory whose word it is), and `move_approval`, the
+device's own approval, signed with its account key:
+`b64(payload) "." b64(sig)`, payload
+`{"v": 1, "kind": "move", "request_id", "account_id", "source_claktory_id", "endpoint", "fingerprint", "device_key": b64, "iat", "exp"}`,
+sig over `"claktory move approval v1\n" ‖ payload`
+(`protocol::sign_move_approval`, `verify_move_approval`). The service
+checks that it verifies, that `device_key` is the approving device's,
+`request_id`, `account_id`, `endpoint` and `fingerprint` are this
+request's, `source_claktory_id` is the word's Claktory, and `exp` is no
+later than the request's end; then keeps it as it came. Errors also: `403
+not_allowed_to_approve` (no approval, or one that doesn't check).
+
+#### `GET /v1/claktories/moves` (signed)
+`200 {"moves": [{"request_id", "receive": {"endpoint", "relays"}, "seen", "says", "fingerprint", "approval", "expires_in"}]}`:
+the approved moves whose source is this Claktory, not yet taken. Fetching
+spends nothing. `approval` is the device's, untouched: the source checks
+it (`verify_move_approval`) and moves only if `device_key` is a device of
+its own, paired, confirmed and not removed, and `source_claktory_id`,
+`endpoint` and `request_id` are its own and the move's. The check-in's
+answer carries their ids as `moves_waiting`.
+
+#### `POST /v1/claktories/moves/<id>/take` (signed)
+`{"endpoint": "<64 hex>"}`: the endpoint the source dials from, the only
+one the destination lets in. `200 {}`, once, within the request's 10
+minutes. Errors: `400 invalid_request`, `404 not_found` (not this
+Claktory's move), `409 move_taken` (taken already, this endpoint or
+another), `410 expired_token`.
+
+#### The destination's poll
+`POST /v1/claktories/authorize/poll` as above: `409
+authorization_pending` until the source has taken the move, then `200
+{"kind": "move", "source_key": "<64 hex>", "source_claktory_id", "approver": b64}`,
+spent then (`410 expired_token` after). Nothing signs in: the moved
+Claktory keeps its source's registration. `access_denied`, `two_at_once`
+and `expired_token` as for a join.
 
 ### `GET /v1/relay/allowlist?since=<version>` (relays only)
 `Authorization: Bearer <relay bearer>` →

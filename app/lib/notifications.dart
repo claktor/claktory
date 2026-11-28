@@ -12,7 +12,7 @@ import 'protocol/factory/v1/factory.pb.dart';
 import 'rail.dart' show Claktories, Claktory;
 import 'scope.dart' show AppPage;
 
-/// Notifications on a Mac (#273 phase A): what each Claktory's backend
+/// Notifications on a Mac: what each Claktory's backend
 /// says the person should hear of (Notify) shows as the system's
 /// notification while the person isn't using that Claktory here, and a
 /// click on one brings the window forward at what it's about. Every rule
@@ -82,11 +82,11 @@ class NotificationTarget {
   final int seq;
 
   /// A device waiting to be allowed (Notify.device_id): Needs you, where
-  /// it's allowed, never the notification itself (#352 P4).
+  /// it's allowed, never the notification itself.
   final String deviceId;
 
   /// "needs_you" for a Needs-you notification, else empty: one about no
-  /// agent, pipe, chat or device (what came during quiet hours, #364 O3)
+  /// agent, pipe, chat or device (what came during quiet hours)
   /// opens Needs you.
   final String kind;
 
@@ -171,7 +171,7 @@ class ClaktoryNotifications {
   final SystemNotifications system;
 
   /// Whether the app is laid out as on a phone now: there a card's
-  /// notification opens Needs you at it (#514 §7.2). Null: never.
+  /// notification opens Needs you at it. Null: never.
   final bool Function()? phone;
 
   /// Whether Needs you is focus mode here ([needsYouIsFocusMode]): not as
@@ -270,7 +270,7 @@ class ClaktoryNotifications {
       needsYou(NeedsYouItem.device(target.deviceId).key);
       return;
     }
-    // An alert waiting in Needs you: there, at it (§3.9). Read already
+    // An alert waiting in Needs you: there, at it. Read already
     // (on another device, say), its agent at it instead.
     if (target.alertId.isNotEmpty &&
         backend.workspace.workspace.alerts.any(
@@ -303,7 +303,7 @@ class ClaktoryNotifications {
       return;
     }
     // A card that needs you, on a phone: Needs you at that card, over what
-    // showed, so Back goes back there (#514 §7.2). A Mac opens the
+    // showed, so Back goes back there. A Mac opens the
     // conversation at it: focus mode is a sitting the person chooses.
     final card = target.kind != 'needs_you' || target.seq <= 0
         ? null

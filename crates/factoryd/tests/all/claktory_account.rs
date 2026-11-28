@@ -526,32 +526,27 @@ async fn an_unreadable_sign_in_is_set_aside_and_signing_in_again_brings_it_back(
     assert!(std::fs::read_to_string(&path).expect("account.json").contains("matt@example.com"));
 }
 
-/// Onboarding slice 3: an agent signs a Claktory in from a shell, with the
-/// code the person reads in their email.
+/// Onboarding slice 3, as the app's socket left it: signing a Claktory in is the
+/// person's, so an agent's command is refused (no code is even asked for)
+/// and can only read how it stands.
 #[tokio::test]
-async fn the_command_line_signs_in_with_the_emailed_code() {
+async fn the_command_line_reads_the_account_and_never_signs_it_in() {
     use factoryd::cli::{Exit, Flags, run};
     let dir = temp_dir();
     let service = Instance::start(&dir).await;
     let (addr, _factory) = open(&dir, &service.url).await;
     let instance = factoryd::home::Instance { home: crate::common::home(&dir), addr };
-    let command = |line: String| {
+    let command = |line: &str| {
         let args: Vec<String> = line.split_whitespace().map(str::to_owned).collect();
         Flags::parse(&args).expect("a command")
     };
-    let asked = run(&instance, &command("account sign-in --email matt@example.com --json".into()), String::new).await;
-    assert_eq!(asked.exit, Exit::NeedsHuman, "{asked:?}");
-    assert_eq!((asked.json["state"].as_str(), asked.json["sent_to"].as_str()), (Some("awaiting_code"), Some("m…@example.com")));
-    assert_eq!(asked.json["sent_from"], "code@auth.claktory.com");
-    assert!(asked.json["expires_in"].as_i64().is_some_and(|left| left > 0), "{}", asked.json);
-    let wrong = run(&instance, &command("account verify --code 000000 --json".into()), String::new).await;
-    assert_eq!((wrong.exit, wrong.json["error"].as_str()), (Exit::Refused, Some("wrong_code")), "{wrong:?}");
-    let code = service.last_code("matt@example.com");
-    let verified = run(&instance, &command(format!("account verify --code {code} --json")), String::new).await;
-    assert_eq!(verified.exit, Exit::Ok, "{verified:?}");
-    assert_eq!((verified.json["state"].as_str(), verified.json["email"].as_str()), (Some("signed_in"), Some("matt@example.com")));
-    let status = run(&instance, &command("account status --json".into()), String::new).await;
-    assert_eq!(status.json["account"]["state"], "signed_in");
+    for line in ["account sign-in --email matt@example.com --json", "account verify --code 000000 --json"] {
+        let refused = run(&instance, &command(line), String::new).await;
+        assert_eq!((refused.exit, refused.json["error"].as_str()), (Exit::Refused, Some("person_only")), "{line}: {refused:?}");
+    }
+    assert!(service.mail.sent().is_empty(), "no code was sent");
+    let status = run(&instance, &command("account status --json"), String::new).await;
+    assert_eq!(status.json["account"]["state"], "signed_out");
 }
 
 /// Signing in is on by default, and every Claktory must sign in (#195): a
@@ -811,6 +806,12 @@ async fn a_claktory_that_moved_here_changes_its_credentials_once_and_its_vault_s
         let (mut client, _, _) = Client::connect(addr).await;
         let workspace = sign_in(&mut client, &instance, "matt@example.com").await;
         assert!(unlocked(&workspace));
+        // What its first check-in brings is kept before it stops.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !account_saved_checked_in(&dir) {
+            assert!(std::time::Instant::now() < deadline, "checked in");
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
         // It serves on in this process: its account, still the one from
         // before the move, mustn't write over the next one's.
         factoryd::stop_account_for_tests(&factory);
@@ -1053,21 +1054,21 @@ async fn the_accounts_recovery_key_is_used_only_on_the_persons_choice_from_their
     let hello = v1::Hello {
         protocol_version: factory_protocol::PROTOCOL_VERSION,
         client_version: "factoryd-cli 0.1.0".into(),
-        token: crate::common::local_token(addr),
+        token: crate::common::tool_token(addr),
         ..Default::default()
     };
     cli.send(v1::ClientMessage { id: 1, body: Some(Request::Hello(hello)) }).await;
     cli.welcomed().await;
     let reply = cli.request(Request::UseRecoveryKey(v1::UseRecoveryKey {})).await;
-    assert_eq!(failure(&reply.body).0, ErrorCode::Unauthorized, "{:?}", reply.body);
+    assert_eq!(failure(&reply.body).0, ErrorCode::PersonOnly, "{:?}", reply.body);
 
-    for request in [
-        Request::PublishRecoveryKey(v1::PublishRecoveryKey { device_key: "a".into(), device_sig: "b".into() }),
-        Request::NewRecoveryKey(v1::NewRecoveryKey { public_key: "c".into(), ..Default::default() }),
-    ] {
-        let reply = client.request(request).await;
-        assert!(failure(&reply.body).1.contains("can't make a new recovery key for your account yet"), "{:?}", reply.body);
-    }
+    // A key for the account is made on a device signed in to it (layer b,
+    // owner_devices::a_recovery_key_made_on_a_phone…): this app showed no
+    // account, and nothing is being made.
+    let reply = client.request(Request::NewRecoveryKey(v1::NewRecoveryKey { public_key: "c".into(), ..Default::default() })).await;
+    assert_eq!(failure(&reply.body), (ErrorCode::SignInRequired, "Sign in to your Claktory account on this device first.".to_owned()));
+    let reply = client.request(Request::PublishRecoveryKey(v1::PublishRecoveryKey { device_key: "a".into(), device_sig: "b".into() })).await;
+    assert_eq!(failure(&reply.body).0, ErrorCode::InvalidRequest, "{:?}", reply.body);
     let reply = client.request(Request::ShowRecoveryKey(v1::ShowRecoveryKey {})).await;
     assert!(matches!(reply.body, Body::RecoveryKey(_)), "its own key, as before: {:?}", reply.body);
 }
@@ -1109,7 +1110,7 @@ async fn put_recovery_key(instance: &Instance, dir: &Path, device: &ed25519_dale
 
 /// The public half of the account recovery key made from `bytes`
 /// (vault::account_recovery's pair, as the apps make it).
-fn recovery_public(bytes: &[u8; 20]) -> String {
+pub(crate) fn recovery_public(bytes: &[u8; 20]) -> String {
     use hkdf::Hkdf;
     let mut secret = [0u8; 32];
     Hkdf::<sha2::Sha256>::new(Some(b"claktory account recovery key"), bytes).expand(b"x25519 v1", &mut secret).expect("32 bytes");

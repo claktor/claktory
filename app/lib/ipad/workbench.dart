@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
+import '../app_views/app_view.dart' show ChromeNamesApp;
 import '../controls.dart' show Pressable;
 import '../highlights.dart' show HighlightGlow, HighlightStore;
 import '../identity.dart';
@@ -729,7 +730,16 @@ class _WorkbenchState extends State<Workbench> {
               Expanded(
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [Expanded(child: _aboveKeyboard(context, content))],
+                  children: [
+                    // One pane fills the window: its header names an app
+                    // shown in it, so the app's view doesn't again.
+                    Expanded(
+                      child: _aboveKeyboard(
+                        context,
+                        ChromeNamesApp(child: content),
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ],
@@ -1172,42 +1182,55 @@ class PaneSwitch extends StatelessWidget {
   final VoidCallback onConversation;
   final VoidCallback onDocument;
 
+  /// Half the switch, or more when larger text needs it to say
+  /// Conversation whole, leaving the document's title room for a few letters.
+  static double _conversationWidth(BuildContext context, double room) {
+    final word = TextPainter(
+      text: TextSpan(text: 'Conversation', style: TypeScale.of(context).label),
+      textScaler: MediaQuery.textScalerOf(context),
+      textDirection: TextDirection.ltr,
+      maxLines: 1,
+    )..layout();
+    final needed = word.width + 2 * Space.m;
+    word.dispose();
+    return math.max(room / 2, math.min(needed, room - 120));
+  }
+
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
+    final scaler = MediaQuery.textScalerOf(context);
     Widget segment(String label, bool selected, VoidCallback onTap, Key key) =>
-        Flexible(
-          child: Semantics(
-            button: true,
-            selected: selected,
-            label: label,
+        Semantics(
+          button: true,
+          selected: selected,
+          label: label,
+          onTap: onTap,
+          excludeSemantics: true,
+          child: Pressable(
+            key: key,
             onTap: onTap,
-            excludeSemantics: true,
-            child: Pressable(
-              key: key,
-              onTap: onTap,
-              builder: (context, hovered) => Container(
-                constraints: const BoxConstraints(
-                  minHeight: Touch.target - Space.s,
-                  minWidth: 88,
-                ),
-                alignment: Alignment.center,
-                padding: const EdgeInsets.symmetric(horizontal: Space.m),
-                decoration: BoxDecoration(
-                  color: selected
-                      ? palette.canvas
-                      : hovered
-                      ? palette.hover
-                      : const Color(0x00000000),
-                  borderRadius: BorderRadius.circular(Radii.control),
-                ),
-                child: Text(
-                  label,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TypeScale.of(context).label.copyWith(
-                    color: selected ? palette.text : palette.textMuted,
-                  ),
+            builder: (context, hovered) => Container(
+              constraints: const BoxConstraints(
+                minHeight: Touch.target - Space.s,
+                minWidth: 88,
+              ),
+              alignment: Alignment.center,
+              padding: const EdgeInsets.symmetric(horizontal: Space.m),
+              decoration: BoxDecoration(
+                color: selected
+                    ? palette.canvas
+                    : hovered
+                    ? palette.hover
+                    : const Color(0x00000000),
+                borderRadius: BorderRadius.circular(Radii.control),
+              ),
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TypeScale.of(context).label.copyWith(
+                  color: selected ? palette.text : palette.textMuted,
                 ),
               ),
             ),
@@ -1215,29 +1238,36 @@ class PaneSwitch extends StatelessWidget {
         );
     return Unselectable(
       child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 420),
+        constraints: BoxConstraints(maxWidth: scaler.scale(420)),
         child: Container(
           padding: const EdgeInsets.all(2),
           decoration: BoxDecoration(
             color: palette.selected,
             borderRadius: BorderRadius.circular(Radii.control + 2),
           ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              segment(
-                'Conversation',
-                !documentShown,
-                onConversation,
-                const ValueKey('workbench-switch-conversation'),
-              ),
-              segment(
-                paneTitle(document.leaf, _workspace(context)),
-                documentShown,
-                onDocument,
-                const ValueKey('workbench-switch-document'),
-              ),
-            ],
+          child: LayoutBuilder(
+            builder: (context, box) => Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                SizedBox(
+                  width: _conversationWidth(context, box.maxWidth),
+                  child: segment(
+                    'Conversation',
+                    !documentShown,
+                    onConversation,
+                    const ValueKey('workbench-switch-conversation'),
+                  ),
+                ),
+                Flexible(
+                  child: segment(
+                    paneTitle(document.leaf, _workspace(context)),
+                    documentShown,
+                    onDocument,
+                    const ValueKey('workbench-switch-document'),
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),

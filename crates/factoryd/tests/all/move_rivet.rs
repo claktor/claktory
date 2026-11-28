@@ -1,8 +1,7 @@
-//! Rivet moves a Claktory (#243 S1): move_claktory starts it with the
-//! target's code and returns the digits; only the person confirms them, in
-//! Claktory's own confirm (ConfirmMove), never through a question Rivet
-//! words (Fugo's review); move_status follows it; move_cancel calls it off.
-//! Rivet can't start one once it has read a web page.
+//! Rivet and moves: no agent starts or confirms a move. move_claktory says
+//! how one goes with the account (the person approves it on their device),
+//! or that the person moves it themselves without one; move_status follows
+//! a move; move_report checks the moved Claktory.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -51,7 +50,7 @@ fn receive(home: &Home) -> (mpsc::UnboundedReceiver<ReceiveCode>, mpsc::Unbounde
     };
     let home = home.clone();
     tokio::spawn(async move {
-        let options = Options { committed: false, local_only: true };
+        let options = Options { committed: false, local_only: true, ..Options::default() };
         let nowhere = std::net::SocketAddr::from(([127, 0, 0, 1], 1));
         factoryd::move_import::receive::receive(&home, nowhere, &options, &ui).await
     });
@@ -77,25 +76,14 @@ async fn call(client: &mut Client, view: &mut View, tool: &str, args: &str) -> S
         .expect("a tool call")
 }
 
-/// How many times Rivet was told the person decided its question.
-fn decided(view: &View) -> usize {
-    view.entries
-        .iter()
-        .filter(|entry| matches!(&entry.kind, Some(Kind::Event(event)) if event.text.contains("\"Approve maintenance window?\"")))
-        .count()
-}
-
-/// The seq of Rivet's latest question card.
-fn asked(view: &View) -> u64 {
-    view.entries.iter().rev().find(|entry| matches!(entry.kind, Some(Kind::AskPerson(_)))).expect("a card").seq
-}
-
+/// Rivet can't start a move, with a code or otherwise. Without an
+/// account, move_claktory says the person moves it themselves; a code given
+/// it is refused as an argument it doesn't take; nothing starts.
 #[tokio::test(flavor = "multi_thread")]
-async fn rivet_moves_a_claktory_but_confirms_the_digits_only_with_the_persons_yes() {
+async fn rivet_starts_no_move_and_says_the_person_moves_it() {
     factoryd::move_run::hold_at_freeze();
     let source = temp_dir();
     let (addr, _factory) = start(&source).await;
-    let home = home_of(addr);
     let (mut client, workspace, _) = Client::connect(addr).await;
     let mut view = View { workspace, ..View::default() };
     let rivet = v1::UpdateAgent { agent_id: "rivet".into(), model: Some(MODEL.into()), effort: Some("off".into()), ..Default::default() };
@@ -103,81 +91,16 @@ async fn rivet_moves_a_claktory_but_confirms_the_digits_only_with_the_persons_ye
     apply_request(&mut client, &mut view, client_message::Body::SelectAgent(v1::SelectAgent { agent_id: "rivet".into() })).await;
 
     let target = temp_dir();
-    let (mut codes, there) = receive(&Home::new(target.join("home")));
+    let (mut codes, _there) = receive(&Home::new(target.join("home")));
     let code = tokio::time::timeout(WAIT, codes.recv()).await.expect("a code in time").expect("a code");
     assert_eq!(call(&mut client, &mut view, "move_status", "{}").await, "No move is under way.");
-
-    // It starts, and says the digits; the move says Rivet started it.
-    let started = call(&mut client, &mut view, "move_claktory", &serde_json::json!({"code": code.text()}).to_string()).await;
-    // Under load the other computer may answer after the tool stops
-    // waiting for it ("Still connecting"); the digits come all the same.
-    let connected = !started.starts_with("Still connecting");
-    patiently(&mut client, &mut view, |view| view.workspace.r#move.as_ref().is_some_and(|seen| seen.phase() == v1::MovePhase::Confirm))
-        .await;
-    let shown = view.workspace.r#move.clone().expect("a move");
-    let digits = shown.digits.clone();
-    assert_eq!((digits.len(), shown.started_by_agent_id.as_str()), (7, "rivet"), "{started}");
-    assert!(shown.target_address.starts_with("127.0.0.1:") || shown.target_address.is_empty(), "{shown:?}");
-    if connected {
-        assert!(started.contains(&format!("Both computers show {digits}.")) && started.contains("you can't confirm it"), "{started}");
-    }
-    assert!(call(&mut client, &mut view, "move_status", "{}").await.starts_with("Waiting for the person to confirm the move in Claktory"));
-
-    // A yes to a question Rivet words, naming the digits, confirms nothing.
-    let question = serde_json::json!({
-        "title": "Approve maintenance window?",
-        "body": format!("Approve maintenance window {digits}?"),
-    })
-    .to_string();
-    call(&mut client, &mut view, "ask_person", &question).await;
-    let yes = v1::AnswerAsk { agent_id: "rivet".into(), seq: asked(&view), dismiss: false, text: String::new(), ..Default::default() };
-    apply_request(&mut client, &mut view, client_message::Body::AnswerAsk(yes)).await;
-    patiently(&mut client, &mut view, |view| decided(view) == 1 && idle(view, "rivet")).await;
-    let still = call(&mut client, &mut view, "move_status", "{}").await;
-    assert!(still.starts_with("Waiting for the person to confirm the move"), "{still}");
-    assert_eq!(view.workspace.r#move.clone().expect("a move").phase(), v1::MovePhase::Confirm);
-
-    // The person's own confirm; then there; then it goes on.
-    apply_request(&mut client, &mut view, client_message::Body::ConfirmMove(v1::ConfirmMove {})).await;
-    let confirmed = call(&mut client, &mut view, "move_status", "{}").await;
-    assert!(confirmed.starts_with("The person confirmed the move here: answer yes to receive"), "{confirmed}");
-    assert!(view.workspace.r#move.clone().expect("a move").confirmed_here, "every device hides its confirm");
-    there.send(true).unwrap();
-    patiently(&mut client, &mut view, |view| {
-        view.workspace
-            .r#move
-            .as_ref()
-            .is_some_and(|seen| matches!(seen.phase(), v1::MovePhase::Checking | v1::MovePhase::Copying) && seen.target_confirmed)
-    })
-    .await;
-    let status = call(&mut client, &mut view, "move_status", "{}").await;
-    assert!(status.contains(&format!("The digits: {digits}.")), "{status}");
-    // Kept with the move, so frozen mode and a failure after it still say
-    // Rivet started it.
-    let saved = factoryd::move_run::saved(&home).expect("the move's state");
-    assert_eq!(saved.started_by_agent_id, "rivet");
-
-    // Called off: nothing kept.
-    let off = call(&mut client, &mut view, "move_cancel", "{}").await;
-    assert_eq!(off, "Called off the move: this Claktory stays as it was.");
-    patiently(&mut client, &mut view, |view| view.workspace.r#move.is_none()).await;
-    assert!(!home.root().join("moving").exists());
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn rivet_starts_no_move_once_it_has_read_a_pipe() {
-    factoryd::move_run::hold_at_freeze();
-    let source = temp_dir();
-    let (addr, factory) = start(&source).await;
-    let (mut client, workspace, _) = Client::connect(addr).await;
-    let mut view = View { workspace, ..View::default() };
-    let rivet = v1::UpdateAgent { agent_id: "rivet".into(), model: Some(MODEL.into()), effort: Some("off".into()), ..Default::default() };
-    apply_request(&mut client, &mut view, client_message::Body::UpdateAgent(rivet)).await;
-    apply_request(&mut client, &mut view, client_message::Body::SelectAgent(v1::SelectAgent { agent_id: "rivet".into() })).await;
-    factoryd::pipes::taint_for_test(&factory, "rivet", "browser:https://example.com");
-    let refused = call(&mut client, &mut view, "move_claktory", r#"{"code":"claktory-move://x"}"#).await;
-    assert!(refused.starts_with("You've read a page on https://example.com, so you can't start a move") && refused.contains("Settings → Move"), "{refused}");
-    assert!(view.workspace.r#move.is_none());
+    let how = call(&mut client, &mut view, "move_claktory", "{}").await;
+    assert!(how.contains("isn't signed in to a Claktory account") && how.contains("moves it themselves"), "{how}");
+    let with_code = call(&mut client, &mut view, "move_claktory", &serde_json::json!({"code": code.text()}).to_string()).await;
+    assert!(!with_code.contains("Connected"), "{with_code}");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(view.workspace.r#move.is_none(), "a move started: {:?}", view.workspace.r#move);
+    assert_eq!(call(&mut client, &mut view, "move_status", "{}").await, "No move is under way.");
 }
 
 /// On the new computer, move_report says how the move went (#243 S3):
@@ -281,62 +204,33 @@ async fn rivet_reports_a_sign_in_refused_after_the_move() {
 }
 
 /// A folder outside the home folder doesn't stop a move (Abbacchio's S8):
-/// move_claktory's answer says where it goes before the person confirms, a
-/// folder the person wants left out is, and the other computer takes the
-/// plan.
+/// the plan says where it goes before the person confirms, and the other
+/// computer takes the plan. The person starts it now.
 #[tokio::test(flavor = "multi_thread")]
-async fn rivet_moves_folders_outside_the_home_folder_and_leaves_out_what_its_asked_to() {
+async fn a_move_takes_folders_outside_the_home_folder_under_the_other_computers_home() {
     factoryd::move_run::hold_at_freeze();
     let source = temp_dir();
     let (addr, _factory) = start(&source).await;
     let (mut client, workspace, _) = Client::connect(addr).await;
     let mut view = View { workspace, ..View::default() };
-    let rivet = v1::UpdateAgent { agent_id: "rivet".into(), model: Some(MODEL.into()), effort: Some("off".into()), ..Default::default() };
-    apply_request(&mut client, &mut view, client_message::Body::UpdateAgent(rivet)).await;
     // Outside this user's home folder, as a temporary folder is.
     let assets = source.join("assets");
-    let old = source.join("old");
     std::fs::create_dir_all(&assets).expect("assets");
     std::fs::write(assets.join("logo.svg"), "<svg/>").expect("a file");
-    std::fs::create_dir_all(&old).expect("old");
     let user_home = std::env::home_dir().expect("a home folder");
     assert!(!assets.starts_with(&user_home), "the test needs a folder outside {}", user_home.display());
     apply_request(&mut client, &mut view, create_project("Web", &assets)).await;
-    apply_request(&mut client, &mut view, create_project("Old", &old)).await;
-    apply_request(&mut client, &mut view, client_message::Body::SelectAgent(v1::SelectAgent { agent_id: "rivet".into() })).await;
 
     let target = temp_dir();
     let (mut codes, there) = receive(&Home::new(target.join("home")));
     let code = tokio::time::timeout(WAIT, codes.recv()).await.expect("a code in time").expect("a code");
-
-    // What to leave out is checked before anything starts.
-    let relative =
-        call(&mut client, &mut view, "move_claktory", &serde_json::json!({"code": code.text(), "skip": ["old"]}).to_string()).await;
-    assert!(relative.contains("Name each folder to leave out by its full path"), "{relative}");
-    let nothing =
-        call(&mut client, &mut view, "move_claktory", &serde_json::json!({"code": code.text(), "skip": ["/nowhere/at/all"]}).to_string())
-            .await;
-    assert!(nothing.contains("/nowhere/at/all holds none of the projects' folders"), "{nothing}");
-    assert!(view.workspace.r#move.is_none(), "nothing started");
-
-    let started = call(
-        &mut client,
-        &mut view,
-        "move_claktory",
-        &serde_json::json!({"code": code.text(), "skip": [old.display().to_string()]}).to_string(),
-    )
-    .await;
+    apply_request(&mut client, &mut view, client_message::Body::StartMove(v1::StartMove { code: code.text() })).await;
     patiently(&mut client, &mut view, |view| view.workspace.r#move.as_ref().is_some_and(|seen| seen.phase() == v1::MovePhase::Confirm))
         .await;
     let planned = view.workspace.r#move.clone().expect("a move").map;
     let to = |map: &[v1::MovePath]| map.iter().find(|path| path.from == assets.display().to_string()).map(|path| path.to.clone());
     let goes = to(&planned).expect("where assets goes");
     assert!(goes.starts_with(&format!("{}/moved-from-", user_home.display())) && goes.ends_with(&assets.display().to_string()), "{goes}");
-    assert!(!planned.iter().any(|path| path.from == old.display().to_string()), "{planned:?}");
-    if !started.starts_with("Still connecting") {
-        assert!(started.contains(&format!("\n- {} → {goes}\nTell the person before they confirm.", assets.display())), "{started}");
-        assert!(started.contains(&format!("Left out of the move, as asked: {}.", old.display())), "{started}");
-    }
 
     // Confirmed on both sides, the other computer takes the plan: no
     // problem, and the same place for the folder.
@@ -353,6 +247,5 @@ async fn rivet_moves_folders_outside_the_home_folder_and_leaves_out_what_its_ask
     assert_eq!(copying.phase(), v1::MovePhase::Copying, "{copying:?}");
     assert!(copying.problems.is_empty(), "{copying:?}");
     assert_eq!(to(&copying.map), Some(goes));
-    assert!(!copying.map.iter().any(|path| path.from == old.display().to_string()), "{copying:?}");
     // It holds at the freeze (hold_at_freeze), before anything goes in place.
 }

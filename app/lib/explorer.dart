@@ -19,6 +19,7 @@ import 'mobile/navigation.dart' show PhoneRoutes;
 import 'pane_chrome.dart';
 import 'panes.dart' show filesPane, withFiles;
 import 'protocol/factory/v1/factory.pb.dart';
+import 'needs_you_focus.dart' show leaveFocusModeToOpen;
 import 'scope.dart';
 import 'share_files.dart' show ShareHold, showInFinder;
 import 'tell_rivet.dart';
@@ -893,17 +894,28 @@ class _RootHeading extends StatelessWidget {
   }
 }
 
-String _join(String base, String path) =>
-    base.endsWith('/') ? '$base$path' : '$base/$path';
+/// [path], relative to [base], as a full path in [base]'s own separators:
+/// a folder on Windows (`C:\…`, `\\server\…`) joins with backslashes.
+String _join(String base, String path) {
+  final windows =
+      RegExp(r'^[A-Za-z]:\\').hasMatch(base) || base.startsWith(r'\\');
+  if (!windows) return base.endsWith('/') ? '$base$path' : '$base/$path';
+  final relative = path.replaceAll('/', r'\');
+  return base.endsWith(r'\') ? '$base$relative' : '$base\\$relative';
+}
 
-/// Opens [path] in a viewer beside the selected agent's conversation, as an
-/// agent's `show` does, or makes its pane glow when it's open already. From
+/// Opens [path] in a viewer beside the selected agent's conversation (from
+/// focus mode, the request's, focus mode left first), as an agent's `show`
+/// does, or makes its pane glow when it's open already. From
 /// a Files pane ([beside]), the first viewer goes right of it. On a phone,
 /// a page over the conversation.
 void openFile(BuildContext context, String path, {String? beside}) {
+  final fromFocusMode = leaveFocusModeToOpen(context);
   final scope = AppScope.scope(context);
   final backend = scope.backend;
-  final agent = backend.workspace.selectedAgent;
+  final agent = fromFocusMode == null
+      ? backend.workspace.selectedAgent
+      : backend.workspace.agent(fromFocusMode);
   if (agent == null) return;
   if (beside == null &&
       (PhoneRoutes.of(context)?.showFile(agent.id, path) ?? false)) {

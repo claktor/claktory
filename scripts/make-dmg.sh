@@ -10,7 +10,11 @@
 # (Contents/Helpers), so on first launch it sets Claktory up by itself.
 # With the Developer ID and the notarization key (scripts/sign-release.sh says
 # where), the image is signed, notarized and stapled too; without them it's
-# left unsigned, for trying out, and says so. scripts/publish.sh runs it.
+# left unsigned, for trying out, and says so. On a Mac with the build service,
+# whose signer alone holds the Developer ID, a release that came from
+# it (its build-request file, scripts/release-from-service.sh) has its image
+# signed there (scripts/build-request.sh dmg), and notarized here.
+# scripts/publish.sh runs it.
 #
 #   scripts/make-dmg.sh RELEASE_DIR OUT_DIR [--unsigned]
 #
@@ -32,9 +36,13 @@ APP="$RELEASE/Factory.app"
 mkdir -p "$OUT"
 DMG="$(cd "$OUT" && pwd)/Claktory-$VERSION.dmg"
 
-IDENTITY=""
+IDENTITY="" SERVICE=""
 if ! $UNSIGNED; then
   IDENTITY="$(developer_id_identity)"
+  if [[ -z "$IDENTITY" && -f "$RELEASE/build-request" ]]; then
+    SERVICE="$(cat "$RELEASE/build-request")"
+    IDENTITY="the build service's ($SERVICE)"
+  fi
   [[ -n "$IDENTITY" ]] && notary_key || {
     echo "make-dmg: no Developer ID identity or notarization key (see scripts/sign-release.sh); use --unsigned for an image to try out" >&2
     exit 1
@@ -70,7 +78,16 @@ if $UNSIGNED; then
   exit 0
 fi
 
-codesign --force --timestamp --sign "$IDENTITY" "$DMG"
+if [[ -n "$SERVICE" ]]; then
+  SIGNED="$("$ROOT/scripts/build-request.sh" dmg "$SERVICE" "$DMG")"
+  cp "$SIGNED" "$DMG"
+  SIGNER="$(codesign -dvv "$DMG" 2>&1 | sed -n 's/^Authority=\(Developer ID Application: .*\)$/\1/p' | head -1)"
+  [[ -n "$SIGNER" ]] || { echo "make-dmg: the build service's image isn't signed with a Developer ID" >&2; exit 1; }
+  [[ "$SIGNER" == "$(codesign -dvv "$APP" 2>&1 | sed -n 's/^Authority=\(Developer ID Application: .*\)$/\1/p' | head -1)" ]] ||
+    { echo "make-dmg: the image isn't signed by whoever signed the app" >&2; exit 1; }
+else
+  codesign --force --timestamp --sign "$IDENTITY" "$DMG"
+fi
 codesign --verify --strict "$DMG"
 echo "notarizing $(basename "$DMG") with Apple (usually a few minutes)…" >&2
 xcrun notarytool submit "$DMG" \

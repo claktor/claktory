@@ -21,6 +21,7 @@ import '../tell_rivet.dart' show ErrorLine;
 import 'browser_agent.dart';
 import 'browser_session.dart';
 import 'origin.dart';
+import 'tab_screens.dart' show watchBrowser;
 
 /// Why the browser can't run on this computer, and what sets it up: the
 /// command, whole and in monospace with Copy, or the NixOS lines.
@@ -357,6 +358,14 @@ class _AgentBrowserRowState extends State<AgentBrowserRow> {
                 ),
               ),
               const SizedBox(width: Space.s),
+              // Only while it's open: there's nothing to watch otherwise.
+              if (browserOpen(backend.workspace.workspace, agent.id)) ...[
+                Button(
+                  label: 'Watch',
+                  onPressed: () => watchBrowser(context, agent),
+                ),
+                const SizedBox(width: Space.xs),
+              ],
               Builder(
                 builder: (context) => GlyphButton(
                   label: "${agent.name}'s browser",

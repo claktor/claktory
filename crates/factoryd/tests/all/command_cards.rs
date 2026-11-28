@@ -1,4 +1,4 @@
-//! Execute on command cards (#494, Fugo 35295 and 35326): an agent asks the
+//! Execute on command cards: an agent asks the
 //! person to run a command on this computer with ask_person's `command`;
 //! only the person's Execute runs it, once, as them, stopped with everything
 //! it started at its timeout or when Claktory stops, and the agent is told
@@ -333,7 +333,7 @@ async fn only_an_app_that_shows_the_command_runs_it_and_nothing_waits_for_a_term
     assert!(matches!(apply_request(&mut client, &mut view, client_message::Body::AnswerAsk(dismiss)).await, Body::Ack(_)));
     assert!(run(&view, seq).is_none());
 
-    // Words go only with a dismissal (#533 N5), and its agent hears them;
+    // Words go only with a dismissal, and its agent hears them;
     // Execute runs exactly what it shows, never with words beside it.
     let seq = ask_to_run(&mut client, &mut view, "make clean", None).await;
     let worded = v1::AnswerAsk { agent_id: "builder".into(), seq, confirmed: true, text: "and then deploy".into(), ..Default::default() };
@@ -368,7 +368,7 @@ async fn a_command_out_of_time_is_stopped_with_everything_it_started() {
     let text = told(&mut client, &mut view, 1).await;
     assert!(text.contains("it was still running after 1 seconds, so it was stopped, with everything it started"), "{text}");
 
-    // A shell that ends at once leaves nothing behind either (Fugo 36500):
+    // A shell that ends at once leaves nothing behind either:
     // what it started is asked to stop, then made to.
     let left = dir.join("left");
     let command = format!("(trap '' TERM; exec sleep 300) & echo $! > '{}'; exit 0", left.display());

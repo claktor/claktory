@@ -206,12 +206,13 @@ class Claktories extends ChangeNotifier {
   /// null where none is read (tests that don't give one).
   final Future<RemoteFactory?> Function()? ownCode;
 
-  /// This Mac's own Claktory's endpoint id, from its pairing code, read
-  /// from the file rather than learnt by connecting: so the account's list
-  /// never offers it, even before it answers (just updated, stopped, or
-  /// still starting), as another Claktory to connect to, which then knocks
-  /// on itself as a newcomer to allow. Empty where this device runs
-  /// none, until it's read, or from a backend before the tunnel.
+  /// This Mac's own Claktory's endpoint id, so the account's list never
+  /// offers it as another Claktory to connect to, which then knocks on
+  /// itself as a newcomer to allow: from its pairing code's file where
+  /// there is one, which holds it even before it answers (just updated,
+  /// stopped, or still starting); else as it says over its own connection
+  /// (RemoteAccess.endpoint_id), kept once learnt. Empty where this device
+  /// runs none, until it's known, or from a backend before the tunnel.
   String get ownEndpoint => _localBackend ? _ownEndpoint : '';
   String _ownEndpoint = '';
   var _disposed = false;
@@ -231,7 +232,20 @@ class Claktories extends ChangeNotifier {
       return;
     }
     if (_disposed) return;
-    final endpoint = code?.endpointId.toLowerCase() ?? '';
+    _setOwn(code?.endpointId ?? '');
+  }
+
+  /// Learns [ownEndpoint] from what this Mac's own Claktory, [backend], says
+  /// it is over its connection.
+  void _learnOwn(Backend backend) {
+    if (_disposed || !_localBackend) return;
+    _setOwn(backend.workspace.workspace.remote.endpointId);
+  }
+
+  /// Takes [endpoint] as [ownEndpoint], and drops an entry kept for it from
+  /// the account's list.
+  void _setOwn(String endpoint) {
+    endpoint = endpoint.toLowerCase();
     if (endpoint.isEmpty) return;
     for (final target in connections.saved) {
       if (target.fromAccount && target.endpointId.toLowerCase() == endpoint) {
@@ -369,6 +383,8 @@ class Claktories extends ChangeNotifier {
           backend.connected.addListener(() {
             if (backend.connected.value) unawaited(_readOwn());
           });
+          backend.workspace.addListener(() => _learnOwn(backend));
+          scheduleMicrotask(() => _learnOwn(backend));
         }
       }
     }

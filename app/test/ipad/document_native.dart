@@ -501,8 +501,10 @@ Future<Harness> showDocument(
   Size size = const Size(1366, 1024),
   bool phoneRoutes = false,
   void Function(AskPerson ask)? ask,
+  FileContent? file,
+  ViewNode? layout,
 }) async {
-  final workspace = snapshot(layout: _layout());
+  final workspace = snapshot(layout: layout ?? _layout());
   if (asking) {
     workspace.agents
         .firstWhere((agent) => agent.id == 'a1')
@@ -513,7 +515,7 @@ Future<Harness> showDocument(
   ask?.call(entry.askPerson);
   final harness = Harness(workspace);
   harness.backend
-    ..files[documentPath] = documentPdf()
+    ..files[documentPath] = file ?? documentPdf()
     ..entriesById['a1/7'] = entry;
   final focus = WorkbenchFocus();
   addTearDown(focus.dispose);

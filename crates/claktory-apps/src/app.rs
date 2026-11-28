@@ -48,6 +48,7 @@ mod viewing {
 
 use base::claktory;
 use base::{App, AppIndices};
+pub use claktory::app::types::Caller;
 use claktory::app::types::{DataError, DataSource, Event, LogLevel};
 use viewing::exports::claktory::app::views::{Guest as Views, GuestIndices as ViewsIndices};
 
@@ -108,7 +109,7 @@ impl Spec {
 pub enum Request {
     Start(oneshot::Sender<Body>),
     Stop(oneshot::Sender<Body>),
-    Call { tool: String, args: String, caller: String, answer: oneshot::Sender<Body> },
+    Call { tool: String, args: String, caller: Caller, answer: oneshot::Sender<Body> },
     ViewOpen { view: String, params: String, surface: String, answer: oneshot::Sender<Body> },
     ViewAction { surface: String, message: String, answer: oneshot::Sender<Body> },
     ViewClosed { surface: String, answer: oneshot::Sender<Body> },
@@ -126,6 +127,8 @@ pub struct State {
     timers: HashMap<String, Instant>,
     /// The surfaces the app may push to: opened and not closed since.
     surfaces: HashSet<String>,
+    /// The agent whose call runs now (caller-info); none between calls.
+    caller: Option<Caller>,
     outbox: Arc<Outbox>,
 }
 
@@ -184,6 +187,10 @@ impl claktory::app::host::Host for State {
     }
 
     async fn emit(&mut self, event: Event) -> wasmtime::Result<()> {
+        self.emit_to(String::new(), event).await
+    }
+
+    async fn emit_to(&mut self, agent: String, event: Event) -> wasmtime::Result<()> {
         self.outbox.tell(Body::Emit(Emit {
             app_id: self.app_id.clone(),
             kind: event.kind,
@@ -191,8 +198,13 @@ impl claktory::app::host::Host for State {
             text: event.text,
             data: event.data.unwrap_or_default(),
             dedupe_key: event.dedupe_key.unwrap_or_default(),
+            to_agent: agent,
         }));
         Ok(())
+    }
+
+    async fn caller_info(&mut self) -> wasmtime::Result<Option<Caller>> {
+        Ok(self.caller.clone())
     }
 
     async fn set_timer(&mut self, name: String, after_ms: u64) -> wasmtime::Result<()> {
@@ -242,7 +254,8 @@ impl claktory::app::host::Host for State {
     }
 
     async fn data_query(&mut self, source: String, sql: String, params: String) -> wasmtime::Result<Result<String, DataError>> {
-        let ask = Body::DataQuery(DataQuery { app_id: self.app_id.clone(), source, sql, params });
+        let caller = self.caller.as_ref().map(|caller| caller.id.clone()).unwrap_or_default();
+        let ask = Body::DataQuery(DataQuery { app_id: self.app_id.clone(), source, sql, params, caller });
         Ok(match self.outbox.ask(ask).await {
             Some(Body::DataAnswer(answer)) => match answer.error() {
                 WireDataError::None => Ok(answer.json),
@@ -339,7 +352,7 @@ impl Owner {
                 let _ = answer.send(Body::Done(Done::default()));
             }
             Request::Call { tool, args, caller, answer } => {
-                let _ = answer.send(self.call(&tool, &args, &caller).await);
+                let _ = answer.send(self.call(&tool, &args, caller).await);
             }
             Request::ViewOpen { view, params, surface, answer } => {
                 let error = self.view_open(&view, &params, &surface).await.err().unwrap_or_default();
@@ -391,13 +404,17 @@ impl Owner {
         self.running = None;
     }
 
-    async fn call(&mut self, tool: &str, args: &str, caller: &str) -> Body {
-        if self.running.is_none() {
+    async fn call(&mut self, tool: &str, args: &str, caller: Caller) -> Body {
+        let Some(running) = self.running.as_mut() else {
             return Body::Done(Done { error: format!("{} isn't running.", self.spec.app_id) });
+        };
+        let id = caller.id.clone();
+        running.store.data_mut().caller = Some(caller);
+        let result =
+            self.guest("call", self.spec.deadlines.call, async |exports, store| exports.app.call_call(store, tool, args, &id).await).await;
+        if let Some(running) = self.running.as_mut() {
+            running.store.data_mut().caller = None;
         }
-        let result = self
-            .guest("call", self.spec.deadlines.call, async |exports, store| exports.app.call_call(store, tool, args, caller).await)
-            .await;
         Body::CallResult(match result {
             Ok(result) => CallResult { text: result.text, data: result.data.unwrap_or_default(), is_error: result.is_error },
             Err(error) => CallResult { text: error, data: String::new(), is_error: true },
@@ -497,6 +514,7 @@ impl Owner {
             kv,
             timers: HashMap::new(),
             surfaces: HashSet::new(),
+            caller: None,
             outbox: self.outbox.clone(),
         };
         let mut store = Store::new(self.pre.engine(), state);

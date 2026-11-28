@@ -81,6 +81,16 @@ bool isUrgentAlert(Iterable<Alert> known, NeedsYouItem item) =>
     item.kind == NeedsYouKind.alert &&
     alertsOf(known, item).any((alert) => alert.urgent);
 
+/// Whether this device can mark [alert] read: Claktory's alert about this
+/// device itself only the person's other devices can.
+bool readableHere(Backend backend, Alert alert) =>
+    alert.deviceId.isEmpty || alert.deviceId != backend.deviceId;
+
+/// What an alert about this device says in Mark as read's place.
+const aboutThisDevice =
+    'This alert is about this device. Mark it read on another of your '
+    'devices.';
+
 /// Who sent [alert], as it was sent: its agent's name then, or this
 /// Claktory's for its own.
 String alertFrom(Alert alert) => alert.fromName.isNotEmpty
@@ -188,6 +198,11 @@ class NeedsYouAlert extends StatelessWidget {
       for (final alert in alerts)
         if (unread.contains(alert.id)) alert,
     ];
+    final backend = AppScope.of(context);
+    final readable = [
+      for (final alert in left)
+        if (readableHere(backend, alert)) alert,
+    ];
     final from = latest == null ? 'Claktory' : alertFrom(latest);
     final header = Semantics(
       button: true,
@@ -293,7 +308,7 @@ class NeedsYouAlert extends StatelessWidget {
                   sender: false,
                 ),
               ),
-            if (left.length > 1)
+            if (readable.length > 1)
               Padding(
                 // Its words at the rows' text edge.
                 padding: EdgeInsets.fromLTRB(
@@ -305,8 +320,8 @@ class NeedsYouAlert extends StatelessWidget {
                 child: Align(
                   alignment: AlignmentDirectional.centerStart,
                   child: _QuietButton(
-                    label: 'Mark all ${left.length} as read',
-                    onPressed: () => onRead(left),
+                    label: 'Mark all ${readable.length} as read',
+                    onPressed: () => onRead(readable),
                   ),
                 ),
               ),
@@ -357,6 +372,7 @@ class _AlertLine extends StatelessWidget {
     final from = alertFrom(alert);
     final sent = alert.sentMs.toInt();
     final opens = alert.agentId.isNotEmpty;
+    final here = readableHere(AppScope.of(context), alert);
     final lineStyle = TextStyles.label.copyWith(
       color: read ? palette.textMuted : palette.text,
       fontWeight: FontWeight.w600,
@@ -493,11 +509,21 @@ class _AlertLine extends StatelessWidget {
               ),
             ),
         ],
+        if (!read && !here)
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: Text(
+              aboutThisDevice,
+              style: TextStyles.caption.copyWith(color: palette.textFaint),
+            ),
+          ),
       ],
     );
     final trailing = read
         ? Padding(padding: const EdgeInsets.only(top: 2), child: _ReadMark())
-        : _QuietButton(label: 'Mark as read', onPressed: onRead);
+        : here
+        ? _QuietButton(label: 'Mark as read', onPressed: onRead)
+        : null;
     final stacked = largeText(context);
     final row = Container(
       constraints: const BoxConstraints(minHeight: 48),
@@ -519,11 +545,14 @@ class _AlertLine extends StatelessWidget {
                 ? Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     spacing: Space.xs,
-                    children: [words, trailing],
+                    children: [words, ?trailing],
                   )
                 : words,
           ),
-          if (!stacked) ...[const SizedBox(width: Space.m), trailing],
+          if (!stacked && trailing != null) ...[
+            const SizedBox(width: Space.m),
+            trailing,
+          ],
         ],
       ),
     );
@@ -544,9 +573,9 @@ class _AlertLine extends StatelessWidget {
     );
   }
 
-  /// Opening it reads it.
+  /// Opening it reads it, where it can be read.
   void _open(BuildContext context) {
-    if (!read) onRead();
+    if (!read && readableHere(AppScope.of(context), alert)) onRead();
     openAlert(context, alert);
   }
 }

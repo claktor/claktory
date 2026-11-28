@@ -1,4 +1,4 @@
-//! Provider sign-ins kept in the vault (rivet-move.md §3, P2): moved there
+//! Provider sign-ins kept in the vault: moved there
 //! from `auth.json`, sealed, with no token left in plaintext once no older
 //! backend could need one; a sign-in made elsewhere taken in; a locked vault
 //! that keeps them while its agents wait, and opens with the recovery key;
@@ -255,7 +255,7 @@ async fn a_sign_in_while_the_vault_is_locked_works_and_goes_into_it_once_it_open
     assert_eq!(tokens_in_plaintext(&dir), Vec::<String>::new());
 }
 
-/// Row 697: a subscription's usage isn't read while its sign-in is locked
+/// A subscription's usage isn't read while its sign-in is locked
 /// in the vault (a restart, until the vault opens), and is read as soon as
 /// it opens, not taken for one with no limits and never read again.
 #[tokio::test]

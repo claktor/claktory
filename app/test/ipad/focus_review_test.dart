@@ -1,5 +1,5 @@
 // A PDF or a picture a card asks to have reviewed, in focus mode on an
-// iPad (#514, the spec's §6.4): the stage shows it in the document host,
+// iPad: the stage shows it in the document host,
 // to draw on, with the iPad's review bar under it as the card's answer
 // (no card, no second bar). ⌘↩ from the system's menu, or Approve, sends
 // the drawings with the answer; nothing closes in the agent's layout, and

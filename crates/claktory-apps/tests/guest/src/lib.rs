@@ -15,6 +15,11 @@
 //! - sources: data-sources, "<id> <label> <granted>" a line.
 //! - query <source> <sql>: data-query with params [1], answering its JSON or
 //!   the error ("not-granted", "unknown-source", "invalid: …", "failed: …").
+//! - whoami: caller-info, "<id> <project or -> <admin> <tainted>" or "none".
+//! - emit-to <agent> <text>: emit-to that agent, kind "said", scope "chat".
+//!
+//! on-timer(name) emits "tick" with the name as its text, and " as <id>"
+//! after it should caller-info say anyone (1.1).
 //!
 //! start() sets its status to "started"; upgrade(from) keeps
 //! "upgraded-from" in its store.
@@ -145,6 +150,14 @@ impl Guest for TestApp {
                     Err(DataError::Failed(why)) => fail(format!("failed: {why}")),
                 }
             }
+            #[cfg(not(feature = "v1_0"))]
+            "whoami" => ok(whoami()),
+            #[cfg(not(feature = "v1_0"))]
+            "emit-to" => {
+                let event = Event { kind: "said".into(), text: rest.into(), data: None, dedupe_key: None, scope: "chat".into() };
+                host::emit_to(key, &event);
+                ok("emitted")
+            }
             "grow" => {
                 let mb: usize = args.parse().unwrap_or(1);
                 let block = std::hint::black_box(vec![1u8; mb << 20]);
@@ -155,6 +168,11 @@ impl Guest for TestApp {
     }
 
     fn on_timer(name: String) {
+        #[cfg(not(feature = "v1_0"))]
+        let name = match host::caller_info() {
+            Some(caller) => format!("{name} as {}", caller.id),
+            None => name,
+        };
         host::emit(&Event { kind: "tick".into(), text: name, data: None, dedupe_key: None, scope: "chat".into() });
     }
 }
@@ -184,6 +202,14 @@ impl exports::claktory::app::views::Guest for TestApp {
         host::kv_set("closed", surface.as_bytes()).expect("room for it");
         let pushed = host::push_view(&surface, "{}").err().unwrap_or_else(|| "pushed".into());
         host::kv_set("push-after-close", pushed.as_bytes()).expect("room for it");
+    }
+}
+
+#[cfg(not(feature = "v1_0"))]
+fn whoami() -> String {
+    match host::caller_info() {
+        Some(caller) => format!("{} {} {} {}", caller.id, caller.project.as_deref().unwrap_or("-"), caller.admin, caller.tainted),
+        None => "none".to_owned(),
     }
 }
 

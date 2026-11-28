@@ -9,6 +9,8 @@ use factory_protocol::v1::{self, AgentBrowserPointerKind as PointerKind, agent_b
 
 use crate::browser_runner::wire::{self, Button, Channel, FrameHeader, InputEvent, Modifier};
 
+pub(crate) use super::tab_view::{check_opened, check_tab, end_check};
+
 /// The most input events taken a second from the person.
 pub(crate) const EVENTS_PER_SECOND: u32 = 240;
 /// The most text in one AgentBrowserInput, typed and pasted together.
@@ -132,19 +134,7 @@ pub(crate) fn jpeg_size(jpeg: &[u8]) -> Option<(u16, u16)> {
 /// The person's input, as C1 payloads, in the screen's pixels; or why
 /// it's refused whole.
 pub(crate) fn input(events: &[v1::AgentBrowserEvent], screen: (u16, u16)) -> Result<Vec<(Channel, Vec<u8>)>, String> {
-    if events.len() > MAX_EVENTS {
-        return Err(format!("At most {MAX_EVENTS} input events at a time."));
-    }
-    let text: usize = events
-        .iter()
-        .map(|event| match &event.event {
-            Some(Event::Text(text) | Event::Paste(text)) => text.len(),
-            _ => 0,
-        })
-        .sum();
-    if text > MAX_TEXT_BYTES {
-        return Err("At most 4 KB of text at a time.".to_owned());
-    }
+    check_input(events)?;
     let (width, height) = (f32::from(screen.0.max(1)), f32::from(screen.1.max(1)));
     // A fraction of the frame, refused when it's no number, clamped to it.
     let at = |x: f32, y: f32| -> Option<(u32, u32)> {
@@ -201,6 +191,25 @@ pub(crate) fn input(events: &[v1::AgentBrowserEvent], screen: (u16, u16)) -> Res
         }
     }
     Ok(payloads)
+}
+
+/// Whether one message of the person's input is within bounds: at most
+/// MAX_EVENTS events and MAX_TEXT_BYTES of text, typed and pasted together.
+pub(crate) fn check_input(events: &[v1::AgentBrowserEvent]) -> Result<(), String> {
+    if events.len() > MAX_EVENTS {
+        return Err(format!("At most {MAX_EVENTS} input events at a time."));
+    }
+    let text: usize = events
+        .iter()
+        .map(|event| match &event.event {
+            Some(Event::Text(text) | Event::Paste(text)) => text.len(),
+            _ => 0,
+        })
+        .sum();
+    if text > MAX_TEXT_BYTES {
+        return Err("At most 4 KB of text at a time.".to_owned());
+    }
+    Ok(())
 }
 
 /// Frame pixels of a wheel, as notches (at most 10 either way); None for

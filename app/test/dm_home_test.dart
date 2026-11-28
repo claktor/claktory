@@ -7,7 +7,7 @@ import 'package:factory_app/device_account.dart' show AccountClaktory;
 import 'package:factory_app/people/dm_home.dart';
 import 'package:factory_app/people/e2ee.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart'
-    show DmDeliveryState, DmPeer, DmSendResult;
+    show DmDeliveryState, DmPeer, DmRoute, DmSendResult;
 import 'package:factory_app/tunnel/api/dm.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -397,6 +397,7 @@ void main() {
       expect(world.matt.e2ee.homeEndpoint, world.home.endpointId);
       // A service that names a stranger in the conversation gets no route
       // to her home: who's in it is the MLS group's word.
+      world.worker.contacts['matt'] = ['ana'];
       world.worker.listAccounts(world.group, ['ana', 'eve', 'matt']);
       world.matt.device.lists['eve'] = DmDeviceList(
         version: BigInt.one,
@@ -455,6 +456,7 @@ void main() {
     test('a stranger the service names in a conversation is never '
         'fetched or pinned as following starts', () async {
       await world.setUp();
+      world.worker.contacts['matt'] = ['ana'];
       world.worker.listAccounts(world.group, ['ana', 'eve', 'matt']);
       world.worker.keys['eve'] = {...world.worker.keys['ana']!};
       await world.matt.e2ee.sync();
@@ -475,6 +477,146 @@ void main() {
       expect(routedTo(), moved);
       world.matt.e2ee.dispose();
     });
+  });
+
+  // Matt and Ana became friends: no conversation yet. Matt's device pins
+  // Ana as a first message would and routes her home with no conversation,
+  // so the first message either sends is taken at the other's home while
+  // no device of theirs has joined it.
+  group('friends at friending', () {
+    late FakeEndpoint matt;
+    late FakeHome home;
+    late List<int> anaHome;
+
+    Future<void> friends() async {
+      matt = await _ready(world.worker, 'matt', 'phone');
+      final ana = await _ready(world.worker, 'ana', 'pixel');
+      final theirs = FakeHome(world.worker)
+        ..endpointId = List<int>.filled(32, 8);
+      ana.e2ee.home = theirs;
+      await ana.e2ee.sync();
+      await _settle();
+      anaHome = theirs.endpointId;
+      home = FakeHome(world.worker);
+      matt.e2ee.home = home;
+      await matt.e2ee.sync();
+      await _settle();
+    }
+
+    /// Ana's routes, as Matt's home was last given them.
+    List<DmRoute> anaRouted() => [
+      for (final route in home.routesSaid.lastOrNull ?? const <DmRoute>[])
+        if (route.accountId == 'ana') route,
+    ];
+
+    test('accepted while it follows: pinned, and her home routed with no '
+        'conversation; unfriended, no longer routed', () async {
+      await friends();
+      unawaited(matt.e2ee.follow());
+      await _settle();
+      expect(matt.device.pin(account: 'ana'), isNull);
+      world.worker.contacts['matt'] = ['ana'];
+      world.worker.post({'kind': 'contacts'});
+      await _settle();
+      expect(matt.device.pin(account: 'ana'), isNotNull);
+      expect(anaRouted().map((route) => route.homeEndpoint), [anaHome]);
+      expect(anaRouted().single.groupIds, isEmpty);
+
+      world.worker.contacts['matt'] = [];
+      world.worker.post({'kind': 'contacts'});
+      await _settle();
+      expect(anaRouted(), isEmpty);
+      expect(
+        matt.device.pin(account: 'ana'),
+        isNotNull,
+        reason: 'the pin stays',
+      );
+      matt.e2ee.dispose();
+    });
+
+    test("one of the person's requests accepted while the app was closed: "
+        'pinned and routed as following starts', () async {
+      await friends();
+      world.worker.contacts['matt'] = ['ana'];
+      unawaited(matt.e2ee.follow());
+      await _settle();
+      expect(matt.device.pin(account: 'ana'), isNotNull);
+      expect(anaRouted().single.homeEndpoint, anaHome);
+      matt.e2ee.dispose();
+    });
+
+    test('a pin already here is never replaced at friending: a changed key '
+        'is marked, and her home not routed until it is seen', () async {
+      await friends();
+      final earlier = Uint8List.fromList(List<int>.filled(32, 9));
+      await matt.device.firstContact(account: 'ana', identityPublic: earlier);
+      unawaited(matt.e2ee.follow());
+      await _settle();
+      world.worker.contacts['matt'] = ['ana'];
+      world.worker.post({'kind': 'contacts'});
+      await _settle();
+      final pin = matt.device.pin(account: 'ana')!;
+      expect(pin.changedUnseen, isTrue);
+      expect(pin.changedFrom, earlier);
+      expect(anaRouted(), isEmpty);
+      await matt.e2ee.seen('ana');
+      world.worker.post({'kind': 'contacts'});
+      await _settle();
+      expect(anaRouted().single.homeEndpoint, anaHome);
+      matt.e2ee.dispose();
+    });
+
+    test('launched again: the first table it gives the home has its '
+        'friends already, so nothing they left pending there goes', () async {
+      await friends();
+      world.worker.contacts['matt'] = ['ana'];
+      unawaited(matt.e2ee.follow());
+      await _settle();
+      expect(anaRouted().single.homeEndpoint, anaHome);
+      final e2ee = matt.relaunch();
+      e2ee.home = home;
+      final before = home.routesSaid.length;
+      await e2ee.start();
+      await e2ee.sync();
+      await _settle();
+      final since = home.routesSaid.sublist(before);
+      expect(since, isNotEmpty);
+      for (final table in since) {
+        expect(table.map((route) => route.accountId), contains('ana'));
+      }
+      e2ee.dispose();
+    });
+
+    test('never a home without a pin: a friend whose keys the service '
+        "doesn't give isn't routed", () async {
+      await friends();
+      world.worker.keys.remove('ana');
+      world.worker.contacts['matt'] = ['ana'];
+      unawaited(matt.e2ee.follow());
+      await _settle();
+      expect(matt.device.pin(account: 'ana'), isNull);
+      expect(anaRouted(), isEmpty);
+      matt.e2ee.dispose();
+    });
+  });
+
+  test("unfriended: their home goes off the table, their conversation's "
+      'route too', () async {
+    await world.setUp();
+    world.ana.e2ee.home = FakeHome(world.worker)
+      ..endpointId = List<int>.filled(32, 8);
+    await world.ana.e2ee.sync();
+    await _settle();
+    unawaited(world.matt.e2ee.follow());
+    await _settle();
+    bool routed() =>
+        world.home.routesSaid.last.any((route) => route.accountId == 'ana');
+    expect(routed(), isTrue);
+    world.worker.contacts['matt'] = [];
+    world.worker.post({'kind': 'contacts'});
+    await _settle();
+    expect(routed(), isFalse);
+    world.matt.e2ee.dispose();
   });
 
   // Ana's home turns Matt's away. His device reads her
@@ -1058,6 +1200,7 @@ void main() {
         ),
         extraJson: '',
       ),
+      listVersions: const [],
       nowMs: 1,
     );
     await world.matt.e2ee.sync();

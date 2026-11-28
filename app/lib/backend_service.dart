@@ -1,4 +1,4 @@
-// Friend bug #24: a Mac's backend started some other way (factoryd in
+// A Mac's backend started some other way (factoryd in
 // Terminal) while its background service wasn't running it doesn't start
 // again by itself and can't move to another computer. The backend says so
 // (Workspace.backend_service, BY_HAND) with a sentence for the person;

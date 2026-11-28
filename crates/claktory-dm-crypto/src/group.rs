@@ -237,6 +237,14 @@ fn join_config() -> MlsGroupJoinConfig {
         .build()
 }
 
+/// The epoch a GroupInfo says it's of, unchecked: for telling whether a
+/// rejoin from it would be refused below the floor (`Group::rejoin` checks
+/// it with the signature).
+pub fn group_info_epoch(info: &[u8]) -> Result<u64, Error> {
+    let MlsMessageBodyIn::GroupInfo(info) = read(info)? else { return Err(Error::NotMls("not a group info".to_owned())) };
+    Ok(info.epoch().as_u64())
+}
+
 impl Group {
     /// A new group with only this device in it.
     pub fn create(provider: &impl OpenMlsProvider, me: &Me, kind: GroupKind, group_id: &[u8]) -> Result<Group, Error> {
@@ -308,7 +316,12 @@ impl Group {
     /// service could otherwise hand over another group with members the
     /// kind accepts (the self group's for a channel, an older generation's
     /// for a conversation), kept then under the wrong id (Fugo). The commit
-    /// goes to the worker; once it takes it, `merge_pending`.
+    /// goes to the worker. OpenMLS 0.9 merges an external commit as it makes
+    /// it, and stores the group at the new epoch: the caller puts that aside
+    /// at once (`storage::stash_rejoin`, in the same transaction) and takes
+    /// it back only once the worker took the commit (`storage::take_rejoin`;
+    /// `drop_rejoin` if not), so a commit nobody sequenced never leaves the
+    /// endpoint on an epoch of its own (E11-8).
     ///
     /// `floor` is the highest epoch this endpoint ever merged in the group
     /// (`storage::epoch_floor`): a GroupInfo below it is refused, so a
@@ -352,16 +365,17 @@ impl Group {
             .map_err(mls)?;
         let group = Group { mls: joined, kind };
         // The members it joins, as the tree it was given has them. A dead
-        // or stale leaf of its own account's (a start-over's, row 630; its
-        // own former install, row 202) it takes out at once (`remove_dead`),
-        // before anything is sent; anything else must pass. A device it
-        // kept, on its own new list, is present past its old key.
+        // or stale leaf of its own account's (a start-over's, its own
+        // former install), or one its own lists show taken off (a Lock
+        // out), it takes out at once (`remove_dead`), before anything is
+        // sent; anything else must pass. A device it kept, on its own new
+        // list, is present past its old key.
         let rejoining = validation::Rejoining { trust, me: &me.certificate };
         for member in group.mls.members() {
             if member.index == group.mls.own_leaf_index() {
                 continue;
             }
-            if !Self::ours_to_take_out(trust, me, &member) {
+            if !Self::ours_from_before(trust, me, &member) {
                 validation::present(&group.kind, &rejoining, &member.credential, &member.signature_key)?;
             }
         }
@@ -378,6 +392,13 @@ impl Group {
 
     pub fn group_id(&self) -> &[u8] {
         self.mls.group_id().as_slice()
+    }
+
+    /// The confirmation tag of the group's current epoch, TLS-encoded: what
+    /// the worker shows of its own (GET groups), so a device can tell a
+    /// state of the same epoch that forked from the group's (E11-8).
+    pub fn confirmation_tag(&self) -> Result<Vec<u8>, Error> {
+        self.mls.confirmation_tag().tls_serialize_detached().map_err(mls)
     }
 
     pub fn epoch(&self) -> u64 {
@@ -432,12 +453,12 @@ impl Group {
         self.mls.members().filter_map(|member| validation::stale(trust, &member.credential, &member.signature_key)).collect()
     }
 
-    /// The account whose dead device leaf or stale leaf is still in the
-    /// group, while one is, and which: nothing is sent here until it's
-    /// taken out, since it would read it (row 630, row 202; Fugo), at the
-    /// person's own devices and at friends'. A Claktory's leaf under an old
-    /// key doesn't hold sends: after a new key it waits, off the list, until
-    /// a device enrolls it again, and it's the person's own.
+    /// The account whose dead device leaf, stale leaf or removed device leaf
+    /// is still in the group, while one is, and which: nothing is sent here
+    /// until it's taken out, since it would read it, at the person's
+    /// own devices and at friends'. A Claktory's leaf under an old key
+    /// doesn't hold sends: after a new key it waits, off the list, until a
+    /// device enrolls it again, and it's the person's own.
     pub fn held(&self, trust: &impl Trust, me: &Me) -> Option<(String, validation::Held)> {
         // A device's; a Claktory's only under a key the person said didn't
         // match (a liar's leaf, planted while it was pinned: Fugo 41542),
@@ -448,6 +469,13 @@ impl Group {
             .find(|dead| dead.leaf.kind == LeafKind::Device || trust.refused(&dead.leaf.account_id, &dead.identity));
         let dead = dead.map(|dead| (dead.leaf.account_id, validation::Held::Replaced));
         dead.or_else(|| self.stale(trust).into_iter().next().map(|stale| (stale.leaf.account_id, validation::Held::Reinstalled)))
+            .or_else(|| self.taken_off(trust).into_iter().next().map(|gone| (gone.leaf.account_id, validation::Held::Removed)))
+    }
+
+    /// The group's removed device leaves (`validation::removed`: off their
+    /// account's current list), in tree order.
+    pub fn taken_off(&self, trust: &impl Trust) -> Vec<LeafCertificate> {
+        self.mls.members().filter_map(|member| validation::removed(trust, &member.credential, &member.signature_key)).collect()
     }
 
     /// The account `held` names.
@@ -461,7 +489,29 @@ impl Group {
         let own = &me.certificate.leaf.account_id;
         let dead = validation::dead(trust, &me.certificate, &member.credential, &member.signature_key);
         let stale = || validation::stale(trust, &member.credential, &member.signature_key);
-        dead.or_else(stale).is_some_and(|gone| gone.leaf.account_id == *own)
+        let removed = || validation::removed(trust, &member.credential, &member.signature_key);
+        dead.or_else(stale).or_else(removed).is_some_and(|gone| gone.leaf.account_id == *own)
+    }
+
+    /// Whether `member` is a leaf of `me`'s own account a rejoin takes out
+    /// after it: dead or stale, or off the list (`removed`) only when a list
+    /// taken here named it before (`Trust::taken_off`). A rejoin never saw
+    /// the commit that brought it in, so off the list alone it can't tell a
+    /// device taken off since from one added while the newest list is
+    /// withheld (R5): that one must pass, or the rejoin is refused. One its
+    /// own lists show going (a Lock out) it joins past, as a dead leaf, and
+    /// takes out once the worker takes this commit, nothing sent before, so
+    /// it isn't stuck waiting for another device's Remove, which may never
+    /// come when it's the person's last device (Fugo's liveness question).
+    fn ours_from_before(trust: &impl Trust, me: &Me, member: &openmls::group::Member) -> bool {
+        let own = &me.certificate.leaf.account_id;
+        let dead = validation::dead(trust, &me.certificate, &member.credential, &member.signature_key);
+        let stale = || validation::stale(trust, &member.credential, &member.signature_key);
+        let taken_off = || {
+            validation::removed(trust, &member.credential, &member.signature_key)
+                .filter(|gone| trust.taken_off(&gone.leaf.account_id, &gone.leaf.signature_key))
+        };
+        dead.or_else(stale).or_else(taken_off).is_some_and(|gone| gone.leaf.account_id == *own)
     }
 
     /// Every leaf's id as its certificate names it, in tree order,
@@ -597,13 +647,14 @@ impl Group {
     }
 
     /// Takes out this person's own dead leaves (`validation::dead`), after a
-    /// start-over's rejoin (row 630), and stale ones (`validation::stale`),
-    /// a reinstalled device's former install (row 202), whichever of their
-    /// devices commits it: an ordinary commit of Removes, by tree index (a
-    /// dead or stale leaf may have this leaf's own id, or the new install's),
-    /// of nothing else. None when there are none. A leaf the current list
-    /// names (one the person kept, the new install) and another person's
-    /// leaf are never taken out here.
+    /// start-over's rejoin, stale ones (`validation::stale`), a reinstalled
+    /// device's former install, and removed ones (`validation::removed`), a
+    /// device they took off their list that a group still holds, whichever of
+    /// their devices commits it: an ordinary commit of Removes, by tree index
+    /// (a dead or stale leaf may have this leaf's own id, or the new
+    /// install's), of nothing else. None when there are none. A leaf the
+    /// current list names (one the person kept, the new install) and another
+    /// person's leaf are never taken out here.
     pub fn remove_dead(&mut self, provider: &impl OpenMlsProvider, me: &Me, trust: &impl Trust) -> Result<Option<Outgoing>, Error> {
         let here = self.mls.own_leaf_index();
         let indexes: Vec<LeafNodeIndex> = self

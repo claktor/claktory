@@ -279,6 +279,7 @@ const idleTunnel = TunnelStatus(
   linkReceived: 0,
   reach: TunnelReach.none,
   dialTimeoutMs: 0,
+  dialMs: 0,
 );
 
 /// A new device key: an iroh secret key is any 32 bytes, so 32 random ones

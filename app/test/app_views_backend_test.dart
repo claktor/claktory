@@ -91,7 +91,6 @@ void main() {
       explorer: ExplorerStore(),
       extensionView: ExtensionViewStore(),
       tunnels: FakeTunnels(FakeTunnel(0)),
-      localPairing: () async => null,
       localEndpoint: 'ws://127.0.0.1:${far.server.port}',
     );
     final AppViewTransport transport = backend;

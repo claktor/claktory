@@ -93,6 +93,9 @@ abstract class PhonePlatformPolicy {
   /// The app's localizations: what its widgets' own words come from.
   List<LocalizationsDelegate<Object>> get localizations;
 
+  /// How a list is pulled down to refresh ([PullToRefresh]).
+  PullStyle get pull;
+
   /// Wraps the phone's screens (the drawer, the pages, under the sheets)
   /// in what answers the system's Back from [back]. None on an iPhone,
   /// which has no Back of its own.
@@ -110,6 +113,9 @@ class _IPhonePolicy extends PhonePlatformPolicy {
 
   @override
   bool get drawerEdgeSwipe => true;
+
+  @override
+  PullStyle get pull => PullStyle.iPhone;
 
   @override
   Page<T> page<T>({
@@ -157,6 +163,9 @@ class _DesktopPolicy extends _IPhonePolicy {
   bool get touch => false;
 
   @override
+  PullStyle get pull => PullStyle.none;
+
+  @override
   bool get nativeSelection => false;
 
   @override
@@ -192,6 +201,9 @@ class _AndroidPolicy extends PhonePlatformPolicy {
 
   @override
   bool get drawerEdgeSwipe => _android.drawerEdgeSwipe;
+
+  @override
+  PullStyle get pull => PullStyle.android;
 
   @override
   Page<T> page<T>({
@@ -230,4 +242,16 @@ class _AndroidPolicy extends PhonePlatformPolicy {
   @override
   Widget backHost({required PhoneBack back, required Widget child}) =>
       _android.backHost(back: back, child: child);
+}
+
+/// How a list is pulled down to refresh.
+enum PullStyle {
+  /// Not at all: a mouse has no pull (a Mac's narrow window).
+  none,
+
+  /// The list bounces down past its top over a spinner.
+  iPhone,
+
+  /// A circle drops in over the list's top, which stays where it is.
+  android,
 }

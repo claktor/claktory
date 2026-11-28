@@ -1,4 +1,4 @@
-//! macOS's protected places (permissions.md P2, item 12): a folder added in
+//! macOS's protected places: a folder added in
 //! one is read at once, the person's check reads places again, a refusal
 //! raises one Needs you item until its OK or a check that gets in, and each
 //! ended item is in History. macOS stands in for itself here: the places
@@ -75,7 +75,7 @@ async fn history(client: &mut Client, view: &mut View) -> Vec<v1::NeedsYouRecord
     history.records.into_iter().filter(|record| record.kind() == v1::NeedsYouRecordKind::ProtectedPlace).collect()
 }
 
-/// Illuso 49904: the app tells a path typed is in a protected place before
+/// The app tells a path typed is in a protected place before
 /// anything is saved, from every place there is, used or not.
 #[tokio::test]
 async fn the_workspace_lists_every_protected_place_with_its_name() {

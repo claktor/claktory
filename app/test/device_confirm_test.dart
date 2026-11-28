@@ -466,6 +466,80 @@ void main() {
     await server.close(force: true);
   });
 
+  // A device paired with a code before it showed the account
+  // is told it can't approve (Welcome.cannot_approve); signing in on it
+  // connects again, so the next Hello's assertion lets it.
+  test("told it can't approve, signing in connects again, and the field "
+      'clears', () async {
+    final hellos = <Hello>[];
+    final (server, _) = await answering((message) {
+      if (!message.hasHello()) return null;
+      hellos.add(message.hello);
+      return ServerMessage(
+        welcome: Welcome(
+          deviceId: 'd9',
+          cannotApprove: message.hello.assertion.isEmpty
+              ? "This device can't approve here yet."
+              : '',
+        ),
+      );
+    });
+    final api = FakeAccountApi();
+    final account = DeviceAccount(key: 'k' * 64, open: (_, _) => api);
+    final backend = backendWith(FakeTunnels(FakeTunnel(server.port)))
+      ..deviceKey = ((_) => 'k' * 64)
+      ..account = account;
+    backend.connectTo(
+      parsePairingCode('factory://?t=${'c' * 64}&e=${'a' * 64}&name=mac-mini'),
+    );
+    unawaited(backend.run());
+    await until(() => backend.connected.value);
+    expect(backend.cannotApprove.value, "This device can't approve here yet.");
+    expect(hellos, hasLength(1));
+
+    await signIn(account);
+    await until(() => backend.cannotApprove.value.isEmpty);
+    expect(hellos, hasLength(2));
+    expect(hellos.last.assertion, 'assertion-for-${'b' * 64}');
+    await backend.close();
+    await server.close(force: true);
+  });
+
+  test('still told it can\'t approve once signed in: it connects again once, '
+      'never at every change of the account after', () async {
+    final hellos = <Hello>[];
+    final (server, _) = await answering((message) {
+      if (!message.hasHello()) return null;
+      hellos.add(message.hello);
+      return ServerMessage(
+        welcome: Welcome(
+          deviceId: 'd9',
+          cannotApprove: "This device can't approve here.",
+        ),
+      );
+    });
+    final api = FakeAccountApi();
+    final account = DeviceAccount(key: 'k' * 64, open: (_, _) => api);
+    final backend = backendWith(FakeTunnels(FakeTunnel(server.port)))
+      ..deviceKey = ((_) => 'k' * 64)
+      ..account = account;
+    backend.connectTo(
+      parsePairingCode('factory://?t=${'c' * 64}&e=${'a' * 64}&name=mac-mini'),
+    );
+    unawaited(backend.run());
+    await until(() => backend.connected.value);
+    await signIn(account);
+    await until(() => hellos.length == 2 && backend.connected.value);
+
+    // Signed in already: signing in again changes the account twice.
+    await signIn(account);
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    expect(hellos, hasLength(2));
+    expect(backend.cannotApprove.value, "This device can't approve here.");
+    await backend.close();
+    await server.close(force: true);
+  });
+
   // #365 R5: signing the Claktory in from this device confirms this device
   // there (the backend's), so it isn't asked to sign in a second time.
   test('signing the Claktory in from here confirms this device: no second '

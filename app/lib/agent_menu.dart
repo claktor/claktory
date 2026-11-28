@@ -1,4 +1,4 @@
-// An agent's menu, ⋯ in its header (agent-view.md §4): a Mac shows its
+// An agent's menu, ⋯ in its header: a Mac shows its
 // rows in a menu under ⋯, an iPad in a popover with a finger's rows, both
 // from [agentMenuItems]. A phone's ⋯ sheet builds its own rows
 // (mobile/extension_list.dart).
@@ -11,6 +11,8 @@ import 'package:flutter/widgets.dart';
 import 'backend.dart';
 import 'controls.dart';
 import 'conversation_versions.dart' show showVersions;
+import 'errands/browser_agent.dart' show browserOpen;
+import 'errands/tab_screens.dart' show watchBrowser;
 import 'extension_about.dart' show hasExtensionView;
 import 'extensions.dart' show enabledExtensions;
 import 'find.dart' show findShortcut;
@@ -41,6 +43,7 @@ class AgentMenuItem {
   });
 
   /// What it is, for tests and keys: `find`, `versions`, `file:<pane id>`,
+  /// `browser`,
   /// `panel:<extension id>`, `pin`, `pin-up`, `pin-down`, `settings` or
   /// `extensions`.
   final String id;
@@ -115,7 +118,8 @@ void showAgentSettings(
 
 /// The rows of [agent]'s menu, in order: Find… (when [onFind] can open
 /// the conversation's find), Other versions while it has some, [files]
-/// (a phone's files beside the conversation), the panels with something to
+/// (a phone's files beside the conversation), Watch browser while its
+/// browser is open, the panels with something to
 /// show (the open one checked; choosing it closes it), then Pin or Unpin
 /// and a pin's Move up and Move down, Agent settings… and Extensions….
 List<AgentMenuItem> agentMenuItems(
@@ -127,10 +131,10 @@ List<AgentMenuItem> agentMenuItems(
   final backend = AppScope.of(context);
   final workspace = backend.workspace.workspace;
   final panels = menuPanels(workspace, agent);
-  // Pin or Unpin, and a pin's moves (pinned-agents.md §4): here too, where
-  // VoiceOver on a Mac reaches them (Abbacchio's row 1661).
+  // Pin or Unpin, and a pin's moves: here too, where
+  // VoiceOver on a Mac reaches them.
   final pin = pinLabel(workspace, agent);
-  // Taken now: the menu may outlive [context] (Abbacchio's row 1734).
+  // Taken now: the menu may outlive [context].
   final toggle = togglePinLater(context, agent);
   final up = movePin(context, agent, -1);
   final down = movePin(context, agent, 1);
@@ -155,6 +159,15 @@ List<AgentMenuItem> agentMenuItems(
         onSelect: () => unawaited(showVersions(context, agent)),
       ),
     ...files,
+    // Only while it's open: there's nothing to watch otherwise.
+    if (browserOpen(workspace, agent.id))
+      AgentMenuItem(
+        id: 'browser',
+        label: 'Watch browser',
+        glyph: (color) =>
+            ExtensionGlyph(icon: 'monitor', name: 'Browser', color: color),
+        onSelect: () => watchBrowser(context, agent),
+      ),
     for (final (index, extension) in panels.indexed)
       AgentMenuItem(
         id: 'panel:${extension.id}',
@@ -221,7 +234,7 @@ List<AgentMenuItem> agentMenuItems(
       semanticsLabel: 'Extensions',
       glyph: (color) =>
           ExtensionGlyph(icon: 'puzzle', name: 'Extensions', color: color),
-      // At its extensions, unfolded (Abbacchio's row 1647).
+      // At its extensions, unfolded.
       onSelect: () => showAgentSettings(context, agent, extensions: true),
     ),
   ];
@@ -398,7 +411,7 @@ class _MenuRow extends StatelessWidget {
       label: item.semanticsLabel ?? item.label,
       value: item.count > 0 ? '${item.count}' : null,
       // Its own tap: excluding the row's semantics drops the Pressable's,
-      // and VoiceOver's VO-Space then did nothing (Abbacchio's row 1716).
+      // and VoiceOver's VO-Space then did nothing.
       onTap: onTap,
       excludeSemantics: true,
       child: MouseRegion(

@@ -326,7 +326,7 @@ fn stale(checked: Result<Checked, ChannelError>) -> bool {
     matches!(checked, Err(ChannelError::Stale(_)))
 }
 
-/// #456: a release pulled from the channel after it was downloaded (a
+/// A release pulled from the channel after it was downloaded (a
 /// newer manifest moved back) is deleted and no longer offered; releases
 /// built here stay.
 #[tokio::test]
@@ -359,7 +359,7 @@ async fn a_release_the_channel_pulled_is_deleted_and_no_longer_offered() {
     assert_eq!(latest(&dir), "v0.1.11");
 }
 
-/// #478: an old signed manifest served again is refused, so it can neither
+/// An old signed manifest served again is refused, so it can neither
 /// roll the offer back nor take back a newer release; a newer one can.
 #[tokio::test]
 async fn a_replayed_manifest_is_refused_and_withdraws_nothing() {

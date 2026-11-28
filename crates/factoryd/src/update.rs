@@ -632,7 +632,7 @@ impl Factory {
     }
 
     pub async fn install_update(self: &Arc<Self>, app_path: &str) -> Result<(), RequestError> {
-        // Never while Claktory stops (friend bug #27), and no stop while it
+        // Never while Claktory stops, and no stop while it
         // goes in: the backend's going away would read as a failed update.
         self.service.begin_update()?;
         let installed = self.put_update_in(app_path).await;
@@ -873,8 +873,8 @@ fn restore_previous(home: &Home) -> std::io::Result<()> {
 
 /// This backend's program, links resolved: macOS gives the path it was
 /// started by, so `factoryd` run through the installer's link on PATH
-/// (`~/.local/bin/factoryd`) would look for its helpers beside the link
-/// (friend bug #24). The path as given when it can't be resolved.
+/// (`~/.local/bin/factoryd`) would look for its helpers beside the link.
+/// The path as given when it can't be resolved.
 pub fn running_exe() -> Option<std::path::PathBuf> {
     let exe = std::env::current_exe().ok()?;
     Some(exe.canonicalize().unwrap_or(exe))
@@ -893,11 +893,11 @@ pub const APPS_HOST: &str = "claktory-apps";
 /// Speech recognition for voice messages, beside factoryd like the apps host.
 pub const SPEECH_HOST: &str = "claktory-speech";
 
-/// Phone-sized video previews (#379, `previews/video.rs`), on a Mac,
+/// Phone-sized video previews (`previews/video.rs`), on a Mac,
 /// beside factoryd like the apps host.
 pub const VIDEO_PREVIEW: &str = "claktory-video-preview";
 
-/// The WSL helper (#490, `scripts/claktory-wsl.sh`), in Linux releases from
+/// The WSL helper (`scripts/claktory-wsl.sh`), in Linux releases from
 /// v0.1.23 on, beside factoryd like the apps host. Mac releases have none.
 pub const WSL_HELPER: &str = "claktory-wsl";
 
@@ -1429,7 +1429,7 @@ mod helpers_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// jq after rg (Pericolo 29760): a release without tools/jq (v0.1.21, or
+    /// jq after rg: a release without tools/jq (v0.1.21, or
     /// an older one) is passed over, nothing failing; one with it, started
     /// after an update by a backend that knew only rg, heals jq in with its
     /// license beside ripgrep's.

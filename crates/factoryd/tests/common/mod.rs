@@ -131,6 +131,13 @@ pub fn temp_dir() -> PathBuf {
     dir
 }
 
+/// Whether `ps` starts here. A sandbox that runs no set-uid program (an
+/// agent's command under the browser's profile before it let /bin/ps out)
+/// can't start it, and what needs it can't be tested there.
+pub fn ps_runs() -> bool {
+    std::process::Command::new("ps").args(["-o", "pid=", "-p", &std::process::id().to_string()]).output().is_ok()
+}
+
 /// Ends the background tasks agents started under `dir`, as its cleanup
 /// does when its test ends.
 pub fn end_tasks_under(dir: &Path) {
@@ -359,7 +366,7 @@ pub async fn start_with_models(dir: &Path, models: Arc<dyn Models>) -> (SocketAd
 }
 
 /// The homes of the Factories tests started, by address: their clients
-/// connect with their local pairing code's token, as this machine's app.
+/// connect with their person token, as this machine's app.
 fn homes() -> std::sync::MutexGuard<'static, std::collections::HashMap<SocketAddr, Home>> {
     static HOMES: std::sync::LazyLock<Mutex<std::collections::HashMap<SocketAddr, Home>>> = std::sync::LazyLock::new(Default::default);
     HOMES.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -376,17 +383,17 @@ pub fn home_of(addr: SocketAddr) -> Home {
     homes().get(&addr).cloned().expect("a Factory the test started")
 }
 
-/// The token the loopback port at `addr` wants: the one in its Factory's
-/// `<home>/remote/local-pairing`, written before it serves anyone.
+/// The token that lets a test's client in on the loopback port at `addr`
+/// as this computer's app, the person (test builds only; the real
+/// app connects over its socket).
 pub fn local_token(addr: SocketAddr) -> String {
-    let home = home_of(addr);
-    let code = std::fs::read_to_string(home.root().join("remote/local-pairing")).expect("the local pairing code");
-    code_token(&code)
+    factoryd::authority::person_token_for_test(home_of(addr).root())
 }
 
-/// The token in a pairing code.
-pub fn code_token(code: &str) -> String {
-    code.trim().split(['?', '&']).find_map(|part| part.strip_prefix("t=")).expect("a token in the code").to_owned()
+/// The tool token agents' commands use at `addr`: `<home>/tool-token`.
+pub fn tool_token(addr: SocketAddr) -> String {
+    let home = home_of(addr);
+    std::fs::read_to_string(home.root().join("tool-token")).expect("the tool token").trim().to_owned()
 }
 
 /// A provider with one model, which answers "echo: <the prompt>" (Claktory's

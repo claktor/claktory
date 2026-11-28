@@ -27,7 +27,6 @@
 
 use std::io::Write as _;
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -71,21 +70,28 @@ fn resolved(path: &Path) -> PathBuf {
             break;
         }
     }
-    let mut path = existing.canonicalize().unwrap_or(existing);
+    let mut path = canonical(&existing).unwrap_or(existing);
     path.extend(rest.into_iter().rev());
     path
 }
 
-/// The person's Claktories' folders: `~/.factory` and `~/.factory-dev`.
+/// The person's Claktories' folders: `~/.factory` and `~/.factory-dev`,
+/// and on Windows `%LOCALAPPDATA%\Claktory\factory` and `factory-dev`,
+/// with the programs folder the app and its backend are installed in.
 fn real_homes() -> Vec<PathBuf> {
-    let Some(home) = std::env::home_dir() else { return Vec::new() };
-    [".factory", ".factory-dev"]
-        .into_iter()
-        .map(|name| {
-            let path = home.join(name);
-            path.canonicalize().unwrap_or(path)
-        })
-        .collect()
+    let homes = [false, true].into_iter().filter_map(factoryd::home::instance_root);
+    #[cfg(windows)]
+    let homes = homes.chain(factoryd::windows::dirs::programs().ok());
+    homes.map(|path| canonical(&path).unwrap_or(path)).collect()
+}
+
+/// `path` with its links resolved; on Windows without the `\\?\` it
+/// puts first, so paths compare as they're written.
+fn canonical(path: &Path) -> std::io::Result<PathBuf> {
+    #[cfg(windows)]
+    return factoryd::windows::fs::canonical(path);
+    #[cfg(not(windows))]
+    path.canonicalize()
 }
 
 /// The real Claktory whose own files `path` is among: its settings, data,
@@ -107,7 +113,7 @@ pub fn check_root(root: &Path) -> Result<(), Failure> {
             real.display()
         )));
     }
-    let home = std::env::home_dir().map(|home| home.canonicalize().unwrap_or(home));
+    let home = std::env::home_dir().map(|home| canonical(&home).unwrap_or(home));
     if root.parent().is_none() || home.as_deref() == Some(root) {
         return Err(Failure::refused(format!("{} is too broad a root for sandboxes: give them a folder of their own.", root.display())));
     }
@@ -117,7 +123,7 @@ pub fn check_root(root: &Path) -> Result<(), Failure> {
 /// Refuses binaries from a real Claktory's folder: a sandbox runs what was
 /// built for it.
 pub fn check_binaries(dir: &Path) -> Result<(), Failure> {
-    let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_owned());
+    let dir = canonical(dir).unwrap_or_else(|_| dir.to_owned());
     if let Some(real) = real_owner(&dir) {
         return Err(Failure::refused(format!(
             "claktory-qa runs from the files of the real Claktory in {}. Run the one scripts/qa.sh builds.",
@@ -206,7 +212,7 @@ impl Sandbox {
     }
 
     pub fn factoryd(&self) -> PathBuf {
-        self.bin.join("factoryd")
+        self.bin.join(program("factoryd"))
     }
 
     pub fn account_service(&self) -> String {
@@ -405,7 +411,7 @@ pub fn up(request: Up) -> Result<Sandbox, Failure> {
         let text = std::fs::read_to_string(script).map_err(|error| Failure::usage(format!("Can't read {}: {error}", script.display())))?;
         crate::model::check_script(&text).map_err(Failure::usage)?;
     }
-    if request.speech.is_some() && !bin.join("claktory-speech").is_file() {
+    if request.speech.is_some() && !bin.join(program("claktory-speech")).is_file() {
         return Err(Failure::failed(format!(
             "There's no claktory-speech beside claktory-qa in {}: run `scripts/qa.sh up --speech MODEL`, which builds it.",
             bin.display()
@@ -413,7 +419,7 @@ pub fn up(request: Up) -> Result<Sandbox, Failure> {
     }
     let speech = request.speech.as_deref().map(speech_model).transpose()?;
     for binary in ["factoryd", "claktory-account"] {
-        if !bin.join(binary).is_file() {
+        if !bin.join(program(binary)).is_file() {
             return Err(Failure::failed(format!(
                 "There's no {binary} beside claktory-qa in {}: run claktory-qa through scripts/qa.sh, which builds them.",
                 bin.display()
@@ -502,7 +508,7 @@ fn start(sandbox: &mut Sandbox, account: bool, model: Option<&Option<PathBuf>>, 
         let port = free_port(&taken)?;
         taken.push(port);
         let log = log_file(&dir.join("model.out"))?;
-        let mut serve = command(&sandbox.bin.join("claktory-qa"), sandbox);
+        let mut serve = command(&sandbox.bin.join(program("claktory-qa")), sandbox);
         serve
             .args(["serve-model", "--port", &port.to_string(), "--script"])
             .arg(sandbox.model_script())
@@ -515,28 +521,24 @@ fn start(sandbox: &mut Sandbox, account: bool, model: Option<&Option<PathBuf>>, 
             }
             serve.arg("--claude").arg(sandbox.claude_limit());
         }
-        let child = serve
-            .stdin(Stdio::null())
-            .stdout(log.try_clone().map_err(|error| Failure::failed(error.to_string()))?)
-            .stderr(log)
-            .process_group(0)
-            .spawn()
-            .map_err(|error| Failure::failed(format!("Can't start qa-model: {error}")))?;
+        serve.stdin(Stdio::null()).stdout(log.try_clone().map_err(|error| Failure::failed(error.to_string()))?).stderr(log);
+        let child = spawn_detached(&mut serve).map_err(|error| Failure::failed(format!("Can't start qa-model: {error}")))?;
         sandbox.model_port = Some(port);
         sandbox.model_pid = i32::try_from(child.id()).ok();
+        drop(child);
         sandbox.save()?;
         let address = SocketAddr::from(([127, 0, 0, 1], port));
         wait_for(
             START_WAIT,
             || TcpStream::connect(address).is_ok(),
-            || alive(sandbox.model_pid.unwrap_or(0), &sandbox.bin.join("claktory-qa")),
+            || alive(sandbox.model_pid.unwrap_or(0), &sandbox.bin.join(program("claktory-qa"))),
         )
         .map_err(|why| Failure::failed(format!("qa-model didn't start ({why}). Its output: {}", dir.join("model.out").display())))?;
     }
     if account {
         let port = free_port(&taken)?;
         let secrets = dir.join("account/secrets.json");
-        let made = command(&sandbox.bin.join("claktory-account"), sandbox)
+        let made = command(&sandbox.bin.join(program("claktory-account")), sandbox)
             .arg("init-secrets")
             .arg(&secrets)
             .stdout(Stdio::null())
@@ -547,7 +549,8 @@ fn start(sandbox: &mut Sandbox, account: bool, model: Option<&Option<PathBuf>>, 
             return Err(Failure::failed("claktory-account couldn't make its keys."));
         }
         let log = log_file(&dir.join("account.log"))?;
-        let child = command(&sandbox.bin.join("claktory-account"), sandbox)
+        let mut serve = command(&sandbox.bin.join(program("claktory-account")), sandbox);
+        serve
             .arg("serve")
             .arg("--db")
             .arg(dir.join("account/account.db"))
@@ -557,18 +560,17 @@ fn start(sandbox: &mut Sandbox, account: bool, model: Option<&Option<PathBuf>>, 
             .arg(sandbox.mail())
             .stdin(Stdio::null())
             .stdout(log.try_clone().map_err(|error| Failure::failed(error.to_string()))?)
-            .stderr(log)
-            .process_group(0)
-            .spawn()
-            .map_err(|error| Failure::failed(format!("Can't start claktory-account: {error}")))?;
+            .stderr(log);
+        let child = spawn_detached(&mut serve).map_err(|error| Failure::failed(format!("Can't start claktory-account: {error}")))?;
         sandbox.account_port = Some(port);
         sandbox.account_pid = i32::try_from(child.id()).ok();
+        drop(child);
         sandbox.save()?;
         let address = SocketAddr::from(([127, 0, 0, 1], port));
         wait_for(
             START_WAIT,
             || TcpStream::connect(address).is_ok(),
-            || alive(sandbox.account_pid.unwrap_or(0), &sandbox.bin.join("claktory-account")),
+            || alive(sandbox.account_pid.unwrap_or(0), &sandbox.bin.join(program("claktory-account"))),
         )
         .map_err(|why| {
             Failure::failed(format!("The account service didn't start ({why}). Its log: {}", dir.join("account.log").display()))
@@ -590,13 +592,12 @@ fn start(sandbox: &mut Sandbox, account: bool, model: Option<&Option<PathBuf>>, 
 /// the sandbox's: its home was checked like the rest), with the fixed fake
 /// tokens qa-model alone accepts.
 fn write_claude_sign_in(home: &Path, second: bool) -> Result<(), Failure> {
-    use std::os::unix::fs::OpenOptionsExt as _;
-    let mut file = std::fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .mode(0o600)
-        .open(home.join("auth.json"))
-        .map_err(|error| Failure::failed(format!("Can't write the fake Claude sign-in: {error}")))?;
+    let mut options = std::fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file =
+        options.open(home.join("auth.json")).map_err(|error| Failure::failed(format!("Can't write the fake Claude sign-in: {error}")))?;
     file.write_all(crate::model::claude::credentials(second).to_string().as_bytes())
         .map_err(|error| Failure::failed(format!("Can't write the fake Claude sign-in: {error}")))
 }
@@ -609,20 +610,18 @@ fn launch(sandbox: &mut Sandbox) -> Result<(), Failure> {
     let mut factoryd = command(&sandbox.factoryd(), sandbox);
     factoryd.envs(environment(sandbox));
     // Kept across restarts, as factoryd keeps its token: the old one is gone
-    // by now, so the port answering is the new one.
-    let pairing = sandbox.home().join("remote/local-pairing");
+    // by now, so the port answering is the new one. The QA person's token,
+    // or, from a commit before it, this machine's pairing code.
+    let pairing = sandbox.home().join("qa-person-token");
+    let old_pairing = sandbox.home().join("remote/local-pairing");
     let logged = std::fs::metadata(dir.join("factoryd.log")).map_or(0, |log| log.len());
-    let child = factoryd
-        .stdin(Stdio::null())
-        .stdout(log.try_clone().map_err(|error| Failure::failed(error.to_string()))?)
-        .stderr(log)
-        .process_group(0)
-        .spawn()
-        .map_err(|error| Failure::failed(format!("Can't start factoryd: {error}")))?;
+    factoryd.stdin(Stdio::null()).stdout(log.try_clone().map_err(|error| Failure::failed(error.to_string()))?).stderr(log);
+    let child = spawn_detached(&mut factoryd).map_err(|error| Failure::failed(format!("Can't start factoryd: {error}")))?;
     sandbox.pid = i32::try_from(child.id()).unwrap_or(0);
+    drop(child);
     sandbox.save()?;
     let address = SocketAddr::from(([127, 0, 0, 1], sandbox.port));
-    wait_for(START_WAIT, || pairing.is_file() && TcpStream::connect(address).is_ok(), || sandbox.running())
+    wait_for(START_WAIT, || (pairing.is_file() || old_pairing.is_file()) && TcpStream::connect(address).is_ok(), || sandbox.running())
         .map_err(|why| Failure::failed(format!("factoryd didn't start ({why}). Its log: {}", dir.join("factoryd.log").display())))?;
     // A factoryd built without the QA provider override (a release's, or
     // not through scripts/qa.sh) would send the fake sign-in to Anthropic:
@@ -681,7 +680,26 @@ fn copy_speech_model(home: &Path, model: &Path, receipt: &Path) -> Result<(), Fa
 fn command(program: &Path, sandbox: &Sandbox) -> Command {
     let mut command = Command::new(program);
     command.env_clear();
-    for key in ["LANG", "LC_ALL", "USER", "LOGNAME", "SHELL", "TMPDIR", "TERM"] {
+    #[cfg(unix)]
+    let kept = ["LANG", "LC_ALL", "USER", "LOGNAME", "SHELL", "TMPDIR", "TERM"].as_slice();
+    // What Windows' own programs need, and where Claktory's Git Bash is
+    // when it isn't beside factoryd (`factory_agent::windows::shell`).
+    #[cfg(windows)]
+    let kept = [
+        "SystemRoot",
+        "SystemDrive",
+        "windir",
+        "ComSpec",
+        "PATHEXT",
+        "TEMP",
+        "TMP",
+        "USERNAME",
+        "NUMBER_OF_PROCESSORS",
+        "PROCESSOR_ARCHITECTURE",
+        factory_agent::windows::shell::TOOLS_VARIABLE,
+    ]
+    .as_slice();
+    for &key in kept {
         if let Some(value) = std::env::var_os(key) {
             command.env(key, value);
         }
@@ -751,13 +769,104 @@ fn wait_for(wait: Duration, mut ready: impl FnMut() -> bool, mut alive: impl FnM
 }
 
 /// `pid` is running, and is `program` (not another process that took the
-/// number since).
+/// number since): asked of the system itself, never of `ps`, which an
+/// agent's sandbox may not let run (it's setuid on a Mac).
+#[cfg(unix)]
 fn alive(pid: i32, program: &Path) -> bool {
-    if pid <= 0 {
+    // SAFETY: signal 0 sends nothing; it only asks whether `pid` exists.
+    if pid <= 0 || unsafe { libc::kill(pid, 0) } != 0 {
         return false;
     }
-    let Ok(output) = Command::new("ps").args(["-o", "command=", "-p", &pid.to_string()]).output() else { return false };
-    String::from_utf8_lossy(&output.stdout).trim().starts_with(&*program.to_string_lossy())
+    let program = canonical(program).unwrap_or_else(|_| program.to_owned());
+    running_program(pid).is_some_and(|running| running == program)
+}
+
+/// The file `pid` runs, links resolved; None once it has ended (a zombie
+/// has none).
+#[cfg(target_os = "macos")]
+fn running_program(pid: i32) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStringExt as _;
+    let mut buffer = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    // SAFETY: `buffer` has room for the size given.
+    let written = unsafe { libc::proc_pidpath(pid, buffer.as_mut_ptr().cast(), buffer.len() as u32) };
+    let written = usize::try_from(written).ok().filter(|written| *written > 0)?;
+    buffer.truncate(written);
+    let path = PathBuf::from(std::ffi::OsString::from_vec(buffer));
+    Some(canonical(&path).unwrap_or(path))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn running_program(pid: i32) -> Option<PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/exe")).ok()
+}
+
+/// As above, on Windows, where a process's file is its image, links
+/// resolved and case aside.
+#[cfg(windows)]
+fn alive(pid: i32, program: &Path) -> bool {
+    use factory_agent::windows::system::{image_path, open_process};
+    let Ok(pid) = u32::try_from(pid) else { return false };
+    let Ok(process) = open_process(pid) else { return false };
+    let image = image_path(&process);
+    let program = canonical(program).unwrap_or_else(|_| program.to_owned());
+    !image.is_empty() && image.eq_ignore_ascii_case(&program.to_string_lossy())
+}
+
+/// The program's own file name: `.exe` on Windows.
+fn program(name: &str) -> String {
+    factoryd::home::program(name)
+}
+
+/// Started apart from claktory-qa, so its end (or a Ctrl-C meant for it)
+/// doesn't end the sandbox: a process group of its own.
+#[cfg(unix)]
+fn spawn_detached(command: &mut Command) -> std::io::Result<std::process::Child> {
+    use std::os::unix::process::CommandExt as _;
+    command.process_group(0).spawn()
+}
+
+/// On Windows also with no console of its own, and without claktory-qa's
+/// own output, which it would otherwise hold open for whatever reads that.
+#[cfg(windows)]
+fn spawn_detached(command: &mut Command) -> std::io::Result<std::process::Child> {
+    use std::os::windows::process::CommandExt as _;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+    factory_agent::windows::spawn::keeping_standard_handles(|| command.spawn())
+}
+
+/// Asks `pid`, with what it started, to stop.
+#[cfg(unix)]
+fn ask_to_end(pid: i32) {
+    // SAFETY: kill(2) on a process group this sandbox started.
+    unsafe { libc::kill(-pid, libc::SIGTERM) };
+}
+
+/// On Windows only factoryd can be asked, by its stop event; the others end at once.
+#[cfg(windows)]
+fn ask_to_end(pid: i32) {
+    let asked = u32::try_from(pid).is_ok_and(|pid| factoryd::windows::stop::ask_to_stop(pid).is_ok());
+    if !asked {
+        end(pid);
+    }
+}
+
+/// Ends `pid` and what it started, at once.
+#[cfg(unix)]
+fn end(pid: i32) {
+    // SAFETY: kill(2) on a process group this sandbox started.
+    unsafe { libc::kill(-pid, libc::SIGKILL) };
+}
+
+/// On Windows the process alone: the helpers factoryd starts end with it
+/// (their job ends when it does), and the agents' commands, in jobs of
+/// their own, are left as a restart would leave them.
+#[cfg(windows)]
+fn end(pid: i32) {
+    if let Ok(pid) = u32::try_from(pid) {
+        factory_agent::windows::system::terminate_process(pid);
+    }
 }
 
 /// Ends a sandbox's processes, each with its process group (what factoryd
@@ -765,13 +874,12 @@ fn alive(pid: i32, program: &Path) -> bool {
 pub fn stop(sandbox: &Sandbox) {
     let processes = [
         (sandbox.pid, sandbox.factoryd()),
-        (sandbox.account_pid.unwrap_or(0), sandbox.bin.join("claktory-account")),
-        (sandbox.model_pid.unwrap_or(0), sandbox.bin.join("claktory-qa")),
+        (sandbox.account_pid.unwrap_or(0), sandbox.bin.join(program("claktory-account"))),
+        (sandbox.model_pid.unwrap_or(0), sandbox.bin.join(program("claktory-qa"))),
     ];
     for (pid, program) in &processes {
         if alive(*pid, program) {
-            // SAFETY: kill(2) on a process group this sandbox started.
-            unsafe { libc::kill(-pid, libc::SIGTERM) };
+            ask_to_end(*pid);
         }
     }
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -780,8 +888,7 @@ pub fn stop(sandbox: &Sandbox) {
     }
     for (pid, program) in &processes {
         if alive(*pid, program) {
-            // SAFETY: as above.
-            unsafe { libc::kill(-pid, libc::SIGKILL) };
+            end(*pid);
         }
     }
 }
@@ -805,7 +912,7 @@ fn environment(sandbox: &Sandbox) -> Vec<(&'static str, String)> {
         environment.push(("FACTORY_QA_CLAIM_CLAKTORY_ID", id.clone()));
     }
     if sandbox.speech {
-        environment.push(("FACTORY_SPEECH", sandbox.bin.join("claktory-speech").display().to_string()));
+        environment.push(("FACTORY_SPEECH", sandbox.bin.join(program("claktory-speech")).display().to_string()));
     }
     if let Some(port) = sandbox.model_port {
         environment.push(("OPENROUTER_API_KEY", "qa-model".to_owned()));
@@ -829,15 +936,17 @@ pub fn restart(sandbox: &mut Sandbox, kill: bool) -> Result<(), Failure> {
     let factoryd = sandbox.factoryd();
     let pid = sandbox.pid;
     if alive(pid, &factoryd) {
-        // SAFETY: kill(2) on the process group this sandbox started for factoryd.
-        unsafe { libc::kill(-pid, if kill { libc::SIGKILL } else { libc::SIGTERM }) };
+        if kill {
+            end(pid);
+        } else {
+            ask_to_end(pid);
+        }
         let deadline = Instant::now() + Duration::from_secs(10);
         while alive(pid, &factoryd) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(100));
         }
         if alive(pid, &factoryd) {
-            // SAFETY: as above.
-            unsafe { libc::kill(-pid, libc::SIGKILL) };
+            end(pid);
             wait_for(Duration::from_secs(10), || !alive(pid, &factoryd), || true)
                 .map_err(|why| Failure::failed(format!("factoryd didn't stop ({why}).")))?;
         }
@@ -938,13 +1047,17 @@ mod tests {
     #[test]
     fn real_folders_ports_and_broad_roots_are_refused() {
         let home = std::env::home_dir().expect("home");
-        for real in [home.join(".factory"), home.join(".factory/releases/v0.1.13"), home.join(".factory-dev")] {
+        let real = factoryd::home::instance_root(false).expect("the real Claktory's folder");
+        let dev = factoryd::home::instance_root(true).expect("the dev Claktory's folder");
+        for real in [real.clone(), real.join("releases/v0.1.13"), dev] {
             assert!(check_root(&real).is_err(), "{}", real.display());
             assert!(check_binaries(&real.join("bin")).is_err(), "{}", real.display());
         }
+        #[cfg(windows)]
+        assert!(check_binaries(&factoryd::windows::dirs::programs().expect("programs")).is_err(), "the installed app's folder");
         // Agents' own folders and checkouts are theirs.
-        assert!(check_root(&home.join(".factory/agents/qa/scratch")).is_ok());
-        assert!(check_binaries(&home.join(".factory/trees/qa/factory/target/debug")).is_ok());
+        assert!(check_root(&real.join("agents/qa/scratch")).is_ok());
+        assert!(check_binaries(&real.join("trees/qa/factory/target/debug")).is_ok());
         assert!(check_root(&home).is_err());
         assert!(check_root(Path::new("/")).is_err());
         assert!(check_root(&std::env::temp_dir().join("claktory-qa")).is_ok());
@@ -952,6 +1065,26 @@ mod tests {
         assert!(check_port(7500).is_ok());
         assert!(check_name("qa1").is_ok() && check_name("pipes-a").is_ok());
         assert!(check_name("../x").is_err() && check_name("").is_err() && check_name("QA").is_err());
+    }
+
+    #[test]
+    fn a_process_is_alive_only_while_it_runs_the_program_it_was_started_as() {
+        let sleep =
+            canonical(Path::new(if cfg!(windows) { "C:\\Windows\\System32\\PING.EXE" } else { "/bin/sleep" })).expect("the program");
+        let mut child = Command::new(&sleep)
+            .args(if cfg!(windows) { ["-n", "30", "127.0.0.1"].as_slice() } else { ["30"].as_slice() })
+            .stdout(Stdio::null())
+            .spawn()
+            .expect("started");
+        let pid = i32::try_from(child.id()).expect("pid");
+        assert!(alive(pid, &sleep), "it runs");
+        assert!(!alive(pid, &std::env::current_exe().expect("this test")), "it isn't another program");
+        child.kill().expect("killed");
+        child.wait().expect("ended");
+        // On Windows a process lasts while a handle to it is open.
+        drop(child);
+        assert!(!alive(pid, &sleep), "it ended");
+        assert!(!alive(0, &sleep) && !alive(-1, &sleep));
     }
 
     #[test]

@@ -503,7 +503,20 @@ async fn call(factory: &Arc<Factory>, app: &str, tool: &str, args: &serde_json::
             _ => return Err(format!("The {} app isn't running now, so {tool} can't work. Tell the person if it matters.", manifest.name)),
         }
     };
-    let asked = wire::Call { app_id: app.to_owned(), tool: tool.to_owned(), args: args.to_string(), caller: agent.to_owned() };
+    let (project, admin) = {
+        let inner = factory.lock();
+        let found = inner.config.agent(agent);
+        (found.and_then(|agent| agent.project.clone()).unwrap_or_default(), found.is_some_and(crate::proposals::is_admin))
+    };
+    let asked = wire::Call {
+        app_id: app.to_owned(),
+        tool: tool.to_owned(),
+        args: args.to_string(),
+        caller: agent.to_owned(),
+        caller_project: project,
+        caller_admin: admin,
+        caller_tainted: !factory.pipes.tainted(agent).is_empty() || crate::errands::outside_read(factory, agent).is_some(),
+    };
     match host.ask(Body::Call(asked), CALL_DEADLINE).await? {
         Body::CallResult(result) if result.is_error => Err(result.text),
         Body::CallResult(result) => {

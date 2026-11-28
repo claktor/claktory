@@ -1,12 +1,11 @@
-// Needs you's way into focus mode on an iPad (Lucy's needs-you-cards.md §4
-// item 4, Bruno 46924; Polnareff's FocusModeButton): on a full-width iPad
-// with no keyboard, ⌘⇧N isn't there, so the button is the way in. It's in
-// Needs you's tabs row wherever Needs you shows in the workbench: the page,
-// a pane beside the conversation, and a pane squeezed below a page's
-// width. A finger's target (44 pt), read as "Focus on Needs you", and a
-// tap opens the iPad's focus mode. In a narrow window Needs you is the
-// list too (#599): a request tapped there opens alone, and Focus mode
-// opens the iPad's one card at a time.
+// Needs you's way into focus mode on an iPad (FocusModeButton):
+// on a full-width iPad with no keyboard, ⌘⇧N isn't there, so the button is
+// the way in. It's in Needs you's tabs row wherever Needs you shows in the
+// workbench: the page, a pane beside the conversation, and a pane squeezed
+// below a page's width. A finger's target (44 pt), read as "Focus on Needs
+// you", and a tap opens the iPad's focus mode. In a narrow window Needs you
+// is the list too: a request tapped there opens alone, and Focus mode opens
+// the iPad's one card at a time.
 import 'package:factory_app/inbox.dart' show InboxView;
 import 'package:factory_app/ipad/focus.dart' show IPadFocus;
 import 'package:factory_app/mobile/header.dart' show HeaderButton;
@@ -174,7 +173,7 @@ void main() {
     await pumpFrames(tester);
     expect(find.byType(PhoneNeedsYou), findsOneWidget);
     expect(find.byType(IPadFocus), findsNothing);
-    // Back, the list (answered there, Pesci's mobile_needs_you_test).
+    // Back, the list (answered there, mobile_needs_you_test).
     await tester.tap(
       find.descendant(
         of: find.byType(PhoneNeedsYou),

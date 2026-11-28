@@ -465,6 +465,15 @@ message ClientMessage {
     // RemoteAccess.local_notifications_offer_dismissed for this computer's
     // own app). Answered with Ack.
     DismissNotificationsOffer dismiss_notifications_offer = 267;
+    // Unpairs the person's device signed in with this account key, after
+    // Lock out on another device (E11-8 point 6).
+    UnpairAccountKey unpair_account_key = 254;
+    // Signs this Claktory in to the account with no code: a device of the
+    // person's approves it (#546, the no-code setup).
+    AccountAuthorize account_authorize = 255;
+    // This Claktory's word that the asking device is allowed on it, for
+    // approving another computer's request to join the account (#546).
+    ProveAllowedDevice prove_allowed_device = 256;
     // A device waiting to be allowed (its Hello answered with
     // PairingPending) takes back its own request, when the person taps
     // Cancel on it (#603). Sent on that waiting connection only.
@@ -493,6 +502,30 @@ message ClientMessage {
     // Turns crediting Claktory (Workspace.attribution) on or off. Answered
     // with Ack.
     SetAttribution set_attribution = 276;
+    // The person's Delete kept copy on a sealed version. Answered with Ack.
+    DeleteSealedCopy delete_sealed_copy = 277;
+    // `factoryd pair` on this computer: asks the person's devices to add a
+    // device, with no code. The one device request a command line may make.
+    // Answered with AddDeviceRequested.
+    RequestAddDevice request_add_device = 278;
+    // An agent's checklist, or its background tasks, as their panels show
+    // them, without opening the panel. Answered with ExtensionView (reply_to
+    // set), to the asker only; the open panel doesn't change. Its body is
+    // unset when the agent doesn't have that extension on.
+    GetChecklist get_checklist = 279;
+    ListTasks list_tasks = 280;
+    // Settings → Device activity: a page of what the person's devices did,
+    // and, with `watch`, what they do next. Answered with DeviceActivity,
+    // to the asker only. The person's devices only (never an agent's tool
+    // or a pipe).
+    ListDeviceActivity list_device_activity = 281;
+    // A live view of one agent's browser (watch only), or of the one tab a
+    // check request holds (input allowed for that request alone). The
+    // person's only, from their devices. Answered with Ack, or Error with a
+    // sentence to show. See WatchAgentTab.
+    WatchAgentTab watch_agent_tab = 282;
+    AgentTabFrameAck agent_tab_frame_ack = 283;
+    AgentTabInput agent_tab_input = 284;
   }
 }
 
@@ -573,6 +606,12 @@ message Alert {
   // once, when it makes this alert urgent), and its words aren't kept.
   // Empty for an alert nothing folded into, and for withheld ones.
   repeated string also_from = 10;
+  // Claktory's own alert about a device, such as one just allowed ("Lisa's
+  // iPhone can now use nixos."): that device's id (PairedDevice.id). That
+  // device can't mark it read (ReadAlerts is refused there): only the
+  // person's other devices can. Opening the alert opens Settings → Device
+  // activity for that device, where Remove… is. Empty for every other alert.
+  string device_id = 11;
 }
 
 // A new group at the end of the project's (Workspace.pipe_groups).
@@ -937,14 +976,35 @@ message ServerMessage {
     RecoveryCodes recovery_codes = 92;
     // The answer to VouchDevice, to the asker only.
     DeviceVouched device_vouched = 91;
-    // 94: RecoveryKeyToSign (#239), the answer to NewRecoveryKey with an
-    // account, comes with v0.2.0; reserved for it.
+    // The answer to ProveAllowedDevice, to the asker only.
+    AllowedDeviceWord allowed_device_word = 93;
+    // The answer to NewRecoveryKey with an account's key (#239), to the
+    // asker only.
+    RecoveryKeyToSign recovery_key_to_sign = 94;
     // The answer to an undoable ArrangeAgent, to the asker only.
     Arranged arranged = 95;
     // The answer to PreviewProjectFolder, to the asker only.
     ProjectFolderPreview project_folder_preview = 96;
     // The answer to PreviewArrange, to the asker only.
     ArrangePreview arrange_preview = 97;
+    // A file was sealed (the Seal extension), to every client: its seals
+    // now, and whether it matches the latest, as of the seal. Viewers
+    // showing the file (by FileContent.seals.path) update; a later change
+    // to the file comes as a read's FileContent.seals.
+    FileSeals file_seals = 98;
+    // The answer to RequestAddDevice, to the asker only.
+    AddDeviceRequested add_device_requested = 99;
+    // The answer to ListDeviceActivity, to the asker only; while it
+    // watches, what's new or changed comes the same way, with `live`.
+    DeviceActivity device_activity = 100;
+    // To the connection watching (WatchAgentTab) alone, never in the
+    // Workspace, to agents, tools or pipes: a frame of the view, and the
+    // view ending on Claktory's side.
+    AgentTabFrame agent_tab_frame = 101;
+    AgentTabViewEnded agent_tab_view_ended = 102;
+    // To the connection with a check's view open: why some of its input
+    // went nowhere, at most one a second.
+    AgentTabNote agent_tab_note = 103;
   }
   // Resuming the Workspace on reconnect (#378), only to an app whose Hello
   // has workspace_patches. On a message carrying a Workspace or a
@@ -1056,8 +1116,8 @@ message Welcome {
   string server_version = 2;
   // Through the tunnel, the paired device this connection is (see
   // RemoteAccess.devices), so the app can mark it "This device"; "local" for
-  // this machine's own app (its code from <data folder>/remote/local-pairing);
-  // empty on the loopback port.
+  // this machine's own app (on its socket, <data folder>/app.sock, since
+  // #546 A); "tool" for an agent's command on the loopback port.
   string device_id = 3;
   // This Claktory's name and color (see Settings), to show before the first
   // Workspace.
@@ -1066,6 +1126,31 @@ message Welcome {
   // Versions before #527 S3 gave a device a deadline to confirm it's the
   // owner's; there are none now, so this is always 0.
   int64 confirm_by_ms = 6;
+  // Why this connection can't approve a move or a Claktory joining the
+  // account here (ProveAllowedDevice refuses it), in words to show in
+  // place of Approve on those cards; empty when it can: it showed, when it
+  // connected, the account key of a device signed in to this Claktory's
+  // account. A device that signs in after it connected can approve once
+  // it connects again, with its assertion in Hello.
+  string cannot_approve = 7;
+}
+
+// Asks the person to add a device (`factoryd pair`): the device waits for its
+// code as Add a device makes it, and its card (a DevicePairing with
+// from_command_line) shows in the admin agent's conversation, where the
+// person's app gets the code with ShowPairingCode. Never answered with a
+// code. A request for a name already waiting gets that one again. Refused
+// when there's no admin agent, or when too many wait.
+message RequestAddDevice {
+  // What to call the device, e.g. "Laptop"; empty: the device names itself.
+  string name = 1;
+}
+
+// The device RequestAddDevice made waiting, with no code: its id in
+// RemoteAccess.devices and when its code stops working, in ms since 1970.
+message AddDeviceRequested {
+  string device_id = 1;
+  int64 expires_ms = 2;
 }
 
 // Pairs a new device with this Factory. Answered with PairingCode. Refused
@@ -1135,6 +1220,55 @@ message ApproveDevice {
 // device (#527 S3). Answered with Ack, also when it's gone already.
 message DismissAllowNotice {
   string device_id = 1;
+}
+
+// After Lock out on one of the person's devices (another one lost, stolen
+// or given away): every device here that connected with an assertion for
+// that account key is unpaired at once (its connections close, and it's
+// turned away from then on, as removed), and the key is remembered, so an
+// assertion for it never lets a device in again. A Claktory the app can't
+// reach learns of the removal at its next check-in instead, before it lets
+// any device in. Only from the person: an agent's command is refused
+// (ERROR_CODE_PERSON_ONLY). Answered with Ack, also when no device here had
+// that key.
+message UnpairAccountKey {
+  // The locked-out device's account key, as the account service and DMs
+  // name it (base64url without padding: its DM leaf id).
+  string account_key = 1;
+}
+
+// Signs this Claktory in to the account at `email` with no code (#546, the
+// no-code setup): the account service asks the person's devices to approve
+// this computer, and the Claktory waits for their answer
+// (CLAKTORY_ACCOUNT_STATE_AWAITING_APPROVAL, approval_expires_ms) for up to
+// 10 minutes, then is signed in, and the device that approved gets in at
+// once. Answered with Ack once the request is made (or already waiting for
+// the same email); ERROR_CODE_INVALID_REQUEST when the account has no device
+// that may approve (sign in with the emailed code instead) or another
+// computer asked at the same time. The one request agents' commands may make
+// (`factoryd account authorize`), and only while this Claktory has never been
+// signed in and has no device: otherwise ERROR_CODE_PERSON_ONLY.
+message AccountAuthorize {
+  string email = 1;
+}
+
+// Asks for this Claktory's word that the asking device is allowed on it,
+// for approving request `request_id` (another computer joining the
+// account) at the account service. Only a device that's in (the person's),
+// for the account key its connection proved; answered with
+// AllowedDeviceWord. ERROR_CODE_SIGN_IN_REQUIRED when this Claktory isn't
+// signed in or the connection proved no account key.
+message ProveAllowedDevice {
+  string request_id = 1;
+}
+
+// The answer to ProveAllowedDevice: `allowed` is the word to send with the
+// approval (POST /v1/devices/authorizations/<id>'s "allowed"), signed by
+// this Claktory for the device's account key and the request, working for
+// 120 seconds. Never shown or kept.
+message AllowedDeviceWord {
+  string request_id = 1;
+  string allowed = 2;
 }
 
 // Turns away a device that's waiting: its code stops working, the device is
@@ -1704,6 +1838,9 @@ message UpdateProject {
   // when `before_id` names no project ("The list changed while you were
   // dragging. Try again.").
   optional string before_id = 4;
+  // Sets the project's brief (Project.brief), trimmed; "" removes it. Unset
+  // leaves it as it is.
+  optional string brief = 5;
 }
 
 // Changes Factory-wide settings. Unset fields stay as they are. An empty
@@ -2129,6 +2266,22 @@ message ReadFile {
   // as an image sized for the screen (#379), to show while the PDF itself
   // loads. FileContent.page_count says how many it has. 0: no page.
   uint32 preview_page = 7;
+  // Read the version of `path` kept when it was sealed with this SHA-256
+  // (FileSeal.sha256, where FileSeal.kept), not the file as it is now:
+  // answered as any read (sha256 that version's, mime sniffed with the
+  // file's name, ranges from `offset`), without a preview, and
+  // unless_sha256 doesn't apply to it. Only a sealed version of this path
+  // is read; otherwise `error` is "This sealed version wasn't kept."
+  // Empty: the file as it is.
+  string sealed_sha256 = 8;
+  // The SHA-256 of the copy the app kept (an earlier FileContent.sha256),
+  // to open it again without reading it again: when the file is still that
+  // version, the answer has FileContent.unchanged, its path, mime, size,
+  // modified_ms and sha256 (the original's, even when a preview was asked)
+  // and no data. Changed, or empty: read as asked, from the version there
+  // now. Either way the answer has the whole file's sha256, even when
+  // truncated.
+  string unless_sha256 = 9;
 }
 
 message FileContent {
@@ -2153,7 +2306,8 @@ message FileContent {
   // empty then.
   string error = 7;
   // The whole file's SHA-256, in lowercase hex. Text and images read from
-  // the start leave it empty when `truncated`; videos and reads from an
+  // the start leave it empty when `truncated` (unless the read had
+  // ReadFile.unless_sha256); videos and reads from an
   // offset always have it, the same for every range of one version of the
   // file. A thread made on this content says it in
   // CreateThread.version_sha256.
@@ -2180,6 +2334,64 @@ message FileContent {
   // has. original_pixel_width/height are then the page's size in PDF
   // points, turned as it shows.
   uint32 page_count = 16;
+  // The file is still the version ReadFile.unless_sha256 named: no data
+  // came, and the copy the app kept is the one to show.
+  bool unchanged = 18;
+  // On every read from offset 0 that found the file: its seals, and whether
+  // it's still the version its latest seal names (Claktory hashes the whole
+  // file for that, so a truncated read has it too). `seals` is empty when
+  // it has none. FileSeals.path is the file's canonical path, the one
+  // ServerMessage.file_seals names it by.
+  FileSeals seals = 17;
+}
+
+// A seal on a file (the Seal extension): an agent recorded the file's
+// SHA-256 at a moment, with a note, in Claktory's own records, which
+// agents' tools can't change or remove.
+message FileSeal {
+  // The file's SHA-256 when sealed, in lowercase hex.
+  string sha256 = 1;
+  // The agent that sealed it.
+  string agent_id = 2;
+  // Its name when it sealed it (for an agent since removed or renamed).
+  string agent_name = 3;
+  int64 sealed_ms = 4;
+  // The agent's note, as it wrote it.
+  string note = 5;
+  // A copy of that version is kept (files up to 64 MB): ReadFile with
+  // sealed_sha256 opens it. False for a bigger file, sealed by its hash
+  // alone, and once the person deleted the copy (DeleteSealedCopy).
+  bool kept = 6;
+}
+
+enum FileSealState {
+  // No seals.
+  FILE_SEAL_STATE_UNSPECIFIED = 0;
+  // The file is the version its latest seal names.
+  FILE_SEAL_STATE_MATCHES = 1;
+  // It changed since its latest seal, or is gone.
+  FILE_SEAL_STATE_CHANGED = 2;
+}
+
+// Deletes the copy kept of a sealed version (FileSeal.kept), the person's
+// alone: the seals stay as they were made, and that version no longer
+// opens ("This sealed version wasn't kept."). The copy is per content, so
+// every seal of that SHA-256, on any file, loses it; seals made later keep
+// a copy again. Every client hears each such file's FileSeals
+// (ServerMessage.file_seals). Refused when no seal of `path` keeps `sha256`.
+message DeleteSealedCopy {
+  // The file, as FileSeals.path or as read.
+  string path = 1;
+  string sha256 = 2;
+}
+
+// A file's seals.
+message FileSeals {
+  // Absolute, "~" expanded and links resolved.
+  string path = 1;
+  // Newest first.
+  repeated FileSeal seals = 2;
+  FileSealState state = 3;
 }
 
 // Whether a FileContent is a preview (#379).
@@ -2818,8 +3030,8 @@ message MovedAway {
 // Deletes the copy a Claktory that moved away left on this computer, for
 // good: everything of it but the workspace and project folders inside its
 // home (docs/MOVE.md). Only a Claktory in moved mode takes it, and only from
-// this computer's own app: on the loopback port, after a Hello with the
-// local pairing code's token. Answered with Ack, or Error saying why.
+// this computer's own app, on its socket (<data folder>/app.sock). Answered
+// with Ack, or Error saying why.
 message DeleteMovedCopy {
   // What the person typed to confirm: it must be "delete".
   string typed_word = 1;
@@ -2876,6 +3088,12 @@ enum ErrorCode {
   // to work with someone else's agents, open a pipe. The message says
   // whether the device was let in here before. Connection closes.
   ERROR_CODE_OTHER_ACCOUNT = 17;
+  // Only the person can do this (#546): the request came from a tool
+  // connection (an agent's `factoryd` command or script, let in with
+  // `<home>/tool-token`), which may only read the Workspace and send what
+  // its allowlist names. The person does it on one of their devices, or in
+  // this computer's Claktory app. The connection stays open.
+  ERROR_CODE_PERSON_ONLY = 18;
 }
 
 // Everything the sidebar and headers need. Sent in full after `welcome` and
@@ -3072,6 +3290,10 @@ message Workspace {
   // agent follows it from its next context. False from a backend without
   // it.
   bool attribution = 56;
+  // This Claktory keeps Device activity (Settings → Device activity,
+  // ListDeviceActivity). False from one too old to: the app then shows no
+  // entry for it.
+  bool device_activity = 57;
 }
 
 // A place macOS protects (Workspace.protected_places). macOS has no way to
@@ -4800,6 +5022,12 @@ message Project {
   // (SetProjectCollapsed; Lucy's ux/projects-sidebar.md §4). Not the whole
   // Projects section (Workspace.projects_collapsed).
   bool collapsed = 7;
+  // The project's brief: its shared outcome, team and rules, written once.
+  // It goes into the system prompt of every agent in the project, above each
+  // agent's own instructions; a change reaches each from its next step, with
+  // a short Claktory event. Empty: none, and nothing is added. Changed with
+  // UpdateProject.brief.
+  string brief = 8;
 }
 
 // A folder that some of a project's agents work in. It only scopes where they
@@ -5210,9 +5438,9 @@ message Model {
 // The selected agent's whole transcript, oldest entry first.
 message Transcript {
   string agent_id = 1;
-  // The latest entries only: at most 200, and at most about 256 KB encoded
-  // (at least one, however big), starting at a model response's first entry.
-  // Older ones come with LoadEntries.
+  // The latest entries only: at most 50, and at most about 64 KB encoded
+  // (at least one, however big), starting at a model response's first entry:
+  // about a screenful. Older ones come with LoadEntries.
   repeated Entry entries = 2;
   // There are entries before the first of `entries`.
   bool has_earlier = 3;
@@ -5582,6 +5810,11 @@ message ProposalGrant {
   repeated string warnings = 2;
   // When Rivet made it on this approval, in ms since 1970; 0 while unused.
   int64 used_ms = 3;
+  // It changes a pipe's settings (pipes_settings), which only the person
+  // approves: the Windows app's connection can't (its approval and its
+  // reply are refused with PERSON_ONLY), so it shows where to approve
+  // instead. One whose grant can't be read says so too.
+  bool widens_pipe = 4;
 }
 
 // A device an agent adds for the person (an admin agent's devices_add tool,
@@ -5862,6 +6095,9 @@ message DevicePairing {
   // tablet and pasting for a computer. UNSPECIFIED when it didn't say:
   // the card offers both ways.
   DeviceKind kind = 8;
+  // Started by `factoryd pair` on this computer's command line
+  // (RequestAddDevice), not by agent_id, whose conversation only shows it.
+  bool from_command_line = 9;
 }
 
 enum DevicePairingState {
@@ -7008,6 +7244,14 @@ message ClaktoryAccount {
   // email comes from, such as "code@auth.claktory.com", so the person knows
   // what to look for (in spam too); empty when unknown.
   string code_from = 13;
+  // AWAITING_APPROVAL: when the request stops waiting, in ms since 1970.
+  int64 approval_expires_ms = 14;
+  // A computer asking to join the account, waiting for the person's
+  // approval (#546), by the account service's request id: the bell. A
+  // device signed in to the account shows the request's card from the
+  // service (GET /v1/devices/authorizations), never from here. Empty
+  // almost always.
+  repeated string authorizations_waiting = 15;
   // Switch account… (V6): while this Claktory is signed in and a sign-in to
   // another address waits for its code, the address the code went to. The
   // state stays SIGNED_IN with the current email, which stays signed in
@@ -7031,6 +7275,10 @@ enum ClaktoryAccountState {
   // (SkipAccountSignIn): the app doesn't ask again. Settings → Account
   // offers to sign in, as from SIGNED_OUT (AccountSignIn works from here).
   CLAKTORY_ACCOUNT_STATE_SKIPPED = 5;
+  // Asked to join the account with no code (AccountAuthorize, or an emailed
+  // code once the account has a device): waiting for the person to approve
+  // it on one of their devices, until approval_expires_ms.
+  CLAKTORY_ACCOUNT_STATE_AWAITING_APPROVAL = 6;
 }
 
 // Emails a code to sign this Claktory in. Answered with Ack once it's sent;
@@ -9679,6 +9927,19 @@ message Move {
   // says: the person can match it with their server's. Empty through a
   // relay. Set from MOVE_PHASE_CONFIRM on.
   string target_address = 21;
+  // A move with the account (#546): the other computer asked the account
+  // service to receive this Claktory (`factoryd receive --email`), and the
+  // person approved it on one of their devices connected here, in Settings →
+  // Move, with the device's own signed approval, which this Claktory checked
+  // against its own devices. Such a move has no code and no digits: it never
+  // shows MOVE_PHASE_CONFIRM. approved_by_device_id is that paired device's
+  // id ("local" for this computer's own app), approved_by_name its name as
+  // Settings → Devices had it, and approval_key the account key (base64url)
+  // that signed the approval, for History. All empty for a move started
+  // with a receive code.
+  string approved_by_device_id = 22;
+  string approved_by_name = 23;
+  string approval_key = 24;
 }
 
 message MovePath {
@@ -10134,6 +10395,8 @@ message NeedsYouRecord {
   // agent ("Kept in Secrets as shop.example recovery codes"). Empty when
   // the person chose I saved them, and for every other card.
   string codes_kept_as = 40;
+  // SEALED: the file, absolute, to open it. Empty for every other kind.
+  string sealed_path = 41;
 }
 
 enum NeedsYouRecordKind {
@@ -10279,6 +10542,12 @@ enum NeedsYouRecordKind {
   // turned on the browser for Yukako", "You turned off the browser for
   // Yukako"). Agents can't turn their own on.
   NEEDS_YOU_RECORD_KIND_BROWSER = 25;
+  // An agent sealed a file (the Seal extension): no card, no approval.
+  // Outcome CHANGED, agent_id the agent, title Claktory's sentence
+  // ("Tomás sealed passline.md"), agent_reason the seal's note, in the
+  // agent's words, sealed_path the file. seq is the seal call's entry in
+  // its conversation.
+  NEEDS_YOU_RECORD_KIND_SEALED = 26;
 }
 
 enum NeedsYouOutcome {
@@ -11310,6 +11579,14 @@ enum DmSendResult {
   // This Claktory doesn't take direct messages (it isn't the home, or the
   // preview is off).
   DM_SEND_RESULT_NOT_HOME = 9;
+  // Held back: the conversation still holds a device its account's signed
+  // device list no longer names (a device locked out). Nothing was kept:
+  // take that device out of the conversation, then send it again.
+  DM_SEND_RESULT_REMOVED_DEVICE_IN_GROUP = 10;
+  // The sending device isn't on the person's current signed device list
+  // (locked out or removed), so its home takes nothing from it. A device
+  // just added may see this until the home reads the new list (seconds).
+  DM_SEND_RESULT_NOT_LISTED = 11;
 }
 
 message DmDelivery {
@@ -11840,6 +12117,135 @@ message AgentBrowserViewMoved {
   string device = 1;
 }
 
+// ---- Live views of an agent's browser ----
+//
+// Two views, each of one agent's browser, each the person's alone: its
+// frames go only to the connection that asked, and only while it watches;
+// nothing of them is kept, and the agent never gets them. Each frame shows
+// only the page of one tab (never the browser's own bar, another tab or
+// another agent's browser), and Claktory's frame around it names the agent
+// and the site (AgentTabFrame.site), which the page can't draw over.
+//
+// - Watch only (request_seq 0): the page the agent's browser shows now,
+//   following it from tab to tab and site to site. No input.
+// - A check (request_seq set): the tab of the agent's check request (an
+//   AskPerson whose Errand.handoff has kind CAPTCHA, at that seq). Input
+//   counts (AgentTabInput) only from this connection, only while the
+//   request is open, and only into that page: no file picker, download,
+//   permission prompt or new window comes of it. The view ends at once if
+//   the tab leaves the check's site (ErrandHandoff.domain: any page of
+//   another registrable domain, about:blank and data: included); the
+//   request then says so. The agent can't use that tab meanwhile, and
+//   learns only how the request ended, never what was typed or tapped.
+//
+// One connection watches a view at a time: the same view opened from
+// another device moves there, and this one gets AgentTabViewEnded MOVED. A
+// connection watches one view at a time: watching another ends the one
+// before (without an AgentTabViewEnded). Opening and closing a view are in
+// the agent's browser log (ListErrandLog), with the site.
+
+// Starts or stops this connection's view. Refused: from anything but the
+// person's own device; for an agent whose browser isn't open (watch only)
+// or for a request that isn't an open check (request_seq set).
+message WatchAgentTab {
+  string agent_id = 1;
+  // The check request's seq in the agent's conversation (ErrandHandoff.seq);
+  // 0 for the watch-only view.
+  uint64 request_seq = 2;
+  // False stops this connection's view (agent_id and request_seq aren't
+  // needed then).
+  bool on = 3;
+  // The widest frame this device wants, in pixels (about 1280 on a Mac, the
+  // screen's width times its scale on a phone); 0: 1280. Frames are scaled
+  // down to it, never up, and never past 2048.
+  uint32 max_width = 4;
+}
+
+// This connection has frame `frame_seq`: the next can come. Frames come
+// one at a time, at most 15 a second, only when the page changes.
+message AgentTabFrameAck {
+  string agent_id = 1;
+  uint64 request_seq = 2;
+  uint64 frame_seq = 3;
+}
+
+// The person's input to the check's tab, from the connection watching it,
+// while the request is open; refused otherwise (a watch-only view takes
+// none). Pointer and wheel positions are fractions of frame `frame_seq`, as
+// in AgentBrowserPointer and AgentBrowserWheel. Only into the page: paste
+// is refused (no clipboard either way), the secondary button is dropped
+// (no menu), and keys held with Control or Command are dropped but for
+// select all (a) and undo (z). At most 4 KB of
+// text and 256 events a message, 240 events a second; more are dropped.
+// Never logged, kept or told to the agent.
+message AgentTabInput {
+  string agent_id = 1;
+  uint64 request_seq = 2;
+  repeated AgentBrowserEvent events = 3;
+}
+
+message AgentTabFrame {
+  string agent_id = 1;
+  // As on WatchAgentTab: 0 for the watch-only view.
+  uint64 request_seq = 2;
+  // Ack it with AgentTabFrameAck.
+  uint64 frame_seq = 3;
+  bytes jpeg = 4;
+  // The JPEG's own size, checked: at most max_width wide and 4096 high,
+  // and at most 1 MB.
+  uint32 width = 5;
+  uint32 height = 6;
+  // The tab's site in Claktory's words, for its frame: the registrable
+  // domain of the page's address as Chrome reports it, in ASCII (punycode:
+  // "xn--80ak6aa92e.com"), any hidden character shown as a code
+  // ("\u{200b}"). Empty on a page with no site (about:blank). Never the
+  // page's own words.
+  string site = 7;
+  // The page's origin as Chrome reports it ("https://accounts.x.com"), and
+  // its title, which is the page's: show it apart from the site, as the
+  // page's (control and invisible characters taken out, at most 200
+  // characters).
+  string origin = 8;
+  string title = 9;
+}
+
+enum AgentTabViewEnd {
+  AGENT_TAB_VIEW_END_UNSPECIFIED = 0;
+  // The same view was opened on another device (`device`).
+  AGENT_TAB_VIEW_END_MOVED = 1;
+  // The check's tab left its site (a navigation or a redirect to another
+  // registrable domain): the view stopped before showing it, and the
+  // request says so.
+  AGENT_TAB_VIEW_END_LEFT_SITE = 2;
+  // The check request was answered, dismissed or taken back.
+  AGENT_TAB_VIEW_END_REQUEST_ENDED = 3;
+  // The agent's browser closed, or the tab did.
+  AGENT_TAB_VIEW_END_CLOSED = 4;
+  // It can't be shown now: the browser is waiting for the person in
+  // another way (a sign-in with no automation), say.
+  AGENT_TAB_VIEW_END_UNAVAILABLE = 5;
+}
+
+// The view ended on Claktory's side: close it on this device.
+message AgentTabViewEnded {
+  string agent_id = 1;
+  uint64 request_seq = 2;
+  AgentTabViewEnd reason = 3;
+  // Claktory's sentence to show ("The page left x.com, so the view
+  // stopped.").
+  string message = 4;
+  // MOVED: that device's name.
+  string device = 5;
+}
+
+// A short line for the check's view, shown a moment over it ("Only the
+// check takes your clicks here.").
+message AgentTabNote {
+  string agent_id = 1;
+  uint64 request_seq = 2;
+  string message = 3;
+}
+
 message ErrandLog {
   string errand_id = 1;
   // Oldest first.
@@ -11864,4 +12270,208 @@ message ErrandLogEntry {
   // most 80 characters, read from the page: show it as the page's); empty
   // when none.
   string target = 8;
+}
+
+// ---- Panels, read without opening them ----
+
+// Answered with ExtensionView { extension_id "checklist", body checklist }.
+message GetChecklist {
+  string agent_id = 1;
+}
+
+// Answered with ExtensionView { extension_id "tasks", body tasks }: the
+// agent's tasks, or everyone's for an agent that sees all, as its Tasks
+// panel shows them.
+message ListTasks {
+  string agent_id = 1;
+}
+
+// ---- Device activity ----
+//
+// What the person's devices did with their authority, recorded by the
+// backend when each request arrives, from the connection's own pairing
+// (never from what a device says about itself), with the backend's time.
+// Kept 90 days, then removed by age only; no request changes or clears
+// it. Nothing in it is a message's text, a typed answer, a code, a token,
+// a secret's value, a prompt or setting's value, or a file's contents:
+// only what was done, to what (by name), and when.
+
+// Asks for a page of rows, newest first. Answered with DeviceActivity.
+message ListDeviceActivity {
+  // Only this device's rows and sessions (ActivityDevice.id); empty for
+  // every device.
+  string device_id = 1;
+  // Rows older than this one (DeviceActivityRow.id): the next page, from
+  // the last row of the one before. 0: the newest.
+  int64 before_id = 2;
+  // How many rows; 0 for 200, at most 1000.
+  uint32 limit = 3;
+  // Only rows whose words, `about`, device name or `bold` names hold every
+  // word of it, whatever the case. Empty: every row.
+  string search = 4;
+  // Keep sending this connection what's new or changed (rows, sessions,
+  // devices) as DeviceActivity with `live`, for this device_id and search,
+  // until a ListDeviceActivity with watch false or the connection ends.
+  bool watch = 5;
+}
+
+message DeviceActivity {
+  // Newest first (by id, which is the order they began).
+  repeated DeviceActivityRow rows = 1;
+  // The sessions the rows fall in, newest first, with what was opened in
+  // each: the device view's separators.
+  repeated DeviceSession sessions = 2;
+  // Every device with rows or paired now, removed ones too: the Device
+  // menu. Whole on every answer and every live one.
+  repeated ActivityDevice devices = 3;
+  // Older rows remain: ask again with before_id the last row's id.
+  bool more = 4;
+  // Sent while watching: rows and sessions that are new, or changed (a
+  // repeat counted into a row, a session ended, something opened). Merge
+  // by id; a row or session already held is replaced.
+  bool live = 5;
+}
+
+// The two entries for the computer Claktory runs on: its app (and, until
+// the Mac app has a key of its own, any program on it that doesn't name
+// itself), and Claktory's own commands there (factoryd …).
+// ActivityDevice.id "local" and "local:commands".
+message ActivityDevice {
+  // PairedDevice.id, or "local" / "local:commands".
+  string id = 1;
+  // Its name now, or as last known when removed. A device names itself:
+  // show it on one line, cut, with hidden characters shown as code.
+  string name = 2;
+  DeviceKind kind = 3;
+  // As PairedDevice.platform; empty when unknown.
+  string platform = 4;
+  // When it was added (paired); 0 for the computer's own entries.
+  int64 added_ms = 5;
+  // When it was removed; 0 while it's still paired.
+  int64 removed_ms = 6;
+  // The computer Claktory runs on: its app ("local") or its commands
+  // ("local:commands").
+  bool this_computer = 7;
+  bool commands = 8;
+}
+
+enum ActivityOutcome {
+  ACTIVITY_OUTCOME_UNSPECIFIED = 0;
+  ACTIVITY_OUTCOME_DONE = 1;
+  // Refused: show "· not allowed".
+  ACTIVITY_OUTCOME_NOT_ALLOWED = 2;
+  // Tried, and it failed.
+  ACTIVITY_OUTCOME_FAILED = 3;
+}
+
+// Where a row or an opened thing is.
+enum ActivityPlaceKind {
+  // Nothing to open (or it's gone): no chevron.
+  ACTIVITY_PLACE_KIND_UNSPECIFIED = 0;
+  // An agent's conversation: id the agent's, seq the entry (0: its end).
+  ACTIVITY_PLACE_KIND_CONVERSATION = 1;
+  // A chat: id the chat's.
+  ACTIVITY_PLACE_KIND_CHAT = 2;
+  // An agent's settings: id the agent's.
+  ACTIVITY_PLACE_KIND_AGENT_SETTINGS = 3;
+  // Settings → Secrets, at this secret: id its name.
+  ACTIVITY_PLACE_KIND_SECRET = 4;
+  // Settings → Devices, at this device: id ActivityDevice.id.
+  ACTIVITY_PLACE_KIND_DEVICE = 5;
+  // A section of Settings: id "secrets", "devices", "providers",
+  // "account", "notifications", "apps", "general" or "activity" (Device
+  // activity itself, which is recorded as opened like any other).
+  ACTIVITY_PLACE_KIND_SETTINGS = 6;
+  // A pipe: id the pipe's.
+  ACTIVITY_PLACE_KIND_PIPE = 7;
+  // A project: id the project's.
+  ACTIVITY_PLACE_KIND_PROJECT = 8;
+  // A file: id its path.
+  ACTIVITY_PLACE_KIND_FILE = 9;
+  // An app (the Marketplace's Apps): id the app's.
+  ACTIVITY_PLACE_KIND_APP = 10;
+}
+
+message ActivityPlace {
+  ActivityPlaceKind kind = 1;
+  string id = 2;
+  uint64 seq = 3;
+}
+
+message DeviceActivityRow {
+  int64 id = 1;
+  // When it happened, by the backend's clock; until_ms is the last action
+  // counted into it (equal to at_ms for one action).
+  int64 at_ms = 2;
+  int64 until_ms = 3;
+  // How many actions it stands for: 1, or repeats of the same thing within
+  // about 10 minutes ("Sent 3 messages to Bruno"), or, on a `folded` row,
+  // everything past the device's bound in its session.
+  uint32 count = 4;
+  // The device (ActivityDevice.id), and its name as it was then.
+  string device_id = 5;
+  string device_name = 6;
+  // The line, in plain words with the count in them: "Approved June's
+  // request", "Changed settings 40 times", "Tried to delete Rivet". On a
+  // folded row, "…and 3,412 more actions": show its times after it
+  // ("14:31–14:36").
+  string text = 7;
+  // The names in `text` to show bold, each a substring of it, in order.
+  repeated string bold = 8;
+  // What it was about, shown under the line in quotes, as History shows a
+  // request's title; empty for nothing. An agent wrote it: show it on one
+  // line, cut, with hidden characters shown as code.
+  string about = 9;
+  ActivityOutcome outcome = 10;
+  // What a tap opens; unset (or kind UNSPECIFIED) when nothing, or when
+  // it's gone since.
+  ActivityPlace place = 11;
+  // An agent did it, in a run this device's message started: show "Asked
+  // from <device>", and with `via`, ", via <names>" (the agents it passed
+  // through first, in order).
+  bool asked = 12;
+  repeated string via = 13;
+  // The running row past the device's bound in a session: what came after
+  // the first rows, counted, never written one by one, so a flood can't
+  // push out what came before it.
+  bool folded = 14;
+  // Its session (DeviceSession.id); 0 for none (a command, say).
+  int64 session_id = 15;
+}
+
+// A device's connection, from connecting to leaving: "Connected
+// 14:02–15:20, directly · Opened Bruno, June and Secrets".
+message DeviceSession {
+  int64 id = 1;
+  string device_id = 2;
+  int64 from_ms = 3;
+  // 0 while it's still connected.
+  int64 until_ms = 4;
+  // How it reached this Claktory.
+  SessionPath path = 5;
+  // What it opened, each once, in the order first opened: conversations,
+  // chats, Settings sections, files. By name, never what was in them.
+  repeated ActivityOpened opened = 6;
+}
+
+// How a device's connection reached this Claktory: the session line's
+// ", directly" or ", through claktory.com". Never the word relay.
+enum SessionPath {
+  // Not known (a session from before Claktory told them apart): say nothing.
+  SESSION_PATH_UNSPECIFIED = 0;
+  // Straight to this computer, over the internet or the local network.
+  SESSION_PATH_DIRECT = 1;
+  // Through Claktory's own relay (claktory.com).
+  SESSION_PATH_CLAKTORY = 2;
+  // Through a relay the person set in place of Claktory's.
+  SESSION_PATH_OTHER_RELAY = 3;
+  // The app on the computer Claktory runs on, without the network.
+  SESSION_PATH_THIS_COMPUTER = 4;
+}
+
+message ActivityOpened {
+  ActivityPlaceKind kind = 1;
+  string id = 2;
+  // As it was named when opened (an agent's name, a file's name).
+  string name = 3;
 }

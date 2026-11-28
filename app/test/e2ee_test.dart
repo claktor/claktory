@@ -243,6 +243,7 @@ void main() {
     await matt.device.send(
       groupId: dmUnb64(group.groupId),
       content: _text('m1', 'kept'),
+      listVersions: const [],
       nowMs: 1,
     );
     // As after a restart: what was encrypted and not sent goes now.

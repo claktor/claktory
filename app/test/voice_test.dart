@@ -186,6 +186,27 @@ void main() {
       expect(mic, findsNothing);
     });
 
+    testWidgets("Windows can't record yet: no mic, though Settings → Voice "
+        'still looks after the speech model', (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      final harness = Harness(
+        withVoice(SpeechModelState.SPEECH_MODEL_STATE_READY, bytes: 740000000),
+      );
+      await harness.show(tester);
+      expect(mic, findsNothing);
+      harness.page.value = AppPage.settings;
+      harness.backend.settingsSection.value = 'voice';
+      await settle(tester);
+      await tester.scrollUntilVisible(
+        find.text('Speech model'),
+        300,
+        scrollable: settingsSectionScroll('voice'),
+      );
+      expect(find.text('Speech model'), findsOneWidget);
+      debugDefaultTargetPlatformOverride = null;
+    });
+
     testWidgets('the first time, it asks before the download; then it '
         'records, and Send sends a voice message', (tester) async {
       final harness = Harness(

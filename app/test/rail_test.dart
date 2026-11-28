@@ -278,6 +278,69 @@ void main() {
       expect(phone.connections.saved, [own]);
     });
 
+    test(
+      "with no code to read, this Mac's own Claktory is known by what it "
+      "says over its connection: an account list's entry for it goes",
+      () async {
+        final app = _App();
+        final own = RemoteFactory.fromAccount(
+          const AccountClaktory(id: 'n', name: 'nixos', endpointId: _nixosKey),
+        );
+        final mini = parsePairingCode(_mini)!;
+        app.connections
+          ..use(mini)
+          ..use(own);
+        final claktories = Claktories(
+          connections: app.connections,
+          localBackend: true,
+          open: app.open,
+          drafts: app.drafts,
+        );
+        addTearDown(claktories.dispose);
+        await pumpEventQueue();
+        expect(claktories.ownEndpoint, isEmpty, reason: 'not said yet');
+        expect(app.connections.saved, [mini, own]);
+
+        app.backends['']!.workspace.apply(
+          _workspace('Rivet')
+            ..remote = RemoteAccess(endpointId: _nixosKey.toUpperCase()),
+        );
+        await pumpEventQueue();
+        expect(claktories.ownEndpoint, _nixosKey);
+        expect(app.connections.saved, [mini]);
+        expect(claktories.all.map((c) => c.key), ['', _mini]);
+
+        // Added from the account's list again: it goes again.
+        app.connections.use(own);
+        app.backends['']!.workspace.apply(
+          _workspace('Rivet')..remote = RemoteAccess(endpointId: _nixosKey),
+        );
+        await pumpEventQueue();
+        expect(app.connections.saved, [mini]);
+
+        // What another Claktory says of itself is never taken as this Mac's.
+        final other = _App(
+          snapshots: {
+            _mini: _workspace('Rivet')
+              ..remote = RemoteAccess(endpointId: _nixosKey),
+          },
+        );
+        other.connections
+          ..use(mini)
+          ..use(own);
+        final its = Claktories(
+          connections: other.connections,
+          localBackend: true,
+          open: other.open,
+          drafts: other.drafts,
+        );
+        addTearDown(its.dispose);
+        await pumpEventQueue();
+        expect(its.ownEndpoint, isEmpty);
+        expect(other.connections.saved, [mini, own]);
+      },
+    );
+
     test('a phone shows another paired one when the one showing goes', () {
       final app = _App();
       final claktories = Claktories(
@@ -1234,6 +1297,7 @@ void main() {
           received: 0,
           linkReceived: 0,
           dialTimeoutMs: 0,
+          dialMs: 0,
           reach: TunnelReach.none,
         );
         app.backends[long]!.connected.value = false;

@@ -1,0 +1,33 @@
+[package]
+name = "claktory-calendar"
+version = "0.1.2"
+edition = "2024"
+description = "Claktory's Calendar app: what your agents have scheduled, are running and have planned."
+publish = false
+
+# Its own workspace: it builds for wasm32-wasip2 (scripts in README.md),
+# apart from Claktory's crates.
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wit-bindgen = "0.63"
+wasi = "0.14"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+codegen-units = 1
+panic = "abort"
+
+# The tests run the layers' queries in SQLite, against tables shaped like
+# Claktory's records.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+rusqlite = { version = "0.43.0", features = ["bundled"] }

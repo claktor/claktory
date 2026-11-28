@@ -52,7 +52,7 @@ void main() {
     tester,
   ) async {
     final harness = await _phone(tester);
-    await _openFromExtensions(tester, 'Charts · Days');
+    await _openFromExtensions(tester, 'Charts app · Days');
     final view = tester.widget<AppView>(find.byType(AppView));
     expect(view.appId, 'charts');
     expect(view.appName, 'Charts');
@@ -60,7 +60,7 @@ void main() {
     expect(view.transport, same(harness.backend));
     expect(find.text("Can't show this kind of file"), findsNothing);
     // The page's header: the app's name first, then the view's title.
-    expect(find.text('Charts · Days'), findsWidgets);
+    expect(find.text('Charts app · Days'), findsWidgets);
     await tester.tap(find.bySemanticsLabel('Back').last);
     await pumpFrames(tester, const Duration(seconds: 1));
     expect(find.byType(AppView), findsNothing);
@@ -76,7 +76,7 @@ void main() {
     expect(routes.showPane('a1', 'v1'), isTrue);
     await pumpFrames(tester, const Duration(seconds: 1));
     expect(find.byType(AppView), findsOneWidget);
-    expect(find.text('Charts · Days'), findsWidgets);
+    expect(find.text('Charts app · Days'), findsWidgets);
     // The agent showed already: nothing asked of the backend.
     expect(harness.backend.sent.where((m) => m.hasSelectAgent()), isEmpty);
   });

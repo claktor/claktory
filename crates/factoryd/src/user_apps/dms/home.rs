@@ -74,6 +74,12 @@ pub(crate) const TOTAL_BYTES: i64 = 5 << 30;
 pub(crate) const FREE_FLOOR: u64 = 5 << 30;
 /// When a refused friend or device should try again.
 const FULL_RETRY_MS: i64 = 15 * 60_000;
+/// What one friend's home may leave pending here (`pend`): conversations,
+/// messages and bytes, and for how long.
+const PENDING_GROUPS: i64 = 8;
+const PENDING_MESSAGES: i64 = 200;
+const PENDING_BYTES: i64 = 10 << 20;
+pub(crate) const PENDING_MS: i64 = 7 * 86_400_000;
 /// A page: entries by default and at most, and bytes.
 const PAGE: usize = 50;
 const PAGE_MOST: usize = 100;
@@ -267,6 +273,27 @@ CREATE TABLE IF NOT EXISTS friend_homes (
     endpoint TEXT NOT NULL,
     at INTEGER NOT NULL
 );
+-- Every friend's home the person's device routes, with or without a
+-- conversation: it may knock, and what it delivers for a conversation not
+-- routed to it yet waits in `pending`. set_routes replaces it whole.
+CREATE TABLE IF NOT EXISTS friend_routes (
+    endpoint TEXT PRIMARY KEY,
+    account TEXT NOT NULL
+);
+-- What a friend's home delivered for a conversation the person's device
+-- hasn't routed to it yet: taken in once the device routes that
+-- conversation to that same home, dropped if it routes it to another one
+-- or after PENDING_MS. Never served or answered as delivered meanwhile;
+-- the sender keeps its copy.
+CREATE TABLE IF NOT EXISTS pending (
+    endpoint TEXT NOT NULL,
+    group_id BLOB NOT NULL,
+    message_id TEXT NOT NULL,
+    envelope BLOB NOT NULL,
+    account TEXT NOT NULL,
+    received INTEGER NOT NULL,
+    PRIMARY KEY (endpoint, group_id, message_id)
+) WITHOUT ROWID;
 -- Where the person's own messages go as they come in: friends' homes, and
 -- the person's home from a Claktory that isn't it.
 CREATE TEMP VIEW IF NOT EXISTS onward (endpoint, account, group_id) AS
@@ -429,6 +456,9 @@ pub(crate) enum Arrival {
     Delivered { leaf_id: String, client_message_id: String, group_id: Vec<u8>, endpoint: String },
     /// A friend's home bounced it: re-encrypt at `epoch`.
     Bounced { leaf_id: String, client_message_id: String, group_id: Vec<u8>, epoch: u64, endpoint: String },
+    /// The person's current signed list no longer names this device leaf
+    /// (locked out, removed): its follows end now (E11-8 (b)).
+    Unlisted { leaf_id: String },
 }
 
 /// What the home needs from claktory.com: a group's GroupInfo (a group it
@@ -880,7 +910,8 @@ impl Step<'_> {
         let full = Refusal::Full { retry_after_ms: FULL_RETRY_MS };
         let theirs: i64 = self.tx.query_row(
             "SELECT COALESCE((SELECT SUM(LENGTH(envelope)) FROM log WHERE mine = 0 AND account = ?1), 0)
-                  + COALESCE((SELECT SUM(LENGTH(envelope)) FROM held WHERE mine = 0 AND account = ?1), 0)",
+                  + COALESCE((SELECT SUM(LENGTH(envelope)) FROM held WHERE mine = 0 AND account = ?1), 0)
+                  + COALESCE((SELECT SUM(LENGTH(envelope)) FROM pending WHERE account = ?1), 0)",
             [friend],
             |row| row.get(0),
         )?;
@@ -889,7 +920,8 @@ impl Step<'_> {
             return Err(full);
         }
         let all: i64 = self.tx.query_row(
-            "SELECT COALESCE((SELECT SUM(LENGTH(envelope)) FROM log), 0) + COALESCE((SELECT SUM(LENGTH(envelope)) FROM held), 0)",
+            "SELECT COALESCE((SELECT SUM(LENGTH(envelope)) FROM log), 0) + COALESCE((SELECT SUM(LENGTH(envelope)) FROM held), 0)
+                  + COALESCE((SELECT SUM(LENGTH(envelope)) FROM pending), 0)",
             [],
             |row| row.get(0),
         )?;
@@ -1422,13 +1454,21 @@ pub(crate) fn caught_up(factory: &impl Host, group_id: &[u8]) -> Result<(), Refu
 /// queued: the table says where new messages go. A friend whose home moved
 /// gets what waited for the old one at the new one (`repoint`). The person's
 /// other Claktories bound here (`bind`) and the route to the home (`follow`)
-/// stay.
+/// stay. Every friend's home routed, a route with no groups too, is a
+/// friend's (`pend`).
 pub(crate) fn set_routes(factory: &impl Host, routes: Vec<Route>) -> Result<(), Refusal> {
     factory.run(|step| {
         let before = onward_now(step)?;
         step.tx.execute("DELETE FROM routes", [])?;
+        step.tx.execute("DELETE FROM friend_routes", [])?;
         for route in &routes {
             let endpoint = route.endpoint.to_ascii_lowercase();
+            if route.account != step.account {
+                step.tx.execute(
+                    "INSERT OR IGNORE INTO friend_routes (endpoint, account) VALUES (?1, ?2)",
+                    params![endpoint, route.account],
+                )?;
+            }
             for group in &route.group_ids {
                 step.tx.execute(
                     "INSERT INTO routes (endpoint, account, group_id) VALUES (?1, ?2, ?3) ON CONFLICT (endpoint, group_id) DO UPDATE SET account = ?2",
@@ -1491,14 +1531,29 @@ pub(crate) fn friend_moved(
             return Ok(Err(NotMoved::Older));
         }
         let old: Vec<String> = {
-            let mut statement = step.tx.prepare("SELECT DISTINCT endpoint FROM routes WHERE account = ?1 AND endpoint != ?2")?;
+            let mut statement = step.tx.prepare(
+                "SELECT endpoint FROM routes WHERE account = ?1 AND endpoint != ?2
+                 UNION SELECT endpoint FROM friend_routes WHERE account = ?1 AND endpoint != ?2",
+            )?;
             statement.query_map(params![account, endpoint], |row| row.get(0))?.collect::<Result<_, _>>()?
         };
-        let routed: bool = step.tx.query_row("SELECT COUNT(*) > 0 FROM routes WHERE account = ?1", [account], |row| row.get(0))?;
+        let routed: bool = step.tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM routes WHERE account = ?1) OR EXISTS (SELECT 1 FROM friend_routes WHERE account = ?1)",
+            [account],
+            |row| row.get(0),
+        )?;
         if !routed {
             return Ok(Err(NotMoved::NotRouted));
         }
         let before = onward_now(step)?;
+        // Its home as a friend's moves too; what its old one left pending
+        // goes, its sender still holding it.
+        step.tx.execute("DELETE FROM pending WHERE account = ?1 AND endpoint != ?2", params![account, endpoint])?;
+        let befriended: bool = step.tx.query_row("SELECT COUNT(*) > 0 FROM friend_routes WHERE account = ?1", [account], |row| row.get(0))?;
+        step.tx.execute("DELETE FROM friend_routes WHERE account = ?1 OR endpoint = ?2", params![account, endpoint])?;
+        if befriended {
+            step.tx.execute("INSERT INTO friend_routes (endpoint, account) VALUES (?1, ?2)", params![endpoint, account])?;
+        }
         step.tx.execute(
             "INSERT OR IGNORE INTO routes (endpoint, account, group_id) SELECT ?2, account, group_id FROM routes WHERE account = ?1",
             params![account, endpoint],
@@ -1553,6 +1608,102 @@ pub(crate) fn route_of(factory: &impl Host, endpoint: &str) -> Result<Option<Rou
         };
         let Some((account, _)) = rows.first().cloned() else { return Ok(None) };
         Ok(Some(Route { account, endpoint: endpoint.to_ascii_lowercase(), group_ids: rows.into_iter().map(|(_, group)| group).collect() }))
+    })
+}
+
+/// A friend's home at `endpoint` delivered `envelope` for a conversation
+/// the person's device hasn't routed to it: kept pending (`pending`) until
+/// it does, within that home's caps. NotRouted when `endpoint` isn't a
+/// friend's home the device routes, or the group is routed elsewhere.
+pub(crate) fn pend(factory: &impl Host, endpoint: &str, group_id: &[u8], envelope: &[u8]) -> Result<(), Refusal> {
+    let endpoint = endpoint.to_ascii_lowercase();
+    let envelope = Envelope::new(envelope.to_vec()).map_err(|error| Refusal::Invalid(error.to_string()))?;
+    let parsed = envelope.parsed();
+    if parsed.kind != MlsKind::Application || parsed.group.as_ref().is_none_or(|(group, _)| group.as_slice() != group_id) {
+        return Err(Refusal::Invalid("Only a conversation's application messages wait for its route.".to_owned()));
+    }
+    if !(16..=32).contains(&group_id.len()) {
+        return Err(Refusal::Invalid("A group's id is 16 to 32 bytes.".to_owned()));
+    }
+    let message_id = hex(&envelope.digest());
+    let bytes = envelope.bytes();
+    factory.run(|step| {
+        if !step.is_home {
+            return Err(Refusal::NotHome);
+        }
+        let account: Option<String> =
+            step.tx.query_row("SELECT account FROM friend_routes WHERE endpoint = ?1", [&endpoint], |row| row.get(0)).optional()?;
+        let Some(account) = account else { return Err(Refusal::NotRouted) };
+        let routed: bool = step.tx.query_row("SELECT COUNT(*) > 0 FROM reach WHERE group_id = ?1", [group_id], |row| row.get(0))?;
+        if routed {
+            return Err(Refusal::NotRouted);
+        }
+        step.tx.execute("DELETE FROM pending WHERE received < ?1", [step.now - PENDING_MS])?;
+        let already: bool = step.tx.query_row(
+            "SELECT COUNT(*) > 0 FROM pending WHERE endpoint = ?1 AND group_id = ?2 AND message_id = ?3",
+            params![endpoint, group_id, message_id],
+            |row| row.get(0),
+        )?;
+        if already {
+            return Ok(());
+        }
+        let (groups, messages, held): (i64, i64, i64) = step.tx.query_row(
+            "SELECT COUNT(DISTINCT CASE WHEN group_id != ?2 THEN group_id END), COUNT(*), COALESCE(SUM(LENGTH(envelope)), 0)
+             FROM pending WHERE endpoint = ?1",
+            params![endpoint, group_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        if groups >= PENDING_GROUPS || messages >= PENDING_MESSAGES || held + bytes.len() as i64 > PENDING_BYTES {
+            return Err(Refusal::Full { retry_after_ms: FULL_RETRY_MS });
+        }
+        step.room(&account, bytes.len())?;
+        step.tx.execute(
+            "INSERT INTO pending (endpoint, group_id, message_id, envelope, account, received) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![endpoint, group_id, message_id, bytes, account, step.now],
+        )?;
+        Ok(())
+    })
+}
+
+/// A message a friend's home left pending, now routed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Pending {
+    pub endpoint: String,
+    pub group_id: Vec<u8>,
+    pub message_id: String,
+    pub envelope: Vec<u8>,
+}
+
+/// What's pending for a conversation the person's device now routes to the
+/// home that left it, taken out to be taken in (`take`) as that home's
+/// delivery, oldest first. What's pending for a conversation routed to
+/// another home, or older than PENDING_MS, goes. A home off the friends'
+/// routes for a while (a device's table sent before it read its friends)
+/// keeps what it left: it's let in no further, and what it left is taken
+/// only once that conversation is routed to it.
+pub(crate) fn release_pending(factory: &impl Host) -> Result<Vec<Pending>, Refusal> {
+    factory.run(|step| {
+        step.tx.execute("DELETE FROM pending WHERE received < ?1", [step.now - PENDING_MS])?;
+        step.tx.execute(
+            "DELETE FROM pending WHERE NOT EXISTS (SELECT 1 FROM reach r WHERE r.endpoint = pending.endpoint AND r.group_id = pending.group_id)
+             AND EXISTS (SELECT 1 FROM reach r WHERE r.group_id = pending.group_id)",
+            [],
+        )?;
+        let ready: Vec<Pending> = {
+            let mut statement = step.tx.prepare(
+                "SELECT endpoint, group_id, message_id, envelope FROM pending p
+                 WHERE EXISTS (SELECT 1 FROM reach r WHERE r.endpoint = p.endpoint AND r.group_id = p.group_id)
+                 ORDER BY received",
+            )?;
+            statement
+                .query_map([], |row| Ok(Pending { endpoint: row.get(0)?, group_id: row.get(1)?, message_id: row.get(2)?, envelope: row.get(3)? }))?
+                .collect::<Result<_, _>>()?
+        };
+        step.tx.execute(
+            "DELETE FROM pending WHERE EXISTS (SELECT 1 FROM reach r WHERE r.endpoint = pending.endpoint AND r.group_id = pending.group_id)",
+            [],
+        )?;
+        Ok(ready)
     })
 }
 
@@ -1638,6 +1789,61 @@ pub(crate) fn unbind_missing(factory: &impl Host, listed: &[String]) -> Result<(
             [],
         )?;
         Ok(())
+    })
+}
+
+/// The person's leaves their current signed device list names, by kind,
+/// as the list watcher last read it (`set_listed`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct Listed {
+    pub devices: Vec<String>,
+    pub claktories: Vec<String>,
+}
+
+/// Keeps the leaves the person's current signed list names (the list
+/// watcher, from the list it verified): the home serves and takes from no
+/// device leaf off it (Fugo, E11-8 (b)), whatever the MLS groups still hold.
+/// Kept, so a restart with the vault locked still knows. Follows of a device
+/// leaf the list dropped end now.
+///
+/// The devices the new list dropped (their leaf ids), for the backstop
+/// that unpairs them (E11-8 point 6).
+pub(crate) fn set_listed(factory: &impl Host, listed: &Listed) -> Result<Vec<String>, Refusal> {
+    let value = serde_json::to_vec(listed).map_err(|error| Refusal::Unready(error.to_string()))?;
+    factory.run(|step| {
+        let before: Option<Listed> = meta(step.tx, "listed")?.and_then(|kept| serde_json::from_slice(&kept).ok());
+        if before.as_ref() == Some(listed) {
+            return Ok(vec![]);
+        }
+        step.tx.execute("INSERT OR REPLACE INTO meta (name, value) VALUES ('listed', ?1)", [&value])?;
+        let dropped: Vec<String> =
+            before.iter().flat_map(|before| &before.devices).filter(|leaf| !listed.devices.contains(leaf)).cloned().collect();
+        for leaf_id in &dropped {
+            step.arrivals.push(Arrival::Unlisted { leaf_id: leaf_id.clone() });
+        }
+        Ok(dropped)
+    })
+}
+
+/// Whether the person's current signed list names `leaf` as one of their
+/// devices; None before this Claktory read any list (`set_listed`).
+pub(crate) fn listed_device(factory: &impl Host, leaf: &str) -> Result<Option<bool>, Refusal> {
+    factory.run(|step| {
+        let listed: Option<Listed> = meta(step.tx, "listed")?.and_then(|kept| serde_json::from_slice(&kept).ok());
+        Ok(listed.map(|listed| listed.devices.iter().any(|device| device == leaf)))
+    })
+}
+
+/// The leaves of `group_id`'s tree as the home's public state has them
+/// (each one's certificate, unchecked but for its own signature key); None
+/// when the home has no state of the group.
+pub(crate) fn tree_leaves(factory: &impl Host, group_id: &[u8]) -> Result<Option<Vec<claktory_dm_crypto::certificate::Leaf>>, Refusal> {
+    factory.run(|step| {
+        let provider = step.provider()?;
+        let public = PublicGroup::load(provider.storage(), &GroupId::from_slice(group_id)).map_err(|error| Refusal::Unready(error.to_string()))?;
+        Ok(public.map(|public| {
+            public.members().filter_map(|member| certified(&member.credential, &member.signature_key)).map(|certificate| certificate.leaf).collect()
+        }))
     })
 }
 
@@ -1764,6 +1970,8 @@ fn hand_over(step: &Step<'_>) -> rusqlite::Result<()> {
     )?;
     step.tx.execute("DELETE FROM outbox WHERE endpoint IN (SELECT endpoint FROM routes)", [])?;
     step.tx.execute("DELETE FROM routes", [])?;
+    step.tx.execute("DELETE FROM friend_routes", [])?;
+    step.tx.execute("DELETE FROM pending", [])?;
     // And what it took that one of the person's leaves in the group hasn't
     // read yet (a leaf that never followed it: all of it), so the new home
     // serves it (Zucchero's rows 567 and 591, Fugo 39876 and 41196):
@@ -1870,9 +2078,11 @@ pub(crate) fn routes(factory: &impl Host) -> Result<Vec<Route>, Refusal> {
             let mut statement = step.tx.prepare("SELECT endpoint, account, group_id FROM reach ORDER BY endpoint, group_id")?;
             statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?.collect::<Result<_, _>>()?
         };
+        let mut away = false;
         if let Some(placed) = meta(step.tx, "placed")?
             && let Some(home) = String::from_utf8_lossy(&placed).strip_prefix("away:")
         {
+            away = true;
             rows.retain(|(endpoint, _, _)| !home.is_empty() && endpoint.eq_ignore_ascii_case(home));
         }
         // And the person's home, for what this Claktory hands on to it.
@@ -1896,6 +2106,20 @@ pub(crate) fn routes(factory: &impl Host) -> Result<Vec<Route>, Refusal> {
                 Some(route) if route.endpoint == endpoint => route.group_ids.push(group),
                 _ => routes.push(Route { account, endpoint, group_ids: vec![group] }),
             }
+        }
+        // Friends' homes with no conversation routed to them yet: let in
+        // to knock and leave what's pending, only while this is the home.
+        if step.is_home && !away {
+            let friends: Vec<(String, String)> = {
+                let mut statement = step.tx.prepare("SELECT endpoint, account FROM friend_routes ORDER BY endpoint")?;
+                statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?.collect::<Result<_, _>>()?
+            };
+            for (endpoint, account) in friends {
+                if !routes.iter().any(|route| route.endpoint == endpoint) {
+                    routes.push(Route { account, endpoint, group_ids: Vec::new() });
+                }
+            }
+            routes.sort_by(|a, b| a.endpoint.cmp(&b.endpoint));
         }
         Ok(routes)
     })
@@ -2273,6 +2497,7 @@ pub(crate) fn sweep(factory: &impl Host) -> Result<usize, Refusal> {
             gone += 1;
         }
         gone += step.tx.execute("DELETE FROM held WHERE received < ?1", [cutoff])?;
+        gone += step.tx.execute("DELETE FROM pending WHERE received < ?1", [step.now - PENDING_MS])?;
         gone += step.tx.execute("DELETE FROM gone WHERE at < ?1", [cutoff])?;
         gone += step.tx.execute("DELETE FROM sent WHERE at < ?1", [cutoff])?;
         gone += step.tx.execute("DELETE FROM outbox WHERE queued < ?1", [cutoff])?;
@@ -2729,6 +2954,114 @@ mod tests {
         // Bo's home routed for another group only: this one isn't taken.
         set_routes(&w.host, vec![Route { account: "bo".to_owned(), endpoint: BO_HOME.to_owned(), group_ids: vec![[8; 16].to_vec()] }]).unwrap();
         assert_eq!(take_(&w.host, hello.clone(), from_bo(&hello)), Err(Refusal::NotRouted));
+    }
+
+    const NEW: [u8; 16] = [7; 16];
+
+    fn pending_count(host: &TestHost) -> i64 {
+        host.store.lock().unwrap().db.query_row("SELECT COUNT(*) FROM pending", [], |row| row.get(0)).unwrap()
+    }
+
+    fn bo_routed(groups: &[&[u8]]) -> Vec<Route> {
+        vec![Route { account: "bo".to_owned(), endpoint: BO_HOME.to_owned(), group_ids: groups.iter().map(|group| group.to_vec()).collect() }]
+    }
+
+    #[test]
+    fn a_friends_home_leaves_a_new_conversation_pending_until_the_device_routes_it_there() {
+        let w = world();
+        // Bo's home as a friend's only: let in, with no conversation.
+        set_routes(&w.host, bo_routed(&[])).unwrap();
+        assert_eq!(routes(&w.host).unwrap(), bo_routed(&[]));
+        let mut new = w.bo.create(&NEW);
+        let first = w.bo.say(&mut new, "first");
+        assert_eq!(pend(&w.host, BO_HOME, &NEW, &first), Ok(()));
+        assert_eq!(pend(&w.host, BO_HOME, &NEW, &first), Ok(()), "again: kept once");
+        assert_eq!(pending_count(&w.host), 1);
+        assert!(w.host.log(&NEW).is_empty(), "never served while pending");
+        // A home that isn't a friend's leaves nothing.
+        assert_eq!(pend(&w.host, "dead", &NEW, &first), Err(Refusal::NotRouted));
+        // A friend's home with a conversation is a friend's too.
+        set_routes(&w.host, bo_routed(&[&GROUP])).unwrap();
+        assert_eq!(release_pending(&w.host).unwrap(), Vec::new(), "not routed yet: still pending");
+        assert_eq!(pending_count(&w.host), 1);
+        // Bo's commit isn't a message to keep.
+        let commit = w.bo.update(&mut new);
+        assert!(matches!(pend(&w.host, BO_HOME, &NEW, &commit), Err(Refusal::Invalid(_))));
+
+        // Ann's device routes the new conversation to Bo's home: taken out.
+        set_routes(&w.host, bo_routed(&[&GROUP, &NEW])).unwrap();
+        let released = release_pending(&w.host).unwrap();
+        assert_eq!(
+            released,
+            vec![Pending { endpoint: BO_HOME.to_owned(), group_id: NEW.to_vec(), message_id: hex(&claktory_dm_crypto::envelope::digest(&first)), envelope: first.clone() }]
+        );
+        assert_eq!(pending_count(&w.host), 0);
+        assert_eq!(take(&w.host, Intake { group_id: NEW.to_vec(), envelope: first.clone(), source: from_bo(&first) }), Ok(Taken::Held));
+        // Routed now: nothing more is left pending for it.
+        assert_eq!(pend(&w.host, BO_HOME, &NEW, &first), Err(Refusal::NotRouted));
+    }
+
+    #[test]
+    fn what_a_friends_home_left_pending_goes_when_the_conversation_is_routed_elsewhere() {
+        let w = world();
+        let mut new = w.bo.create(&NEW);
+        let first = w.bo.say(&mut new, "first");
+        set_routes(&w.host, bo_routed(&[&GROUP])).unwrap();
+        pend(&w.host, BO_HOME, &NEW, &first).unwrap();
+        // Routed to another home only: dropped, never taken as Bo's.
+        let mut both = bo_routed(&[&GROUP]);
+        both.push(Route { account: "cy".to_owned(), endpoint: "c0c0".to_owned(), group_ids: vec![NEW.to_vec()] });
+        set_routes(&w.host, both).unwrap();
+        assert_eq!(release_pending(&w.host).unwrap(), Vec::new());
+        assert_eq!(pending_count(&w.host), 0);
+        assert_eq!(pend(&w.host, BO_HOME, &NEW, &first), Err(Refusal::NotRouted), "another home's conversation");
+    }
+
+    #[test]
+    fn what_a_friends_home_left_pending_outlasts_a_table_without_it() {
+        let w = world();
+        let mut new = w.bo.create(&NEW);
+        let first = w.bo.say(&mut new, "first");
+        set_routes(&w.host, bo_routed(&[&GROUP])).unwrap();
+        pend(&w.host, BO_HOME, &NEW, &first).unwrap();
+        // A device's first table after a launch, before it read its friends:
+        // Bo's home isn't let in, and leaves nothing more.
+        set_routes(&w.host, Vec::new()).unwrap();
+        assert_eq!(routes(&w.host).unwrap(), Vec::new());
+        assert_eq!(release_pending(&w.host).unwrap(), Vec::new());
+        assert_eq!(pend(&w.host, BO_HOME, &NEW, &first), Err(Refusal::NotRouted));
+        assert_eq!(pending_count(&w.host), 1, "what he left stays");
+        // Its next table routes the conversation there: taken in.
+        set_routes(&w.host, bo_routed(&[&GROUP, &NEW])).unwrap();
+        assert_eq!(release_pending(&w.host).unwrap().len(), 1);
+        assert_eq!(pending_count(&w.host), 0);
+    }
+
+    #[test]
+    fn a_friends_home_leaves_at_most_8_conversations_and_200_messages_pending_for_7_days() {
+        let w = world();
+        set_routes(&w.host, bo_routed(&[&GROUP])).unwrap();
+        let mut groups: Vec<([u8; 16], MlsGroup)> = (0..9).map(|n| ([20 + n; 16], w.bo.create(&[20 + n; 16]))).collect();
+        let full = Err(Refusal::Full { retry_after_ms: FULL_RETRY_MS });
+        for (n, (id, group)) in groups.iter_mut().enumerate() {
+            let said = w.bo.say(group, "hi");
+            assert_eq!(pend(&w.host, BO_HOME, id, &said), if n < 8 { Ok(()) } else { full.clone() }, "conversation {n}");
+        }
+        // 200 messages in all from Bo's home, the 201st refused.
+        let (id, group) = &mut groups[0];
+        for n in 9..=200 {
+            let said = w.bo.say(group, &format!("message {n}"));
+            assert_eq!(pend(&w.host, BO_HOME, id, &said), Ok(()), "message {n}");
+        }
+        let said = w.bo.say(group, "message 201");
+        assert_eq!(pend(&w.host, BO_HOME, id, &said), full);
+        assert_eq!(pending_count(&w.host), 200);
+
+        // A week on, all of it goes.
+        w.host.store.lock().unwrap().db.execute("UPDATE pending SET received = received - ?1 - 1", [PENDING_MS]).unwrap();
+        set_routes(&w.host, bo_routed(&[&GROUP, id])).unwrap();
+        assert_eq!(release_pending(&w.host).unwrap(), Vec::new());
+        assert_eq!(pending_count(&w.host), 0);
     }
 
     #[test]

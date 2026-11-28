@@ -8,6 +8,7 @@
 import 'dart:convert';
 
 import 'package:factory_app/backend.dart' show RequestFailure;
+import 'package:factory_app/layout.dart' show leaves;
 import 'package:factory_app/mobile/navigation.dart';
 import 'package:factory_app/outbox.dart' show decisionWaiting;
 import 'package:factory_app/mobile/needs_you_button.dart';
@@ -137,7 +138,7 @@ void main() {
   });
 
   testWidgets("offline, a file not in the layout opens at once, apart from "
-      "it, with no layout sent (#446, Sale's row 127)", (tester) async {
+      "it, with no layout sent till it's connected again", (tester) async {
     final harness = await phone(tester);
     harness.backend.connected.value = false;
     await pumpFrames(tester);
@@ -146,6 +147,64 @@ void main() {
     await pumpFrames(tester);
     expect(harness.backend.sent.where((m) => m.hasSetLayout()), isEmpty);
     expect(find.text('notes.md'), findsWidgets);
+
+    // Connected again: once the Claktory's Workspace is in, the file joins
+    // the agent's layout as it is now (the plan opened meanwhile on the
+    // Mac), as a show would.
+    harness.backend.connected.value = true;
+    await pumpFrames(tester);
+    expect(harness.backend.sent.where((m) => m.hasSetLayout()), isEmpty);
+    await harness.apply(
+      tester,
+      _waiting(snapshot(layout: beside('text', _plan)), selected: 'a1'),
+    );
+    await pumpFrames(tester);
+    final layout = harness.backend.sent.where((m) => m.hasSetLayout()).single;
+    expect(
+      leaves(layout.setLayout.root).map((node) => node.leaf.path).toSet(),
+      containsAll(['/w/notes.md', _plan]),
+    );
+    expect(find.text('notes.md'), findsWidgets);
+  });
+
+  testWidgets('opened just as the link dropped, before the app knew: the '
+      'layout lost with it is sent again once connected', (tester) async {
+    final harness = await phone(tester);
+    harness.backend.refuse = 'Connection lost.';
+    expect(_routes(tester).showFile('a1', '/w/notes.md'), isTrue);
+    await pumpFrames(tester);
+    expect(harness.backend.sent.where((m) => m.hasSetLayout()), hasLength(1));
+    harness.backend.connected.value = false;
+    await pumpFrames(tester);
+    harness.backend
+      ..refuse = null
+      ..connected.value = true;
+    await harness.apply(
+      tester,
+      _waiting(snapshot(layout: beside('text', _plan)), selected: 'a1'),
+    );
+    await pumpFrames(tester);
+    final layouts = harness.backend.sent.where((m) => m.hasSetLayout());
+    expect(layouts, hasLength(2));
+    expect(
+      leaves(layouts.last.setLayout.root).map((node) => node.leaf.path),
+      containsAll(['/w/notes.md', _plan]),
+    );
+  });
+
+  testWidgets('a file opened offline and closed before the connection is '
+      'back stays out of the layout', (tester) async {
+    final harness = await phone(tester);
+    harness.backend.connected.value = false;
+    await pumpFrames(tester);
+    _routes(tester).showFile('a1', '/w/notes.md');
+    await pumpFrames(tester);
+    _routes(tester).pop();
+    await pumpFrames(tester);
+    harness.backend.connected.value = true;
+    await harness.apply(tester, harness.backend.workspace.workspace.deepCopy());
+    await pumpFrames(tester);
+    expect(harness.backend.sent.where((m) => m.hasSetLayout()), isEmpty);
   });
 
   testWidgets('a pane already open is pushed as it is', (tester) async {
@@ -188,7 +247,7 @@ void main() {
   });
 
   testWidgets('another agent showing: it is chosen, and the file pushed '
-      'once it shows', (tester) async {
+      'at once, staying once it shows', (tester) async {
     final harness = await phone(tester, selected: 'rivet');
     expect(_routes(tester).showFile('a1', _plan), isTrue);
     await pumpFrames(tester);
@@ -196,7 +255,7 @@ void main() {
       harness.backend.sent.where((m) => m.hasSelectAgent()).single,
       ClientMessage(selectAgent: SelectAgent(agentId: 'a1')),
     );
-    expect(find.text('Builder asks you to review this'), findsNothing);
+    expect(find.text('Builder asks you to review this'), findsOneWidget);
     // The backend chooses it.
     await harness.apply(
       tester,

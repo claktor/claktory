@@ -49,6 +49,7 @@ import 'remove_mac.dart';
 import 'report_types.dart' show ReportTypesSettings, reportTypesAvailable;
 import 'scope.dart';
 import 'secrets.dart';
+import 'setup.dart' show SetupScope, thisComputer;
 import 'transcript.dart';
 import 'tell_rivet.dart';
 import 'update_check.dart' show UpdateCheckRow;
@@ -2597,6 +2598,10 @@ class _HighlightsState extends State<_Highlights> with SettingRequests {
 /// "When you quit Claktory".
 String quitLabel(Backend backend) {
   final computer = claktoryNameInText(backend);
+  if (backend.target == null &&
+      defaultTargetPlatform == TargetPlatform.windows) {
+    return 'When you close Claktory';
+  }
   return backend.target == null || computer == 'this Mac'
       ? 'When you quit Claktory'
       : 'When you quit Claktory on $computer';
@@ -2640,8 +2645,14 @@ class _EngineState extends State<_Engine> with SettingRequests {
         : QuitMode.QUIT_MODE_KEEP_RUNNING;
     final backend = AppScope.of(context);
     final here =
-        backend.target == null && defaultTargetPlatform == TargetPlatform.macOS;
+        backend.target == null &&
+        (defaultTargetPlatform == TargetPlatform.macOS ||
+            defaultTargetPlatform == TargetPlatform.windows);
     final label = quitLabel(backend);
+    final setup = here ? SetupScope.of(context) : null;
+    final signIn = defaultTargetPlatform == TargetPlatform.windows
+        ? setup
+        : null;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -2670,7 +2681,10 @@ class _EngineState extends State<_Engine> with SettingRequests {
               ),
               const SizedBox(height: Space.xs),
               Text(
-                quitModeNote(mode),
+                quitModeNote(
+                  mode,
+                  startsAtSignIn: signIn?.startsAtSignIn ?? true,
+                ),
                 style: type.caption.copyWith(color: palette.textFaint),
               ),
             ],
@@ -2678,7 +2692,7 @@ class _EngineState extends State<_Engine> with SettingRequests {
         ),
         if (here)
           SettingRow(
-            label: 'Claktory on this Mac',
+            label: 'Claktory on $thisComputer',
             top: true,
             child: _Switch(
               label: service.stopping ? 'Stopping…' : 'Running',
@@ -2693,6 +2707,24 @@ class _EngineState extends State<_Engine> with SettingRequests {
                     },
             ),
           ),
+        if (signIn?.startsAtSignIn case final starts?)
+          SettingRow(
+            label: 'When you sign in to Windows',
+            child: _Switch(
+              label: 'Start Claktory',
+              note: starts
+                  ? 'Your agents start working as soon as you sign in to Windows.'
+                  : 'After you sign in to Windows, open Claktory to start your '
+                        'agents.',
+              value: starts,
+              onChanged: signIn!.changingSignIn
+                  ? null
+                  : (on) => run(() async {
+                      final refused = await signIn.setStartsAtSignIn(on);
+                      if (refused != null) throw RequestFailure(refused);
+                    }),
+            ),
+          ),
         failureLine(palette),
       ],
     );
@@ -2704,18 +2736,35 @@ class _EngineState extends State<_Engine> with SettingRequests {
 const keepRunningLabel = 'Keep agents running';
 const stopAgentsLabel = 'Stop agents';
 
-/// What [mode] means, under its choice.
-String quitModeNote(QuitMode mode) => mode == QuitMode.QUIT_MODE_STOP
-    ? 'Quitting stops your agents, and opening Claktory starts them again '
-          'where they left off. Nothing runs while it’s closed, even after '
-          'you log in.'
-    : 'Your agents keep working after you quit, and Claktory starts by '
-          'itself when you log in.';
+/// What [mode] means, under its choice. On Windows the app is closed, not
+/// quit, and the person signs in to Windows.
+/// [startsAtSignIn] false: on Windows, the person chose it doesn't start
+/// when they sign in.
+String quitModeNote(QuitMode mode, {bool startsAtSignIn = true}) {
+  if (defaultTargetPlatform == TargetPlatform.windows) {
+    if (mode == QuitMode.QUIT_MODE_STOP) {
+      return 'Closing Claktory stops your agents, and opening it starts them '
+          'again where they left off. Nothing runs while it’s closed, even '
+          'after you sign in to Windows.';
+    }
+    return startsAtSignIn
+        ? 'Your agents keep working after you close Claktory, and it starts '
+              'by itself when you sign in to Windows.'
+        : 'Your agents keep working after you close Claktory. After you '
+              'restart this PC, open Claktory to start them again.';
+  }
+  return mode == QuitMode.QUIT_MODE_STOP
+      ? 'Quitting stops your agents, and opening Claktory starts them again '
+            'where they left off. Nothing runs while it’s closed, even after '
+            'you log in.'
+      : 'Your agents keep working after you quit, and Claktory starts by '
+            'itself when you log in.';
+}
 
 /// What turning Claktory off means, before it's done.
-const stopEngineMessage =
+String get stopEngineMessage =>
     'Your agents stop where they are and carry on when you turn Claktory '
-    'on again. Until then, nothing runs on this Mac.';
+    'on again. Until then, nothing runs on $thisComputer.';
 
 /// Keeping the Mac Claktory runs on awake while agents work
 /// (Workspace.keep_awake): off unless the person says yes. On a laptop the

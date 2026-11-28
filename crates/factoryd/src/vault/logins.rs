@@ -229,6 +229,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_logins_username_is_never_hidden_and_its_password_always_is() {
+        let dir = temp();
+        let vault = vault(&dir);
+        vault.create(Some("correct horse battery"), true).expect("create").expect("recovery");
+        let values = [value(USERNAME, "practice"), value(PASSWORD, "SuperSecretPassword!")];
+        let id = vault.create_secret("Practice login", "", &values, "").expect("secret");
+        vault.set_sites(&id, &["https://practice.expandtesting.com".to_owned()]).expect("bound");
+        vault.grant(&id, "bo", "").expect("a full grant");
+        let page = "https://practice.expandtesting.com/login as practice with SuperSecretPassword!";
+        let shown = "https://practice.expandtesting.com/login as practice with [secret Practice login/PASSWORD]";
+        // Hidden for every agent, and for the command that was given it.
+        assert_eq!(factory_agent::Redactor::new(&vault.every_variable()).redact(page), shown);
+        let given = vault.resolve("bo", &["Practice login".to_owned()]).expect("resolved");
+        assert_eq!(factory_agent::Redactor::default().with(&given).redact(page), shown);
+        // The same username in a secret that's no login is a secret like any other.
+        vault.create_secret("Practice API", "", &[value(USERNAME, "practice")], "").expect("secret");
+        let hidden = factory_agent::Redactor::new(&vault.every_variable()).redact(page).into_owned();
+        assert!(hidden.contains("[secret Practice API/USERNAME]"), "{hidden}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn a_logins_site_and_name_come_from_the_origin() {
         assert_eq!(site_of("https://accounts.x.com"), "x.com");
         assert_eq!(site_of("https://www.bbc.co.uk"), "bbc.co.uk");
@@ -277,21 +299,22 @@ mod tests {
     }
 
     #[test]
-    fn a_login_shows_no_end_of_its_password_and_a_short_username_only_matters_for_commands() {
+    fn a_login_shows_no_end_of_its_password_and_a_short_value_only_matters_for_commands() {
         let dir = temp();
         let vault = vault(&dir);
         vault.create(Some("correct horse battery"), true).expect("create").expect("recovery");
-        let values = [value(USERNAME, "qa-user"), value(PASSWORD, "correct horse battery staple")];
+        let values = [value(USERNAME, "qa"), value(PASSWORD, "correct horse battery staple"), value("PIN", "12")];
         let id = vault.create_secret("X login", "", &values, "").expect("secret");
         vault.set_sites(&id, &["https://x.com".to_owned()]).expect("bound");
         vault.grant_fill_only(&id, "yukako", "").expect("grant");
         let shown = || vault.state(|_, _| false).secrets.into_iter().find(|secret| secret.id == id).expect("the login");
         let login = shown();
         let hints: Vec<(&str, &str)> = login.variables.iter().map(|variable| (variable.name.as_str(), variable.hint.as_str())).collect();
-        assert_eq!(hints, [(USERNAME, ""), (PASSWORD, "")]);
+        assert_eq!(hints, [(USERNAME, ""), (PASSWORD, ""), ("PIN", "")]);
         assert!(login.warnings.is_empty(), "typed only into its site: {:?}", login.warnings);
+        // Given to a command: its username isn't hidden anyway, so only the PIN warns.
         vault.grant(&id, "bo", "").expect("a full grant");
-        assert_eq!(shown().warnings, ["USERNAME is too short to hide in agents' output."]);
+        assert_eq!(shown().warnings, ["PIN is too short to hide, so agents may see it if a command prints it."]);
         let _ = std::fs::remove_dir_all(dir);
     }
 

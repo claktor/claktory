@@ -222,7 +222,7 @@ void main() {
 
   testWidgets("on an iPad the box's button is a finger's size, its words "
       'whole', (tester) async {
-    // Sorbet's iPad pass: a 28pt row cut a 44pt button's label in half.
+    // A 28pt row cut a 44pt button's label in half.
     asIPad();
     final snapshot = workspace(
       signedIn: false,
@@ -436,7 +436,12 @@ void main() {
     await settle(tester);
     await tester.tap(find.text('Project settings…').last);
     await settle(tester);
-    await tester.enterText(find.byType(EditableText).last, 'Factory app');
+    await tester.enterText(
+      find.byWidgetPredicate(
+        (w) => w is EditableText && w.controller.text == 'Factory',
+      ),
+      'Factory app',
+    );
     await tester.pump();
     await tester.tap(find.text('Save'));
     await settle(tester);
@@ -501,7 +506,7 @@ void main() {
     expect(harness.last.arrangeAgent.parentId, '', reason: 'its top level');
 
     // Beside Rivet, on its upper edge: a gap in the top group, so it's
-    // pinned there and stays in its project (pinned-agents.md §5).
+    // pinned there and stays in its project.
     final rivet = tester.getRect(
       find.ancestor(of: find.text('Rivet'), matching: find.byType(Row)).first,
     );
@@ -639,7 +644,7 @@ void main() {
     expect(find.byType(RotatingText), findsNothing);
   });
 
-  // Polpo's placeholder carousel (Lucy 51826): one round, then it rests on
+  // The placeholder carousel: one round, then it rests on
   // the first line, drawing nothing; a touch, key or scroll wakes it for
   // another round, from the second line, a full turn later. Hover doesn't.
   testWidgets('hints rest on the first after one round, until a touch', (
@@ -991,7 +996,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
 
     // It shows at once, and stays in the conversation, not sent: yet, as
-    // it goes by itself once the connection is back (#401).
+    // it goes by itself once the connection is back.
     expect(find.text('run the tests'), findsOneWidget);
     expect(find.text('Not sent yet'), findsOneWidget);
     EditableText editable() =>

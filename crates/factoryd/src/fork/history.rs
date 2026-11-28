@@ -15,7 +15,8 @@ CREATE TABLE IF NOT EXISTS conversation_changes (
     -- The agent whose conversation changed, and the agent that changed it.
     agent TEXT NOT NULL,
     by TEXT NOT NULL,
-    -- back (to an earlier message) or switched (to another version).
+    -- back (to an earlier message), switched (to another version), deleted
+    -- (a version) or started_over (an agent clearing its own).
     kind TEXT NOT NULL,
     -- Why, in the changing agent's words.
     reason TEXT NOT NULL DEFAULT '',
@@ -33,6 +34,8 @@ pub(crate) enum Kind {
     Back,
     Switched,
     Deleted,
+    /// It cleared its own conversation (`extensions::start_over`).
+    StartedOver,
 }
 
 impl Kind {
@@ -41,6 +44,7 @@ impl Kind {
             Kind::Back => "back",
             Kind::Switched => "switched",
             Kind::Deleted => "deleted",
+            Kind::StartedOver => "started_over",
         }
     }
 }
@@ -95,6 +99,9 @@ impl ConversationChange {
         let (by, agent) = (name(&self.by), name(&self.agent));
         if self.kind == Kind::Switched.key() {
             return format!("{by} switched {agent} to another version");
+        }
+        if self.kind == Kind::StartedOver.key() {
+            return format!("{agent} started over with a new conversation");
         }
         if self.kind == Kind::Deleted.key() {
             return format!("{by} deleted one of {} other versions", crate::apps::changes::possessive(&agent));
@@ -156,5 +163,6 @@ mod tests {
         assert_eq!(change("mike", Kind::Switched, 0).title(&names), "Rivet switched Mike to another version");
         assert_eq!(change("mike", Kind::Deleted, 0).title(&names), "Rivet deleted one of Mike's other versions");
         assert_eq!(change("gone", Kind::Switched, 0).title(&names), "Rivet switched gone to another version");
+        assert_eq!(change("mike", Kind::StartedOver, 0).title(&names), "Mike started over with a new conversation");
     }
 }

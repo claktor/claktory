@@ -7,6 +7,7 @@ import 'package:factory_app/app_views/app_view.dart';
 import 'package:factory_app/app_views/catalog.dart' show AppViewIcon;
 import 'package:factory_app/app_views/menu.dart';
 import 'package:factory_app/app_views/transport.dart';
+import 'package:factory_app/mobile/back.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart' as pb;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart' show LogicalKeyboardKey;
@@ -61,6 +62,7 @@ Future<FakeAppViewTransport> _show(
   WidgetTester tester,
   List<Map<String, Object?>> components, {
   Size size = const Size(1200, 900),
+  PhoneBack? back,
 }) async {
   final snapshot = jsonEncode({
     'version': '1.0',
@@ -84,7 +86,16 @@ Future<FakeAppViewTransport> _show(
   await Harness(pb.Workspace()).show(
     tester,
     size: size,
-    home: AppView(transport: transport, appId: 'charts', appName: 'Charts'),
+    home: back == null
+        ? AppView(transport: transport, appId: 'charts', appName: 'Charts')
+        : PhoneBackScope(
+            back: back,
+            child: AppView(
+              transport: transport,
+              appId: 'charts',
+              appName: 'Charts',
+            ),
+          ),
   );
   await tester.pump();
   await tester.pump(const Duration(milliseconds: 300));
@@ -100,6 +111,53 @@ Map<String, Object?> _sent(FakeAppViewTransport transport) =>
     transport.actions.single.$2['action']! as Map<String, Object?>;
 
 void main() {
+  testWidgets("on a wide Android window, Back closes the dropdown and not "
+      'what is under it; closed any way, it lets go of Back', (tester) async {
+    _on(TargetPlatform.android);
+    final back = PhoneBack.root();
+    addTearDown(back.dispose);
+    var under = 0;
+    final view = back.register(CallbackBackToken(onBack: () => under++));
+    addTearDown(view.release);
+    await _show(tester, _page(4), back: back);
+    final before = back.target;
+    await tester.tap(find.text('Agent: All'));
+    await tester.pumpAndSettle();
+    expect(find.byType(AppMenuList), findsOneWidget);
+    expect(back.target, isNot(before));
+    expect(back.commit(back.target!), isTrue);
+    await tester.pumpAndSettle();
+    expect(find.byType(AppMenuList), findsNothing);
+    expect(under, 0);
+    expect(back.target, before);
+    // An edge's Back swipe: its touch doesn't close it, so the swipe's
+    // Back still goes to it.
+    await tester.tap(find.text('Agent: All'));
+    await tester.pumpAndSettle();
+    final swipe = await tester.startGesture(const Offset(2, 600));
+    await swipe.moveBy(const Offset(250, 0));
+    await swipe.cancel();
+    await tester.pump();
+    expect(find.byType(AppMenuList), findsOneWidget);
+    expect(back.commit(back.target!), isTrue);
+    await tester.pumpAndSettle();
+    expect(find.byType(AppMenuList), findsNothing);
+    expect(under, 0);
+    // A finger's tap outside closes it.
+    await tester.tap(find.text('Agent: All'));
+    await tester.pumpAndSettle();
+    await tester.tapAt(const Offset(1000, 800));
+    await tester.pumpAndSettle();
+    expect(find.byType(AppMenuList), findsNothing);
+    expect(back.target, before);
+    // Closed by a choice, it lets go too.
+    await tester.tap(find.text('Agent: All'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('agent 2'));
+    await tester.pumpAndSettle();
+    expect(back.target, before);
+  });
+
   group('on a Mac', () {
     testWidgets('a click opens a dropdown over the page, the chosen one '
         'checked; a choice sends its action and closes it', (tester) async {

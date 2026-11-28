@@ -7,13 +7,22 @@
 // chat's and pipe's waiting_seqs), and each card is fetched as it is now,
 // with LoadEntries for an agent's, LoadChatEntries for a chat's and
 // LoadPipeMessages for a pipe's.
-import 'dart:async' show Timer, unawaited;
+import 'dart:async' show Completer, Timer, unawaited;
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart' show defaultTargetPlatform;
+import 'package:flutter/semantics.dart' show CustomSemanticsAction;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
+import 'account_join.dart'
+    show
+        AccountJoinCard,
+        JoinWatch,
+        joinOpenLine,
+        joinWords,
+        joinsWaiting,
+        watchJoins;
 import 'app_access_card.dart' show AppAccessCard, appAccessSummary;
 import 'app_grant_card.dart' show AppGrantCard, appGrantSummary;
 import 'approve_elsewhere.dart' show approvesElsewhere;
@@ -42,12 +51,13 @@ import 'lid_closed.dart' show LidClosedStuck, lidClosedStuck;
 import 'mobile/drawer.dart' show largeText;
 import 'mobile/header.dart';
 import 'mobile/metrics.dart';
+import 'mobile/platform_policy.dart' show PhonePlatformPolicy, PullStyle;
+import 'mobile/pull_refresh.dart';
 import 'move.dart' show BackendMove, MoveConfirmCard, MoveStatus, moveStatusOf;
 import 'name_role_line.dart';
 import 'needs_you_alerts.dart';
 import 'needs_you_entries.dart';
-import 'needs_you_focus.dart'
-    show focusUrgent, needsYouIsFocusMode, openFocusMode;
+import 'needs_you_focus.dart' show focusUrgent, openFocusMode;
 import 'needs_you_hold.dart';
 import 'needs_you_history.dart' show NeedsYouHistoryList, NeedsYouTabs;
 import 'pairing.dart' show AllowDeviceCard, deviceCallingItself;
@@ -157,6 +167,12 @@ enum NeedsYouKind {
   /// refused it, with agents working there (ProtectedPlace.needs_you,
   /// permissions.md P2): Open System Settings, or OK.
   protectedPlace,
+
+  /// A computer asks to join the person's Claktory account
+  /// (ClaktoryAccount.authorizations_waiting): quiet, with no push or
+  /// sound; its card fetches the request from the account service
+  /// (account_join.dart) and has Decline and Approve.
+  join,
 
   /// An alert an agent (or Claktory) sent, kept until the person reads it
   /// (Workspace.alerts; Lucy's needs-you-cards.md §3.9): nothing to
@@ -332,6 +348,17 @@ class NeedsYouItem {
       seq = 0,
       conversationId = '';
 
+  /// The request's id is its [sessionId].
+  const NeedsYouItem.join(this.sessionId)
+    : kind = NeedsYouKind.join,
+      agentId = '',
+      chatId = '',
+      pipeId = '',
+      providerId = '',
+      accountId = '',
+      seq = 0,
+      conversationId = '';
+
   /// The waiting device's id is its [sessionId].
   const NeedsYouItem.device(this.sessionId)
     : kind = NeedsYouKind.device,
@@ -386,6 +413,7 @@ class NeedsYouItem {
     NeedsYouKind.backendService => 'backendService',
     NeedsYouKind.lidStuck => 'lidStuck',
     NeedsYouKind.protectedPlace => 'protected:$sessionId',
+    NeedsYouKind.join => 'join:$sessionId',
     NeedsYouKind.alert => 'alert:$sessionId',
     NeedsYouKind.alertGroup => 'alerts:$agentId',
   };
@@ -461,6 +489,9 @@ List<NeedsYouItem> needsYouItems(Workspace workspace) {
     // the Mac's own words say where to turn it on.
     for (final place in workspace.protectedPlaces)
       if (place.needsYou) NeedsYouItem.protectedPlace(place.root),
+    // A computer asking to join the account: the Claktory only rings the
+    // bell; the request itself comes from the account service.
+    for (final id in joinsWaiting(workspace)) NeedsYouItem.join(id),
     // Also floating over the window on every device (MoveGate).
     if (workspace.hasMove() && moveStatusOf(workspace.move).awaitsPerson)
       const NeedsYouItem.move(),
@@ -647,6 +678,16 @@ class InboxView extends StatefulWidget {
 }
 
 class _InboxViewState extends State<InboxView> {
+  /// The list's refresh, for the title to offer VoiceOver and TalkBack,
+  /// which can't pull ([NeedsYouList.refresh]).
+  final _refresh = ValueNotifier<Future<void> Function()?>(null);
+
+  @override
+  void dispose() {
+    _refresh.dispose();
+    super.dispose();
+  }
+
   /// Whether it shows History, what the person already decided, in place
   /// of what waits. Each opening starts at what waits, unless the person
   /// just opened a History row (Backend.needsYouHistoryNext).
@@ -675,10 +716,24 @@ class _InboxViewState extends State<InboxView> {
                 isPhoneLayout(context)
                     ? PhoneHeader(
                         leading: HeaderButton.back(onTap: close),
-                        title: Text(
-                          'Needs you',
-                          style: PhoneType.emphasis.copyWith(
-                            color: palette.text,
+                        title: ValueListenableBuilder(
+                          valueListenable: _refresh,
+                          builder: (context, refresh, title) => Semantics(
+                            customSemanticsActions: refresh == null || _history
+                                ? null
+                                : {
+                                    const CustomSemanticsAction(
+                                      label: 'Refresh',
+                                    ): () =>
+                                        unawaited(refresh()),
+                                  },
+                            child: title,
+                          ),
+                          child: Text(
+                            'Needs you',
+                            style: PhoneType.emphasis.copyWith(
+                              color: palette.text,
+                            ),
                           ),
                         ),
                       )
@@ -769,7 +824,7 @@ class _InboxViewState extends State<InboxView> {
                     // Its words select and copy, as what waits does; each
                     // row is copied apart from the next.
                     ? const SelectableArea(child: NeedsYouHistoryList())
-                    : NeedsYouList(onOpen: widget.onOpen),
+                    : NeedsYouList(onOpen: widget.onOpen, refresh: _refresh),
               ),
             ],
           ),
@@ -845,7 +900,12 @@ class NeedsYouList extends StatefulWidget {
     this.padding,
     this.shrinkWrap = false,
     this.onOpen,
+    this.refresh,
   });
+
+  /// Where the list puts its refresh once it pulls to refresh, for what
+  /// shows it to offer otherwise.
+  final ValueNotifier<Future<void> Function()?>? refresh;
 
   /// What a tap on a request does instead of opening it in place (an
   /// iPhone's: it alone, on its own screen). It stays in the list once
@@ -876,6 +936,9 @@ class _NeedsYouListState extends State<NeedsYouList> {
   /// Alerts read here, by id: they stay, marked Read, until the person
   /// leaves (§3.9), as answered cards do.
   final _readHere = <String, Alert>{};
+
+  /// The joins of this Claktory's account, once listened to.
+  JoinWatch? _joins;
 
   /// The alert row just opened from its notification, standing out a
   /// moment ([NeedsYouEntries.revealAlert]).
@@ -948,14 +1011,80 @@ class _NeedsYouListState extends State<NeedsYouList> {
   var _touches = 0;
   Timer? _closeUp;
 
+  /// Whether it's pulled down to refresh: a phone's, with a finger.
+  bool get _pulls =>
+      !widget.shrinkWrap &&
+      isPhoneLayout(context) &&
+      PhonePlatformPolicy.of(context).pull != PullStyle.none;
+
+  /// Pulled down, or Refresh from VoiceOver or TalkBack: what was answered,
+  /// read or taken back while the list was open goes at once, and every
+  /// card still waiting is fetched again, as it is now, reconnecting first
+  /// if the connection is down. Completes once they've come, or given up.
+  Future<void> _refresh() async {
+    if (!mounted) return;
+    final keys = {
+      for (final item in needsYouItems(_backend.workspace.workspace)) item.key,
+    };
+    final gone = {
+      for (final key in _kept.keys)
+        if (!keys.contains(key)) key,
+      ..._leaving.keys,
+    };
+    setState(() {
+      for (final key in gone) {
+        if (_kept.remove(key) != null) _store.release(key);
+        _open.remove(key);
+      }
+      _readHere.clear();
+      _leaving.clear();
+      _lastOrder = [
+        for (final key in _lastOrder)
+          if (!gone.contains(key)) key,
+      ];
+    });
+    if (!_backend.connected.value) {
+      _backend.reconnectNow();
+      await _connected();
+    }
+    if (!mounted) return;
+    await _store
+        .refetch(needsYouItems(_backend.workspace.workspace))
+        .timeout(_refreshWait, onTimeout: () {});
+  }
+
+  /// How long a refresh waits for the connection, then for the cards.
+  static const _refreshWait = Duration(seconds: 10);
+
+  /// Completes once connected, or after [_refreshWait].
+  Future<void> _connected() {
+    final connected = _backend.connected;
+    if (connected.value) return Future.value();
+    final done = Completer<void>();
+    late final Timer giveUp;
+    void check() {
+      if (!connected.value && giveUp.isActive) return;
+      connected.removeListener(check);
+      giveUp.cancel();
+      if (!done.isCompleted) done.complete();
+    }
+
+    giveUp = Timer(_refreshWait, check);
+    connected.addListener(check);
+    return done.future;
+  }
+
   @override
   void initState() {
     super.initState();
     _scroll.addListener(_seeAbove);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
+      if (_pulls) widget.refresh?.value = _refresh;
       _store.addListener(_rebuild);
       _store.revealAlert.addListener(_reveal);
+      // A computer asking to join: fetched for its row, counting down.
+      _joins = watchJoins(context, _backend)..addListener(_rebuild);
       setState(() {});
       _reveal();
     });
@@ -969,6 +1098,7 @@ class _NeedsYouListState extends State<NeedsYouList> {
     _find.dispose();
     _store.revealAlert.removeListener(_reveal);
     _store.removeListener(_rebuild);
+    _joins?.removeListener(_rebuild);
     for (final key in _kept.keys) {
       _store.release(key);
     }
@@ -1303,18 +1433,30 @@ class _NeedsYouListState extends State<NeedsYouList> {
       ),
     );
     if (items.isEmpty && urgent.isEmpty && lateAlerts.isEmpty) {
-      return FindScope(
-        target: _find,
-        child: Center(
-          child: Padding(
-            padding: padding,
-            child: Text(
-              'Nothing is waiting for your answer.',
-              textAlign: TextAlign.center,
-              style: TextStyles.body.copyWith(color: palette.textMuted),
-            ),
+      final nothing = Center(
+        child: Padding(
+          padding: padding,
+          child: Text(
+            'Nothing is waiting for your answer.',
+            textAlign: TextAlign.center,
+            style: TextStyles.body.copyWith(color: palette.textMuted),
           ),
         ),
+      );
+      return FindScope(
+        target: _find,
+        child: _pulls
+            ? PullToRefresh(
+                onRefresh: _refresh,
+                list: (physics, first) => CustomScrollView(
+                  physics: physics,
+                  slivers: [
+                    ...first,
+                    SliverFillRemaining(hasScrollBody: false, child: nothing),
+                  ],
+                ),
+              )
+            : nothing,
       );
     }
     // Every word in it selects and copies (drag, ⌘C, a right click's Copy;
@@ -1406,31 +1548,37 @@ class _NeedsYouListState extends State<NeedsYouList> {
         child: Stack(
           children: [
             selectable(
-              CustomScrollView(
-                controller: _scroll,
-                shrinkWrap: widget.shrinkWrap,
-                slivers: [
-                  SliverPadding(
-                    padding: padding,
-                    sliver: HeldBox(
-                      rows: _rowBoxes,
-                      movedUp: () => _movedUp,
-                      onPushedAbove: _pushedAbove,
-                      // Selected where the pointer is at any zoom, however
-                      // far it's scrolled.
-                      child: ScrolledSelection(
-                        child: CopyShape(
-                          separator: '\n\n',
-                          child: Column(
-                            key: _content,
-                            crossAxisAlignment: CrossAxisAlignment.stretch,
-                            children: [for (final (_, row) in rows) row],
+              PullToRefresh.when(
+                _pulls,
+                onRefresh: _refresh,
+                list: (physics, first) => CustomScrollView(
+                  controller: _scroll,
+                  shrinkWrap: widget.shrinkWrap,
+                  physics: physics,
+                  slivers: [
+                    ...first,
+                    SliverPadding(
+                      padding: padding,
+                      sliver: HeldBox(
+                        rows: _rowBoxes,
+                        movedUp: () => _movedUp,
+                        onPushedAbove: _pushedAbove,
+                        // Selected where the pointer is at any zoom, however
+                        // far it's scrolled.
+                        child: ScrolledSelection(
+                          child: CopyShape(
+                            separator: '\n\n',
+                            child: Column(
+                              key: _content,
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [for (final (_, row) in rows) row],
+                            ),
                           ),
                         ),
                       ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
             // What came in above the rows in view.
@@ -1480,6 +1628,9 @@ class _NeedsYouListState extends State<NeedsYouList> {
         NeedsYouKind.lidStuck => true,
         // Set aside or let in here: it stays, saying which.
         NeedsYouKind.protectedPlace => true,
+        // Answered here or elsewhere, or out of time: it stays, saying how
+        // it ended.
+        NeedsYouKind.join => true,
         // Read here: it stays, marked Read.
         NeedsYouKind.alert || NeedsYouKind.alertGroup => true,
         _ => workspace.pipes.any((pipe) => pipe.id == item.pipeId),
@@ -1521,7 +1672,12 @@ class _Bubble extends StatelessWidget with _ItemParts {
     final backend = AppScope.of(context);
     final agent = _agent;
     final liaisonOf = _liaisonOf;
-    final (:who, :what) = words(backend);
+    final (:who, what: said) = words(backend);
+    // A join's card says how it ended itself: open, the line under its
+    // title keeps only its time left.
+    final what = open && item.kind == NeedsYouKind.join
+        ? joinOpenLine(backend, item.sessionId)
+        : said;
     final named = needsYouWho(workspace, item, who);
     final large = largeText(context);
     // How it ended: its agent may have taken it back meanwhile (#407).
@@ -1622,9 +1778,12 @@ class _Bubble extends StatelessWidget with _ItemParts {
                                 ? palette.textMuted
                                 : palette.textFaint,
                           )
-                        : item.kind == NeedsYouKind.protectedPlace
+                        : item.kind == NeedsYouKind.protectedPlace ||
+                              item.kind == NeedsYouKind.join
                         ? ExtensionGlyph(
-                            icon: 'folder-lock',
+                            icon: item.kind == NeedsYouKind.join
+                                ? 'server'
+                                : 'folder-lock',
                             name: '',
                             color: waiting
                                 ? palette.textMuted
@@ -1712,21 +1871,22 @@ class _Bubble extends StatelessWidget with _ItemParts {
                         ),
                       ),
                     ),
-                    Text.rich(
-                      FindHighlight.markText(
-                        context,
-                        what,
-                        TextStyles.body.copyWith(
-                          color: waiting
-                              ? palette.textMuted
-                              : palette.textFaint,
+                    if (what.isNotEmpty)
+                      Text.rich(
+                        FindHighlight.markText(
+                          context,
+                          what,
+                          TextStyles.body.copyWith(
+                            color: waiting
+                                ? palette.textMuted
+                                : palette.textFaint,
+                          ),
                         ),
+                        // At large text, all of it: a procedure's step
+                        // isn't cut to "· S…".
+                        maxLines: large ? null : (open ? 3 : 2),
+                        overflow: large ? null : TextOverflow.ellipsis,
                       ),
-                      // At large text, all of it: a procedure's step
-                      // isn't cut to "· S…".
-                      maxLines: large ? null : (open ? 3 : 2),
-                      overflow: large ? null : TextOverflow.ellipsis,
-                    ),
                     // At large text, under what it asked: beside it
                     // there's no room.
                     if (large && !waiting) answered,
@@ -1815,6 +1975,7 @@ class _Bubble extends StatelessWidget with _ItemParts {
                         item.kind != NeedsYouKind.backendService &&
                         item.kind != NeedsYouKind.lidStuck &&
                         item.kind != NeedsYouKind.protectedPlace &&
+                        item.kind != NeedsYouKind.join &&
                         item.kind != NeedsYouKind.dmSend) ...[
                       const SizedBox(height: Space.s),
                       Wrap(
@@ -1961,6 +2122,8 @@ mixin _ItemParts {
         ? lidClosedStuck(backend)
         : item.kind == NeedsYouKind.protectedPlace
         ? protectedPlaceTitle(protectedPlaceAt(workspace, item.sessionId))
+        : item.kind == NeedsYouKind.join
+        ? joinWords(backend, item.sessionId).who
         : item.isAlert
         ? switch (alertsOf(workspace.alerts, item)) {
             [final latest, ...] when item.kind == NeedsYouKind.alertGroup =>
@@ -2058,6 +2221,8 @@ mixin _ItemParts {
         return protectedPlaceSummary(
           protectedPlaceAt(workspace, item.sessionId),
         );
+      case NeedsYouKind.join:
+        return joinWords(backend, item.sessionId).what;
       case NeedsYouKind.browser:
         final session = browserSessionOf(workspace, item);
         if (session == null) return 'No longer needs you';
@@ -2262,6 +2427,9 @@ class NeedsYouCard extends StatelessWidget with _ItemParts {
         if (place == null) return line('No longer needs you.');
         if (!place.needsYou) return line(protectedPlaceEnded(place));
         return ProtectedPlaceCard(place: place);
+      case NeedsYouKind.join:
+        // It says how it ended itself.
+        return AccountJoinCard(id: item.sessionId);
       case NeedsYouKind.move:
         final move = _move;
         if (!MoveConfirmCard.shows(move)) {
@@ -2625,10 +2793,8 @@ String needsYouChipLabel(int count) => count == 1
 
 /// Over every conversation, at its top right, while anything anywhere
 /// waits for the person's answer: a floating chip saying how many ("2 need
-/// you"). A click opens focus mode at the conversation's own request on a
-/// computer and a wide iPad; elsewhere it drops the Needs you bubbles down
-/// under it, over the conversation, which stays as it is; another click
-/// folds them away. What
+/// you"). A click drops the Needs you bubbles down under it, over the
+/// conversation, which stays as it is; another click folds them away. What
 /// the person answers there stays, answered, while it's open. With nothing
 /// waiting and nothing open, it's nothing at all.
 class NeedsYouChip extends StatefulWidget {
@@ -2648,22 +2814,6 @@ class _NeedsYouChipState extends State<NeedsYouChip> {
   void _toggle() {
     final onOpen = widget.onOpen;
     if (onOpen != null) return onOpen();
-    // On a computer and a wide iPad, focus mode, at this conversation's
-    // own request: one Needs you.
-    if (needsYouIsFocusMode(context)) {
-      final agent = AppScope.of(context).workspace.selectedAgent;
-      final seqs = <int>[
-        if (agent != null)
-          for (final seq in agent.waitingSeqs) seq.toInt(),
-      ];
-      openFocusMode(
-        context,
-        at: agent == null || seqs.isEmpty
-            ? null
-            : NeedsYouItem.entry(agent.id, seqs.reduce(math.max)).key,
-      );
-      return;
-    }
     setState(() => _open = !_open);
   }
 
@@ -2741,9 +2891,8 @@ class _NeedsYouChipState extends State<NeedsYouChip> {
                 style: TypeScale.of(context).label
                     .copyWith(color: palette.text, fontWeight: FontWeight.w500),
               ),
-              // It drops down: a sheet from below, or focus mode, has no
-              // need of it.
-              if (widget.onOpen == null && !needsYouIsFocusMode(context)) ...[
+              // It drops down: a sheet from below has no need of it.
+              if (widget.onOpen == null) ...[
                 const SizedBox(width: Space.xs + 2),
                 AnimatedRotation(
                   turns: _open ? 0.5 : 0,

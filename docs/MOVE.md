@@ -114,7 +114,7 @@ Everything in the home except what's regenerable or belongs to this machine:
   - `auth.json`;
   - `vault/vault.db` and `vault/auto.key`;
   - `account/` (`account.json`, `claktory.key`, `share.key`);
-  - `remote/` (`iroh.key`, `devices.json`, `local-pairing`, `remote-port`);
+  - `remote/` (`iroh.key`, `devices.json`, `remote-port`, and `local-pairing` from a Claktory before #546 A);
   - `agents/**`, conversations, uploads and task logs;
   - `chats/**`, `apps/**`, `pipes/**` and `workspace/**`.
 - Inside `workspace/` and plain folders, folders named `target` or
@@ -243,7 +243,7 @@ The tombstone:
 
    - `machine` is this computer's name.
    - `to` is where it moved: empty after a bundle (`--final`); after a move over the network, the target's machine name, with `to_os` its system (`linux`, `macos`).
-   - A backend that finds `moved.json` runs no agents and starts no endpoint (moved mode, import's side). It answers every request with `ERROR_CODE_MOVED` and `Error.moved` (where it went, when, and when this copy was deleted, read from `moved.json` each time). On the loopback port, a client whose Hello carries the token of the local pairing code the fence put away (`moved/remote/local-pairing`), this computer's own app, may then send `DeleteMovedCopy` with the word `delete`: the copy goes as with `--delete-moved`, and the connection closes.
+   - A backend that finds `moved.json` runs no agents and starts no endpoint (moved mode, import's side). It answers every request with `ERROR_CODE_MOVED` and `Error.moved` (where it went, when, and when this copy was deleted, read from `moved.json` each time). This computer's own app, on its socket (`app.sock`, its code signature checked, as a running Claktory checks it), may then send `DeleteMovedCopy` with the word `delete`: the copy goes as with `--delete-moved`, and the connection closes.
 2. **The fence.** `auth.json`, `vault/`, `account/` and `remote/` move into `<home>/moved/`, as they are. Then a backend of **any** version that starts here has no model sign-ins, no vault key, no account token and no tunnel key: it can't run an agent, open the secrets, check in, or answer devices as this Claktory. Nothing is deleted.
 3. **The service** stays stopped, and is turned off so it doesn't start at login: `launchctl disable` on a Mac, `systemctl --user disable` on Linux.
 
@@ -303,7 +303,7 @@ claktory-move://?e=<endpoint id>&s=<secret: 64 hex>&m=<machine>&v=<version>&o=<o
 
 1. S→T `plan {manifest, map: [[from, to]…], tools: [name…]}`:
    - `manifest` is the manifest it would write;
-   - `map` holds the folder destinations: by default the source's user home to the target's, and its home to the target's; then each project folder outside both, under the target's user home in `moved-from-<source machine>/` (lowercase letters, digits and dashes, so commands that name it need no quoting), keeping its whole path: `/Volumes/Data/Assets` to `~/moved-from-matts-mac/Volumes/Data/Assets`. So a move over the network never stops at a folder outside the home folder; `skip` (move_claktory's, or `factoryd move --skip`) leaves one out;
+   - `map` holds the folder destinations: by default the source's user home to the target's, and its home to the target's; then each project folder outside both, under the target's user home in `moved-from-<source machine>/` (lowercase letters, digits and dashes, so commands that name it need no quoting), keeping its whole path: `/Volumes/Data/Assets` to `~/moved-from-matts-mac/Volumes/Data/Assets`. So a move over the network never stops at a folder outside the home folder; `skip` (move_claktory's) leaves one out;
    - `tools` are the commands its agents' tasks used (`cargo`, `flutter`…).
 2. T→S `checked {problems: [sentence…], map: [[from, to]…], missing: [tool…], free_bytes}`:
    - `problems` are import's own checks: the version, folder destinations free, disk against `requires.disk_bytes`, a local disk, this export_id not imported already. Empty means go.
@@ -348,7 +348,7 @@ On the source:
 ### 5. Import, READY, commit
 
 1. After the final round, the target runs import from Prepare to Verify. Meanwhile it streams `progress {step, text}`. If the connection drops, the source dials again for up to 30 minutes while the target answers (even with `failed`, turning it away for now), but gives up after two minutes in which nothing answers at all, saying receive has likely stopped there, and unfreezes.
-2. It then sends `ready {old_app_code}` or `failed {why}`. A failure before the home was switched over keeps what's staged, so the source can try again; one after it undoes the import here, and receive ends.
+2. It then sends `ready` (its `old_app_code` always empty since #546: the old computer's own app, if it was signed in to the account, comes over as a device let in by its account key, with no code, if it connects within `FIRST_DEVICE_WINDOW` of the import; after that the slot goes and it waits to be allowed) or `failed {why}`. A failure before the home was switched over keeps what's staged, so the source can try again; one after it undoes the import here, and receive ends.
    - A source that reconnects after `ready` gets `ready` again.
    - Until it's committed, the target is never started: import's `state.json` stays, so its backend refuses to start.
 3. On `ready`, the source commits:
@@ -383,10 +383,10 @@ On the source:
   an update does (writes finished, the vault's key handed to the
   supervisor). Only a backend run by its supervisor can start a move
   (StartMove refuses otherwise).
-- **Frozen mode** serves the loopback port only, and only to a client with
-  this computer's own pairing token (`remote/local-pairing`, read before the
-  fence): Welcome, then a Workspace with only `move` and `version`, again on
-  every change. CancelMove is taken while `can_cancel`; everything else is
+- **Frozen mode** serves this computer's own app on its socket (`app.sock`,
+  its code signature checked) and, on the loopback port, agents' commands
+  with the tool token (`tool-token`, without the move's digits): Welcome,
+  then a Workspace with only `move` and `version`, again on every change. CancelMove is taken while `can_cancel`; everything else is
   refused. It starts no Factory, no tunnel and no agent, and stops leftover
   background tasks first (all but the moving agent's receive task).
 - A failure or cancel in frozen mode deletes `moving/` and hands the vault's
@@ -397,17 +397,51 @@ On the source:
 - After `done`, frozen mode shows `MOVE_PHASE_DONE` for two seconds, then
   exits; the next start finds `moved.json`.
 
-### From a terminal: `factoryd move CODE`
+### Through the account: an approved move (#546, `account/moves.rs`)
 
-`factoryd move CODE` drives the same handshake in the foreground, for a
-Claktory with no app at hand. It asks for the digits on the terminal and
-prints each round. Instead of frozen mode it freezes the way `--final`
-does: it stops the service (and turns it off) and its background tasks,
-sends the final round itself, and starts the service again if anything
-fails before `commit`. A dropped connection is dialed again for two
-minutes before a round gives up (during import, two minutes with no
-answer at all); after the fence it's dialed again until
-`done`. Ctrl-C before the fence cancels the move.
+With the source signed in to claktory.com, no code or digits change hands:
+
+1. The target runs `factoryd receive --email EMAIL [--service URL]`. It
+   makes its receive key as usual and starts the account service's
+   authorize with kind `move` (`backend_key` the receive key in base64,
+   `receive {endpoint, relays}`, no secret), saying where to approve it.
+   It polls (409 `authorization_pending`) until the source takes it, then
+   gets `MoveAuthorized {source_key, source_claktory_id, approver}`, kept in
+   `<home>/import/receive/approved.json` so a restarted receive goes on
+   waiting for the same source.
+2. The person approves it in Settings → Move on a device connected to the
+   source, which fetches waiting moves (GET /v1/devices/moves); a move is
+   never pushed as a notification. The device signs a `MoveApproval {v,
+   kind, request_id, account_id, source_claktory_id, endpoint, fingerprint,
+   device_key, iat, exp}` with its own account key (`api::sign_move_approval`,
+   "claktory move approval v1\n").
+3. The source looks for waiting moves at each check-in that says
+   `moves_waiting`, every minute while devices are connected, and every few
+   seconds for three minutes after a device proved itself
+   (ProveAllowedDevice). For each (GET /v1/claktories/moves) it checks the
+   approval: the signature, its own account and Claktory id, the request,
+   the endpoint (and the fingerprint of the key it names), and that
+   `device_key` is one of its own devices, not removed, confirmed for this
+   account (`remote::approver`), and that it lasts no longer than ten
+   minutes (`exp - iat`), is in time by this computer's clock (the
+   service's offset counted only up to `MAX_SKEW`) and wasn't taken here
+   before (`account/moves-taken.json`, the last 100). It then takes it once (POST
+   /v1/claktories/moves/ID/take, 409 when already taken, 410 when expired)
+   and starts the move to that endpoint with an empty secret, skipping the
+   digits (`move_run::start_approved`). A move it turned down isn't checked
+   again.
+4. The target lets in only `source_key`: any other dialer gets `failed`,
+   and the secret isn't checked. `Move.approved_by_device_id`,
+   `approved_by_name` and `approval_key` say which device approved it.
+
+### `factoryd move` (refused since #546)
+
+`factoryd move` drove the same handshake from a terminal. A move hands
+over everything, and a terminal can't tell the person from an agent's
+command (which can make itself one), so since #546 it's refused, whatever
+it's given (exit 3; `person_only` with `--json`): only the person starts a
+move, in the app (StartMove and ConfirmMove are refused to agents' commands
+too).
 
 ### 6. After the move
 

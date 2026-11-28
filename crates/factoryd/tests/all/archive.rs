@@ -8,7 +8,7 @@ use factory_protocol::v1::{self, AgentStatus, client_message};
 use factoryd::config::Config;
 
 fn archive(project: &str, archived: bool) -> client_message::Body {
-    client_message::Body::UpdateProject(v1::UpdateProject { project_id: project.into(), name: None, archived: Some(archived), before_id: None })
+    client_message::Body::UpdateProject(v1::UpdateProject { project_id: project.into(), name: None, archived: Some(archived), before_id: None, brief: None })
 }
 
 fn project(view: &View, id: &str) -> v1::Project {

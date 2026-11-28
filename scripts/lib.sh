@@ -94,8 +94,11 @@ backend_fingerprint() {
     fi
     # Built from nothing an earlier build left, with the checked toolchain
     # (release_inputs): a backend from before that is never reused.
+    # The pins moved to scripts/toolchain.pins; the line reads the same.
     if [[ -f scripts/check-toolchain.sh ]]; then
-      echo "build: fresh inputs; rust $(sed -n 's/^RUST_VERSION=//p; s/^RUST_CHANNEL_SHA256=//p' scripts/check-toolchain.sh | tr '\n' ' ')"
+      local pins=scripts/check-toolchain.sh
+      [[ ! -f scripts/toolchain.pins ]] || pins=scripts/toolchain.pins
+      echo "build: fresh inputs; rust $(sed -n 's/^RUST_VERSION=//p; s/^RUST_CHANNEL_SHA256=//p' "$pins" | tr '\n' ' ')"
     fi
     # The video preview helper ships with the backend (build_video_preview).
     if [[ -d app/macos/VideoPreview ]]; then
@@ -269,12 +272,22 @@ bundled_apps() { # SRC DEST
     tar -xf "$clapp" -C "$work" manifest.toml app.wasm signature 2>/dev/null || { rm -rf "$work"; echo "$(basename "$clapp") isn't a .clapp" >&2; return 1; }
     public="$(sed -n 's/^key ed25519://p' "$work/signature")"
     grep -qF "\"$public\"" <<<"$pinned" || { rm -rf "$work"; echo "$(basename "$clapp") isn't signed by Claktory's apps key (CLAKTORY_KEYS in bundle.rs)" >&2; return 1; }
+    # Checked with CryptoKit (Xcode's Swift): macOS's own openssl, all the
+    # build service has on its PATH, is LibreSSL, which can't check
+    # an Ed25519 signature.
     ( cd "$work"
       { printf 'claktory-app-v1\n'; shasum -a 256 app.wasm manifest.toml; } >message
       sed -n 's/^sig //p' signature | base64 -d >sig.bin
-      { printf '302a300506032b6570032100' | xxd -r -p; printf '%s' "$public" | base64 -d; } >pub.der
-      openssl pkey -pubin -inform DER -in pub.der -out pub.pem 2>/dev/null &&
-        openssl pkeyutl -verify -pubin -inkey pub.pem -rawin -in message -sigfile sig.bin >/dev/null 2>&1
+      xcrun swift - "$public" sig.bin message >/dev/null 2>&1 <<'SWIFT'
+import CryptoKit
+import Foundation
+let a = CommandLine.arguments
+guard a.count == 4, let pub = Data(base64Encoded: a[1]),
+      let key = try? Curve25519.Signing.PublicKey(rawRepresentation: pub),
+      let sig = FileManager.default.contents(atPath: a[2]),
+      let msg = FileManager.default.contents(atPath: a[3]),
+      key.isValidSignature(sig, for: msg) else { exit(1) }
+SWIFT
     ) || { rm -rf "$work"; echo "$(basename "$clapp")'s signature doesn't hold" >&2; return 1; }
     rm -rf "$work"
     cp "$clapp" "$dest/apps/"
@@ -459,19 +472,40 @@ cargo_parents_ok() {
     fi
   done
 }
-FLUTTER_VERSION=3.50.0
-FLUTTER_REVISION=ab2912035e160d9cad6306df307576da6128ebdb
+# A pin from scripts/toolchain.pins (beside this file).
+toolchain_pin() {
+  sed -n "s/^$1=//p" "$(dirname "${BASH_SOURCE[0]}")/toolchain.pins" 2>/dev/null | head -1 || true
+}
+FLUTTER_VERSION="$(toolchain_pin FLUTTER_VERSION)"
+FLUTTER_REVISION="$(toolchain_pin FLUTTER_REVISION)"
+# In the build service (CLAKTORY_BUILD_SERVICE=1, scripts/build-service.sh)
+# the source is already a fresh export (SRC_ROOT), cargo's and pub's homes are
+# the job's own, made empty for it, and Rust is the service's: installed by
+# root from these pins, checked against Rust's manifest, read-only to the
+# build, with no rustup (build-service.sh stands in for it). So only its
+# version is checked here.
 release_inputs() {
-  local dir tc flutter
-  for dir in cargo-home pub-cache; do
-    rm -rf "${RELEASE_BUILD:?}/$dir" || return 1
-    private_dir "$RELEASE_BUILD/$dir" || return 1
-  done
-  export CARGO_HOME="$RELEASE_BUILD/cargo-home" PUB_CACHE="$RELEASE_BUILD/pub-cache"
-  cargo_parents_ok "$RELEASE_BUILD/src" || return 1
-  tc="$("$(dirname "${BASH_SOURCE[0]}")/check-toolchain.sh")" || return 1
-  export RUSTUP_TOOLCHAIN="$tc"
-  export PATH="${RUSTUP_HOME:-$HOME/.rustup}/toolchains/$tc/bin:$PATH"
+  local dir tc flutter rustc
+  if [[ "${CLAKTORY_BUILD_SERVICE:-}" == 1 ]]; then
+    for dir in "$CARGO_HOME" "$PUB_CACHE"; do
+      [[ -n "$dir" && ! -L "$dir" ]] && { [[ ! -e "$dir" ]] || [[ -z "$(ls -A "$dir")" ]]; } || { echo "$dir isn't a fresh folder; not building" >&2; return 1; }
+      private_dir "$dir" || return 1
+    done
+    cargo_parents_ok "$SRC_ROOT" || return 1
+    rustc="$(command -v rustc)" || { echo "no rustc on PATH" >&2; return 1; }
+    [[ "$(rustc -V)" == "rustc $(toolchain_pin RUST_VERSION) "* && "$(command -v cargo)" == "$(dirname "$rustc")/cargo" ]] ||
+      { echo "the Rust on PATH ($rustc) isn't the pinned $(toolchain_pin RUST_VERSION): not building" >&2; return 1; }
+  else
+    for dir in cargo-home pub-cache; do
+      rm -rf "${RELEASE_BUILD:?}/$dir" || return 1
+      private_dir "$RELEASE_BUILD/$dir" || return 1
+    done
+    export CARGO_HOME="$RELEASE_BUILD/cargo-home" PUB_CACHE="$RELEASE_BUILD/pub-cache"
+    cargo_parents_ok "$RELEASE_BUILD/src" || return 1
+    tc="$("$(dirname "${BASH_SOURCE[0]}")/check-toolchain.sh")" || return 1
+    export RUSTUP_TOOLCHAIN="$tc"
+    export PATH="${RUSTUP_HOME:-$HOME/.rustup}/toolchains/$tc/bin:$PATH"
+  fi
   flutter="$(command -v flutter)" || { echo "no flutter on PATH" >&2; return 1; }
   flutter="$(cd "$(dirname "$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$flutter")")/.." && pwd -P)"
   [[ "$(git -C "$flutter" rev-parse HEAD 2>/dev/null)" == "$FLUTTER_REVISION" ]] || {
@@ -492,9 +526,19 @@ release_unlock() {
 
 # What this Mac would give away in a binary: its home folder, user name,
 # host names and agents' checkouts.
+# In the build service the build runs as its own account,
+# claktory-build, whose home is the same fixed path on every Mac and names
+# no one: paths in it (cargo's and pub's homes, the source) are no trace, as
+# /tmp/claktory-release is none for a build here. The person's account
+# checks the release again with its own names when it takes it
+# (scripts/release-from-service.sh).
 traces() {
   local name
-  printf '%s\n' "$HOME" "/Users/$USER" "/home/$USER" ".factory/trees"
+  if [[ "${CLAKTORY_BUILD_SERVICE:-}" == 1 ]]; then
+    printf '%s\n' ".factory/trees"
+  else
+    printf '%s\n' "$HOME" "/Users/$USER" "/home/$USER" ".factory/trees"
+  fi
   for name in "$(hostname -s 2>/dev/null)" "$(scutil --get ComputerName 2>/dev/null)" "$(scutil --get LocalHostName 2>/dev/null)"; do
     [[ ${#name} -ge 4 ]] && printf '%s\n' "$name"
   done
@@ -793,3 +837,6 @@ engine() {
   x86_ssh "podman unshare rm -rf $dir" || true
   return "$code"
 }
+
+# Xcode inside an agent's sandbox: see xcode-shim/use.sh.
+source "$(dirname "${BASH_SOURCE[0]}")/xcode-shim/use.sh"

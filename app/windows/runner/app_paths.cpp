@@ -6,8 +6,10 @@
 #include <sddl.h>
 #include <shlobj.h>
 
+#include <iterator>
 #include <memory>
 
+#include "core/launcher_plan.h"
 #include "flavor.h"
 #include "utils.h"
 
@@ -211,4 +213,19 @@ std::optional<std::wstring> AppDataFile(const wchar_t* name) {
   std::optional<std::wstring> folder = AppDataFolder();
   if (!folder) return std::nullopt;
   return *folder + L"\\" + name;
+}
+
+std::wstring InstalledLauncher() {
+  wchar_t module[MAX_PATH * 4];
+  DWORD length = ::GetModuleFileNameW(nullptr, module,
+                                      static_cast<DWORD>(std::size(module)));
+  if (length == 0 || length >= std::size(module)) return std::wstring();
+  std::wstring launcher = claktory::LauncherFor(std::wstring(module, length));
+  if (launcher.empty()) return launcher;
+  DWORD attributes = ::GetFileAttributesW(launcher.c_str());
+  if (attributes == INVALID_FILE_ATTRIBUTES ||
+      (attributes & FILE_ATTRIBUTE_DIRECTORY)) {
+    return std::wstring();
+  }
+  return launcher;
 }

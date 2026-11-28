@@ -6,6 +6,60 @@ Every change adds a line under `## Unreleased`: "Added …", "Fixed …", "Chang
 
 ## Unreleased
 
+## v0.1.28
+Released 2026-11-28 03:49 UTC.
+Set up Claktory on a server and move it without passing codes around, watch an agent's browser live, and see your agents' schedules in Calendar.
+- Added: Set up Claktory on a server without passing a code around. Run `factoryd account authorize --email you@example.com` there (or install with `--email`), then approve it in Needs you on a device signed in to your Claktory account. The request shows where it came from and how long it has left, and the device you approve on connects to it at once, without leaving what you're doing. Once you have a device, signing another Claktory in with the emailed code asks for that approval too. A device you paired with a code says why it can't approve a new Claktory or a move yet, and can as soon as you sign in to your Claktory account on it.
+- Added: Calendar, a new app that shows your agents' schedules, deadlines and long-running work in one calendar on every device: their monitors, checklist dates, background tasks and the events they add. Tap an entry to open it where it lives, and ask an agent to change anything on it.
+- Added: Watch an agent's browser live with Watch browser in its ⋯ menu. Agents now get past a site's check that they're a person by themselves, and when they can't, Solve check on their request opens that one page for you while they carry on in another tab. The page goes back to the agent when you're done. Your clicks and typing reach only the check itself, never the rest of its page, so a site can't pass off a form of its own as part of the check.
+- Added: You can make one recovery key for your whole account in Settings → Account on your iPhone, iPad or Mac. It opens your secrets on every Claktory on your account, and the keys you saved before stop working, except on copies of your secrets made earlier.
+- Added: When a device is allowed to use your Claktory, your other devices get an urgent alert at once saying how, so you'd notice one you didn't add. The device itself can't clear it.
+- Added: When you lock out a lost or stolen device, it's also removed from all your Claktories: at once from the ones your device can reach, and from the others before they let any device in again.
+- Added: Agents can seal a file that must stay as it is, such as a pass line written before a run. You see it in History, the file shows when it changed since, and Open sealed version shows what was sealed. Turn on Seal in an agent's settings, only for the agents that need it.
+- Added: An agent can start over by itself when it finishes a task: its conversation is cleared, and the old one is kept in its other versions for you to switch back to. Turn on Start over in the agent's settings; it's off unless you do.
+- Added: A project can have a brief: its goal, team and rules, written once in Project settings, so every agent in the project works from the same page. It's empty unless you write one, or ask Rivet to.
+- Added: Web search can use your own Brave Search API key, so your agents' searches stop running into CAPTCHAs. Add it in Settings → Secrets as BRAVE_SEARCH_API_KEY; Claktory stays within Brave's free monthly searches, and without a key search works as before.
+- Added: On your iPhone or Android phone, pull Needs you down to refresh it. What you answered there goes at once, so you don't have to leave and come back, and every request still waiting comes up to date.
+- Added: Agents can write posts and messages of several lines in their browser, without sending them early.
+- Changed: Only you can add and allow devices, sign Claktory in to your account and sign in to model providers. Agents can't do these for you any more and never see the codes that connect a device, and on your Mac only Claktory's own app can do them.
+- Changed: Only you can start moving Claktory to another computer, from the app. Signed in to your Claktory account, you move it with no code or digits: run the receive command with your email on the new computer, then approve the move in Settings → Move on one of your devices. After a move, Claktory's app on the old computer connects to the moved Claktory through your Claktory account, with no code to paste.
+- Changed: factoryd pair no longer prints a code. It asks your connected devices, where the code waits in Needs you for 10 minutes and says a command asked for it, not you; allow, turn away and remove devices there too. A new server's installer still shows its first code at its own terminal.
+- Changed: An app's header says it's an app, as in "Charts app · Right now", so an app's view can't pass for one of Claktory's own pages. Filling the window, or as a page on your phone, the view no longer repeats its name in a "From" line under it.
+- Changed: An agent's conversation opens sooner on a slow connection, such as your phone away from home: Claktory sends what fills the screen first, and earlier messages as you scroll up.
+- Changed: Claktory reconnects sooner when you come back to the app, and tapping Reconnect while it's already connecting lets that try finish instead of starting over.
+- Changed: On a Mac and an iPad, the chip at the top of a conversation ("2 need you") drops what needs you down under it again, so you can answer without leaving the conversation. Needs you in the sidebar still opens focus mode.
+- Changed: Agents' browsers move the mouse and scroll more like a person, so sites are less likely to treat them as bots.
+- Changed: The browser's agent clicks and types much sooner after reading a page, and a click no longer waits for a download that isn't coming.
+- Changed: Claktory's browser keeps third-party cookies, as Chrome does by default, so sign-ins that pass through another site's page work there too.
+- Changed: When Claktory's browser keeps a page from going somewhere it doesn't go, such as a password manager, the tab stays on its page instead of showing an error, and the agent is told at once.
+- Changed: The Grok sign-in in Settings → Providers no longer names particular plans, since xAI now sells Grok subscriptions under other names too.
+- Fixed: With a ChatGPT subscription, the model menus now list every model Codex offers you, including GPT-6.2 Astra and GPT-6.2 Sol.
+- Fixed: Files open faster on a device away from your Claktory, such as your phone. A file you opened before shows at once, and on a phone a file an agent shows opens its page straight away. A file still on its way says it's loading, never a blank page. While a big file or a video comes, what you tap meanwhile no longer waits long behind it.
+- Fixed: An agent no longer says it signed in to a site when it didn't. Claktory checks that the site really left its sign-in page, and otherwise tells the agent what it saw: the form still there, the login refused, or a code or a check asked for.
+- Fixed: Agents can sign in and fill in fields on pages where an ad or a bar sits over them: they scroll the field clear first, as you would.
+- Fixed: A device you remove stays removed. Even signed in to your Claktory account, it no longer comes back asking to be allowed; to use it again, add it with a code.
+- Fixed: On a new Claktory, a request that waits for you from the start, such as adding a device, no longer leaves the app stuck on Connecting… or drops its connection.
+- Fixed: A website login's username no longer hides parts of web addresses in what agents see, and short PINs and codes of 4 to 7 characters are now hidden when they appear on their own. Settings → Secrets warns about a value under 4 characters, which can't be hidden.
+- Fixed: In Settings → Secrets, a secret given to an agent that reads reports now says it can't use it while it reads reports, instead of saying it's limited to a pipe.
+- Fixed: Your phone or tablet no longer says it was removed when your Claktory restarts. It reconnects by itself.
+- Fixed: If an update fails on a Mac, Claktory no longer shows Connecting… for ever. After about 30 seconds it says the update didn't start and offers to open the version you had before.
+- Fixed: In focus mode on a Mac, pressing Review on a request with a file no longer stops the window taking clicks until you quit Claktory. Review now leaves focus mode and opens the file beside the agent's conversation. A file an agent opens while you're in focus mode waits there until you leave.
+- Fixed: In focus mode, a request that has waited a day or more no longer pushes past the edge of the list in a narrow window with large text; how long it waited moves under who asks.
+- Fixed: In focus mode, opening a file, a picture, a PDF or a video from a request or its conversation leaves focus mode and opens it beside that conversation, instead of somewhere you can't see.
+- Fixed: After you scroll up in a conversation, the button back to the latest no longer counts earlier messages as new; it says how many replies came in meanwhile. A conversation also opens at its latest message without loading its whole history first.
+- Fixed: When an agent's action fails, its line in the conversation says what didn't happen, such as "Couldn't add to the checklist", instead of claiming it worked.
+- Fixed: Charts dashboards read well on a phone or a narrow window. A stat's title takes two lines before it's cut, a table's headings are never cut, and a long cell wraps to three lines: tap its row to read it whole. A table too wide for its place shows each row as a block, one line per column, instead of cutting its words to a few letters (friend bug #62).
+- Fixed: In a Charts table, a row's cells line up at the top when one of them wraps, rather than floating beside it.
+- Fixed: On an iPad or Android tablet, an app you opened, such as Charts, stays open when you rotate or resize Claktory between its narrow and wide layouts, rather than giving way to an agent's conversation.
+- Fixed: In a short window, such as an Android tablet on its side or a Mac window pulled short, your projects no longer disappear under Needs you, Rivet and Chats. The sidebar keeps room for them, or scrolls as a whole when there isn't enough.
+- Fixed: On an Android tablet, Claktory's wide layout starts below the status bar, so the clock and battery no longer cover the controls at the top right.
+- Fixed: On an Android tablet, Back or a swipe from the edge closes an app's open menu, such as Charts' "7 days", and leaves the app open. On an app's view that fills the window, Back returns you to the conversation instead of leaving Claktory.
+- Fixed: On your iPad or Android tablet, the sidebar's More menu checks the page that's open, as it does on a Mac.
+- Fixed: At the largest text sizes, Settings and More at the foot of the sidebar show their whole words instead of cutting them in half or short.
+- Fixed: On your phone, once you put the keyboard away after searching the sidebar, closing a menu opened from the sidebar no longer brings the keyboard back into Search.
+- Fixed: Agents' commands can use ps and top again on a Mac where Claktory's browser is set up.
+- Fixed: On iPad at the largest text sizes, the Conversation and document switch above a pane uses the room the window has instead of cutting both names short.
+
 ## v0.1.27
 Released 2026-11-27 20:55 UTC.
 See each project's agents as a team in the sidebar, sign in to Grok, and give any agent Claktory's browser with one switch.

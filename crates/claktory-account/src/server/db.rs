@@ -259,6 +259,57 @@ CREATE TABLE IF NOT EXISTS apps_claktory_removals (
     next_try INTEGER NOT NULL,
     PRIMARY KEY (account_id, claktory_id, epoch)
 ) WITHOUT ROWID;
+-- Computers asking to join an account, for the person to approve on one
+-- of their devices (#546): no code exists. state: waiting, approved,
+-- declined, two_at_once (another asked meanwhile: neither joins), spent;
+-- a move (kind 'move', #546 moves) also taken, between approved and spent.
+-- A move's receive_relays (JSON), the device's move_approval as it came,
+-- the source_claktory_id whose word came with it, and the source_key the
+-- source named taking it. declined_by: the device that declined, as
+-- approver is the one that approved.
+CREATE TABLE IF NOT EXISTS authorizations (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    account_id TEXT NOT NULL,
+    email TEXT NOT NULL,
+    claktory_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    backend_key TEXT NOT NULL,
+    version TEXT NOT NULL,
+    platform TEXT NOT NULL,
+    ip TEXT NOT NULL,
+    network TEXT NOT NULL,
+    place TEXT NOT NULL,
+    started INTEGER NOT NULL,
+    expires INTEGER NOT NULL,
+    state TEXT NOT NULL,
+    approver TEXT,
+    decided INTEGER,
+    receive_relays TEXT,
+    move_approval TEXT,
+    source_claktory_id TEXT,
+    source_key TEXT,
+    declined_by TEXT
+);
+CREATE INDEX IF NOT EXISTS authorizations_by_account ON authorizations (account_id, started);
+-- Requests ended by a decline or by two at once, with the address that
+-- ended them (#546), kept as share releases are.
+CREATE TABLE IF NOT EXISTS authorization_log (
+    account_id TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    what TEXT NOT NULL,
+    ip TEXT NOT NULL,
+    time INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS authorization_log_by_account ON authorization_log (account_id, time);
+-- Account keys that ever signed in through a Claktory's vouch (#529),
+-- kept past their sign-out: a DM identity one of them set up proves
+-- nothing about the person (#546).
+CREATE TABLE IF NOT EXISTS vouched_keys (
+    account_key TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL,
+    since INTEGER NOT NULL
+) WITHOUT ROWID;
 -- Each month's usage breakdowns for Charts (#411), published once after
 -- it ends (`stats::publish`): counts only, folded and suppressed as
 -- Fugo's rules say, never an id. Written once: never changed or deleted.
@@ -378,6 +429,16 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
         tx.query_row("SELECT COUNT(*) > 0 FROM pragma_table_info('devices') WHERE name = 'vouched_by'", [], |row| row.get(0))?;
     if !vouched_by {
         tx.execute_batch("ALTER TABLE devices ADD COLUMN vouched_by TEXT")?;
+    }
+    // A move's columns, and who declined: added in place, NULL for every
+    // request before.
+    for column in ["receive_relays TEXT", "move_approval TEXT", "source_claktory_id TEXT", "source_key TEXT", "declined_by TEXT"] {
+        let name = column.split(' ').next().unwrap_or(column);
+        let have: bool =
+            tx.query_row("SELECT COUNT(*) > 0 FROM pragma_table_info('authorizations') WHERE name = ?1", params![name], |row| row.get(0))?;
+        if !have {
+            tx.execute_batch(&format!("ALTER TABLE authorizations ADD COLUMN {column}"))?;
+        }
     }
     // Keys signed in, or removed, before the service kept each key's
     // account (row 671): theirs, so they don't sign in to another either.
@@ -1432,6 +1493,9 @@ pub fn delete_account(conn: &mut Connection, account: &Account, apps: bool, now:
     tx.execute("DELETE FROM apps_sign_outs WHERE account_id = ?1", params![account.id])?;
     tx.execute("DELETE FROM apps_claktory_removals WHERE account_id = ?1", params![account.id])?;
     tx.execute("DELETE FROM recovery_keys WHERE account_id = ?1", params![account.id])?;
+    tx.execute("DELETE FROM authorizations WHERE account_id = ?1", params![account.id])?;
+    tx.execute("DELETE FROM authorization_log WHERE account_id = ?1", params![account.id])?;
+    tx.execute("DELETE FROM vouched_keys WHERE account_id = ?1", params![account.id])?;
     tx.execute("DELETE FROM requests WHERE email = ?1", params![account.email])?;
     tx.execute("DELETE FROM sessions WHERE email = ?1", params![account.email])?;
     tx.execute("DELETE FROM accounts WHERE id = ?1", params![account.id])?;
@@ -1642,9 +1706,12 @@ pub fn purge(conn: &Connection, now: i64) -> rusqlite::Result<()> {
         bump_allowlist(conn)?;
     }
     conn.execute("DELETE FROM requests WHERE expires <= ?1", params![now])?;
+    // Kept 10 minutes past their end, so a card can say why one ended.
+    conn.execute("DELETE FROM authorizations WHERE expires <= ?1", params![now - crate::protocol::AUTHORIZE_LIFETIME])?;
     conn.execute("DELETE FROM sessions WHERE expires <= ?1", params![now])?;
     conn.execute("DELETE FROM limits WHERE window < ?1", params![now - 2 * 86_400])?;
     conn.execute("DELETE FROM share_releases WHERE time < ?1", params![now - RELEASES_KEPT])?;
+    conn.execute("DELETE FROM authorization_log WHERE time < ?1", params![now - RELEASES_KEPT])?;
     conn.execute("DELETE FROM periods WHERE received < ?1", params![now - PERIODS_KEPT])?;
     roll_up(conn, now)?;
     conn.execute("DELETE FROM ai_reports WHERE received < ?1", params![now - crate::protocol::AI_REPORT_KEEP_DAYS * 86_400])?;
@@ -1814,6 +1881,10 @@ pub fn bind_device(conn: &mut Connection, request: &Request, apps: bool, now: i6
     if let Some(by) = &vouched_by {
         // One live key per Claktory: the one it vouched for before goes.
         unbind_vouched(&tx, by, Some(account_key), apps.then_some(now))?;
+        tx.execute(
+            "INSERT INTO vouched_keys (account_key, account_id, since) VALUES (?1, ?2, ?3) ON CONFLICT (account_key) DO NOTHING",
+            params![account_key, account_id, now],
+        )?;
     }
     tx.execute(
         "INSERT INTO devices (account_key, account_id, name, platform, version, created, last_seen, signed_in, vouched_by)
@@ -1864,6 +1935,21 @@ pub fn removed_devices(conn: &Connection, account_id: &str) -> rusqlite::Result<
     let mut statement = conn.prepare("SELECT account_key FROM removed_devices WHERE account_id = ?1 ORDER BY account_key")?;
     statement.query_map([account_id], |row| row.get(0))?.collect()
 }
+
+/// The device keys removed from an account since `after` (unix seconds;
+/// all of them when None), for its Claktories to unpair them (E11-8),
+/// oldest first. Those removed in the few minutes before `after` count too,
+/// so a removal made in the same second, or under a clock that stepped
+/// back, is never missed; unpairing a key twice is harmless.
+pub fn removed_device_keys(conn: &Connection, account_id: &str, after: Option<i64>) -> rusqlite::Result<Vec<String>> {
+    let mut statement =
+        conn.prepare("SELECT account_key FROM removed_devices WHERE account_id = ?1 AND removed >= ?2 ORDER BY removed, account_key")?;
+    let from = after.map_or(i64::MIN, |after| after.saturating_sub(REMOVED_OVERLAP));
+    statement.query_map(params![account_id, from], |row| row.get(0))?.collect()
+}
+
+/// How far before a check-in's cursor removed device keys are sent again.
+const REMOVED_OVERLAP: i64 = 300;
 
 /// Whether this key was removed from any account (exactly this key: the
 /// column compares bytes).
@@ -2024,4 +2110,251 @@ pub fn set_recovery_key(
     let set = recovery_key(&tx, account_id)?;
     tx.commit()?;
     Ok(set.ok_or(None))
+}
+
+/// A computer's request to join an account, as kept.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Authorization {
+    pub id: String,
+    pub kind: String,
+    pub account_id: String,
+    pub email: String,
+    pub claktory_id: String,
+    pub name: String,
+    pub backend_key: String,
+    pub version: String,
+    pub platform: String,
+    pub ip: String,
+    pub network: String,
+    pub place: String,
+    pub started: i64,
+    pub expires: i64,
+    pub state: String,
+    pub approver: Option<String>,
+    pub decided: Option<i64>,
+    /// A move's: the relays its destination is reachable through, the
+    /// device's approval as it came, the Claktory whose word came with it
+    /// (the source), and the endpoint the source named taking it. Empty
+    /// for a join.
+    pub receive_relays: Vec<String>,
+    pub move_approval: Option<String>,
+    pub source_claktory_id: Option<String>,
+    pub source_key: Option<String>,
+    /// The device that declined it (its account key).
+    pub declined_by: Option<String>,
+}
+
+const AUTHORIZATION: &str = "SELECT id, kind, account_id, email, claktory_id, name, backend_key, version, platform, ip, network, place,
+    started, expires, state, approver, decided, receive_relays, move_approval, source_claktory_id, source_key, declined_by
+    FROM authorizations";
+
+fn authorization_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Authorization> {
+    Ok(Authorization {
+        id: row.get(0)?,
+        kind: row.get(1)?,
+        account_id: row.get(2)?,
+        email: row.get(3)?,
+        claktory_id: row.get(4)?,
+        name: row.get(5)?,
+        backend_key: row.get(6)?,
+        version: row.get(7)?,
+        platform: row.get(8)?,
+        ip: row.get(9)?,
+        network: row.get(10)?,
+        place: row.get(11)?,
+        started: row.get(12)?,
+        expires: row.get(13)?,
+        state: row.get(14)?,
+        approver: row.get(15)?,
+        decided: row.get(16)?,
+        receive_relays: row.get::<_, Option<String>>(17)?.and_then(|relays| serde_json::from_str(&relays).ok()).unwrap_or_default(),
+        move_approval: row.get(18)?,
+        source_claktory_id: row.get(19)?,
+        source_key: row.get(20)?,
+        declined_by: row.get(21)?,
+    })
+}
+
+/// Whether a computer asking to join `account_id` has anyone to approve
+/// it: the account has a Claktory signed in (whose word an approver
+/// brings) and a device signed in by email itself.
+pub fn may_be_approved(conn: &Connection, account_id: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM claktories WHERE account_id = ?1 AND revoked_at IS NULL)
+            AND EXISTS (SELECT 1 FROM devices WHERE account_id = ?1 AND vouched_by IS NULL)",
+        params![account_id],
+        |row| row.get(0),
+    )
+}
+
+/// Whether this key ever signed in through a Claktory's vouch.
+pub fn ever_vouched(conn: &Connection, account_key: &str) -> rusqlite::Result<bool> {
+    conn.query_row("SELECT EXISTS (SELECT 1 FROM vouched_keys WHERE account_key = ?1)", params![account_key], |row| row.get(0))
+}
+
+/// How a computer's request to join was taken.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Asked {
+    /// It waits for the person's approval.
+    Waiting,
+    /// Another was waiting for the account: both are cancelled, and both
+    /// say why.
+    TwoAtOnce,
+}
+
+/// Keeps a computer's request to join (its `id`, `started` and `expires`
+/// as given), one waiting per account: with another waiting, both end as
+/// `two_at_once`.
+pub fn ask_to_join(conn: &mut Connection, asked: &Authorization) -> rusqlite::Result<Asked> {
+    let tx = conn.transaction()?;
+    let cancelled = tx.execute(
+        "UPDATE authorizations SET state = 'two_at_once', decided = ?2 WHERE account_id = ?1 AND state = 'waiting' AND expires > ?2",
+        params![asked.account_id, asked.started],
+    )?;
+    let state = if cancelled > 0 { "two_at_once" } else { "waiting" };
+    tx.execute(
+        "INSERT INTO authorizations (id, kind, account_id, email, claktory_id, name, backend_key, version, platform, ip, network, place,
+         started, expires, state, decided, receive_relays) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+        params![
+            asked.id,
+            asked.kind,
+            asked.account_id,
+            asked.email,
+            asked.claktory_id,
+            asked.name,
+            asked.backend_key,
+            asked.version,
+            asked.platform,
+            asked.ip,
+            asked.network,
+            asked.place,
+            asked.started,
+            asked.expires,
+            state,
+            (cancelled > 0).then_some(asked.started),
+            (!asked.receive_relays.is_empty()).then(|| serde_json::to_string(&asked.receive_relays).unwrap_or_default()),
+        ],
+    )?;
+    tx.commit()?;
+    Ok(if cancelled > 0 { Asked::TwoAtOnce } else { Asked::Waiting })
+}
+
+pub fn authorization(conn: &Connection, id: &str) -> rusqlite::Result<Option<Authorization>> {
+    conn.query_row(&format!("{AUTHORIZATION} WHERE id = ?1"), params![id], authorization_row).optional()
+}
+
+/// What an account's devices are shown at `now` of `kind` ("claktory"
+/// for joins, "move" for moves, which are only in Settings → Move): its
+/// request waiting, and those cancelled as two at once in the last 10
+/// minutes, oldest first; for joins, those answered in the last 10 minutes
+/// too (approved, spent since, or declined), so a card left open on
+/// another device can say how.
+pub fn authorizations_shown(conn: &Connection, account_id: &str, kind: &str, now: i64) -> rusqlite::Result<Vec<Authorization>> {
+    query(
+        conn.prepare(&format!(
+            "{AUTHORIZATION} WHERE account_id = ?1 AND kind = ?4
+             AND ((state = 'waiting' AND expires > ?2) OR (state = 'two_at_once' AND decided > ?2 - ?3)
+                  OR (kind <> 'move' AND state IN ('approved', 'spent', 'declined') AND decided > ?2 - ?3))
+             ORDER BY started, id"
+        ))?,
+        params![account_id, now, crate::protocol::AUTHORIZE_LIFETIME, kind],
+        authorization_row,
+    )
+}
+
+/// The account's request to join waiting at `now`, by id: never a move,
+/// which rings no bell.
+pub fn authorizations_waiting(conn: &Connection, account_id: &str, now: i64) -> rusqlite::Result<Vec<String>> {
+    query(
+        conn.prepare(
+            "SELECT id FROM authorizations WHERE account_id = ?1 AND kind <> 'move' AND state = 'waiting' AND expires > ?2
+             ORDER BY started, id",
+        )?,
+        params![account_id, now],
+        |row| row.get(0),
+    )
+}
+
+/// The moves approved at `now` with `claktory_id` as their source, not
+/// taken yet, oldest first.
+pub fn moves_approved(conn: &Connection, claktory_id: &str, now: i64) -> rusqlite::Result<Vec<Authorization>> {
+    query(
+        conn.prepare(&format!(
+            "{AUTHORIZATION} WHERE kind = 'move' AND state = 'approved' AND source_claktory_id = ?1 AND expires > ?2 ORDER BY started, id"
+        ))?,
+        params![claktory_id, now],
+        authorization_row,
+    )
+}
+
+/// The person approved a move still waiting at `now`, with the device
+/// `approver`, its own approval as it came and the Claktory whose word came
+/// with it (the source); false when it no longer waits.
+pub fn approve_move(
+    conn: &Connection,
+    id: &str,
+    approver: &str,
+    approval: &str,
+    source_claktory_id: &str,
+    now: i64,
+) -> rusqlite::Result<bool> {
+    let changed = conn.execute(
+        "UPDATE authorizations SET state = 'approved', approver = ?2, decided = ?3, move_approval = ?4, source_claktory_id = ?5
+         WHERE id = ?1 AND kind = 'move' AND state = 'waiting' AND expires > ?3",
+        params![id, approver, now, approval, source_claktory_id],
+    )?;
+    Ok(changed > 0)
+}
+
+/// Its source takes an approved move at `now`, once, naming the endpoint it
+/// dials from: false when it isn't approved for that Claktory, was taken
+/// already, or ran out.
+pub fn take_move(conn: &Connection, id: &str, claktory_id: &str, source_key: &str, now: i64) -> rusqlite::Result<bool> {
+    let changed = conn.execute(
+        "UPDATE authorizations SET state = 'taken', source_key = ?3
+         WHERE id = ?1 AND kind = 'move' AND state = 'approved' AND source_claktory_id = ?2 AND expires > ?4",
+        params![id, claktory_id, source_key, now],
+    )?;
+    Ok(changed > 0)
+}
+
+/// Spends a move its source took, once, as its destination hears of it:
+/// false when it isn't taken (or was spent already).
+pub fn spend_move(conn: &Connection, id: &str) -> rusqlite::Result<bool> {
+    Ok(conn.execute("UPDATE authorizations SET state = 'spent' WHERE id = ?1 AND kind = 'move' AND state = 'taken'", params![id])? > 0)
+}
+
+/// When a Claktory was last registered (signed in afresh); None for one
+/// from before the service kept it.
+pub fn registered_at(conn: &Connection, claktory_id: &str) -> rusqlite::Result<Option<i64>> {
+    Ok(conn.query_row("SELECT registered_at FROM claktories WHERE id = ?1", params![claktory_id], |row| row.get(0)).optional()?.flatten())
+}
+
+/// Records a computer's request ended by the person's decline, or by
+/// another asking at the same time, with the address that did it, as
+/// share releases are kept.
+pub fn log_authorization(conn: &Connection, account_id: &str, request_id: &str, what: &str, ip: &str, now: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO authorization_log (account_id, request_id, what, ip, time) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![account_id, request_id, what, ip, now],
+    )?;
+    Ok(())
+}
+
+/// The person approved or declined a request still waiting at `now`, with
+/// the device `by` (its account key); false when it no longer waits.
+pub fn decide_authorization(conn: &Connection, id: &str, approve: bool, by: &str, now: i64) -> rusqlite::Result<bool> {
+    let (state, approver, declined_by) = if approve { ("approved", Some(by), None) } else { ("declined", None, Some(by)) };
+    let changed = conn.execute(
+        "UPDATE authorizations SET state = ?2, approver = ?3, declined_by = ?5, decided = ?4
+         WHERE id = ?1 AND state = 'waiting' AND expires > ?4",
+        params![id, state, approver, now, declined_by],
+    )?;
+    Ok(changed > 0)
+}
+
+/// Spends an approved request, once: false when it isn't approved (or was
+/// spent already).
+pub fn spend_authorization(conn: &Connection, id: &str) -> rusqlite::Result<bool> {
+    Ok(conn.execute("UPDATE authorizations SET state = 'spent' WHERE id = ?1 AND kind <> 'move' AND state = 'approved'", params![id])? > 0)
 }

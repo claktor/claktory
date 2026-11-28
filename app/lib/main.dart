@@ -77,7 +77,6 @@ Future<void> _start() async {
       drafts: drafts,
       connections: connections,
       localBackend: localBackend,
-      ownCode: readLocalPairing,
     ),
   );
   final connections = await Connections.load(storage);
@@ -154,7 +153,8 @@ class _FactoryAppState extends State<FactoryApp> {
 
   bool get _canChooseLocal =>
       widget.setupChannel != null ||
-      defaultTargetPlatform == TargetPlatform.macOS;
+      defaultTargetPlatform == TargetPlatform.macOS ||
+      defaultTargetPlatform == TargetPlatform.windows;
 
   /// Setting this Mac up, on the first launch of the app downloaded for
   /// it, or once the person chooses this Mac after all.

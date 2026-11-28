@@ -1110,7 +1110,7 @@ async fn a_claude_reset_is_claimed_for_its_organization_and_the_account_gets_req
 
 /// The "N resets left" people see counts every grant of the kind, from a
 /// usage read after the claim: the claim's own resets_left is only the
-/// used grant's, and another grant may hold more (#230). A read that
+/// used grant's, and another grant may hold more. A read that
 /// still shows the used grant unspent doesn't overcount it.
 #[tokio::test]
 async fn the_resets_left_count_spans_every_grant_of_the_kind_from_a_fresh_read() {
@@ -1265,7 +1265,7 @@ fn logged() -> String {
     String::from_utf8_lossy(&buffer.lock()).into_owned()
 }
 
-/// #183: moving to another account was only a notice in one agent's
+/// Moving to another account was only a notice in one agent's
 /// conversation, so nothing watching the log ever saw it.
 #[tokio::test]
 async fn reaching_a_limit_and_moving_to_the_next_account_are_logged() {
@@ -1481,7 +1481,7 @@ impl OAuthFlow for Counted {
     }
 }
 
-/// rivet-move.md §3 P2: a sign-in the provider won't refresh is marked, so
+/// A sign-in the provider won't refresh is marked, so
 /// it's skipped (the next account takes the request) and its token endpoint
 /// isn't asked again, until it's signed in to again.
 #[tokio::test]
@@ -1672,7 +1672,7 @@ fn stored_access(file: &std::path::Path) -> String {
     stored["openai-codex"]["access"].as_str().expect("access").to_owned()
 }
 
-/// Bruno #28876: ChatGPT stopped taking a sign-in's access token an hour
+/// ChatGPT stopped taking a sign-in's access token an hour
 /// before its stored expiry, and Claktory kept sending it until every
 /// ChatGPT model vanished. A 401 now refreshes the sign-in at once, once
 /// for any number of callers, and the read carries on with the new token.
@@ -1801,7 +1801,7 @@ fn openrouter_model(base_url: &str) -> Model {
 const OR_1: &str = "sk-or-v1-first-1111";
 const OR_2: &str = "sk-or-v1-second-2222";
 
-/// U13 (#343): a key at its own spending limit (OpenRouter's 403, its
+/// A key at its own spending limit (OpenRouter's 403, its
 /// `limit_source` and `resets_at`) is skipped until the limit resets, as a
 /// subscription at its limit is, and the request carries on with the next
 /// key; not failed with the raw error.
@@ -1845,8 +1845,7 @@ async fn an_openrouter_key_at_its_spending_limit_is_skipped_until_it_resets() {
 }
 
 /// A key whose spending limit has reset, and then runs out of credit, says
-/// only that: not the old limit with its reset time, long gone (Abbacchio's
-/// row 750).
+/// only that: not the old limit with its reset time, long gone.
 #[tokio::test]
 async fn a_key_out_of_credit_after_its_spending_limit_reset_says_only_credit() {
     let dir = tempfile::tempdir().expect("dir");
@@ -1904,7 +1903,7 @@ fn asked_tokens(seen: &Seen) -> u64 {
     body["max_completion_tokens"].as_u64().or_else(|| body["max_tokens"].as_u64()).unwrap_or(0)
 }
 
-/// Friend bug #42: OpenRouter's 402 for a request that costs more than the
+/// OpenRouter's 402 for a request that costs more than the
 /// key may spend on it ("requires more credits, or fewer max_tokens … can
 /// only afford N") isn't the key out of credit. The request is asked once
 /// more for what the key can afford and goes through; the account is never
@@ -1935,7 +1934,7 @@ async fn a_request_the_key_cant_afford_whole_asks_for_fewer_tokens_and_marks_not
     assert!(!accounts[0].out_of_credit, "the key has credit");
 }
 
-/// Friend bug #42: one that's still too costly for the key at fewer tokens
+/// One that's still too costly for the key at fewer tokens
 /// (`weight_exceeds_budget`) fails with Claktory's words, saying the key
 /// still has credit, and leaves the account alone: a cheaper model on the
 /// same key runs at once.
@@ -1995,7 +1994,7 @@ fn openrouter_affordability_is_told_apart_from_running_out() {
     assert!(credit_error(402, &none));
 }
 
-/// Bruno 30083: the accounts' order is a priority, looked at again for
+/// The accounts' order is a priority, looked at again for
 /// every request. On the third account because the first two are at their
 /// limits, the next request goes back to the first as soon as its limit
 /// resets, and to the second, ahead of the third, once a usage read shows it

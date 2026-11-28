@@ -1,4 +1,4 @@
-//! History (#458, history-replay.md): how this Claktory came to be, for
+//! History: how this Claktory came to be, for
 //! the Map's History mode. `record` keeps every change to the Map as it
 //! happens (`map_history`), from the day it first ran; `backfill`
 //! reconstructs what came before, once. This answers the app: the overview
@@ -6,7 +6,7 @@
 //! chapters), events page by page (`events`), and new ones as they happen
 //! (`Watch`). Only the person's devices ask (rivet_reach: Person), and no
 //! answer carries what was said, card titles or anything of another
-//! Claktory's (Fugo).
+//! Claktory's.
 
 pub(crate) mod backfill;
 pub(crate) mod events;
@@ -208,8 +208,8 @@ fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 /// What the overview counted of the events, kept so that opening History
-/// again, or HistoryChanged, reads only what's new (Polpo's
-/// history-scale.md item 5); and the nodes' projects for pages.
+/// again, or HistoryChanged, reads only what's new; and the nodes'
+/// projects for pages.
 #[derive(Default)]
 pub(crate) struct Kept {
     counted: Mutex<Option<Counted>>,
@@ -332,7 +332,7 @@ const WARM_AFTER: std::time::Duration = std::time::Duration::from_secs(90);
 /// A while after a start, in the background: the store's indexes on
 /// growing tables (never built before Claktory listens), then every event
 /// counted, so the first time History opens after a restart reads only
-/// what's new (Bruno 46552, 46624).
+/// what's new.
 pub(crate) fn spawn_warm(factory: &Arc<Factory>) {
     let factory = Arc::downgrade(factory);
     tokio::spawn(async move {
@@ -566,7 +566,7 @@ struct Seen {
 fn build_overview(factory: &Factory, now: i64, project: &str) -> rusqlite::Result<v1::HistoryOverview> {
     let db = reader(factory)?;
     let (mut nodes, mut edges) = lives(&db)?;
-    // Never a chat (#473): what was placed or inferred of one before is
+    // Never a chat: what was placed or inferred of one before is
     // left out here too.
     nodes.retain(|id, _| !is_chat(id));
     edges.retain(|key, _| !key.split('|').any(is_chat));
@@ -664,7 +664,7 @@ fn build_overview(factory: &Factory, now: i64, project: &str) -> rusqlite::Resul
             *count += events;
         }
     }
-    // One project's: only its nodes, at the time (Bruno 47544).
+    // One project's: only its nodes, at the time.
     let project_node = format!("project:{project}");
     let ours = |id: &str, at: i64| project.is_empty() || id == project_node || membership.project(id, at) == project;
     let tokens = tokens(factory, &db, &membership, project, first_hour, hours, now)?;
@@ -741,7 +741,7 @@ fn tokens(
     Ok(tokens)
 }
 
-/// A chat's node id ("agent:chat:1"), never one of History's (#473).
+/// A chat's node id ("agent:chat:1"), never one of History's.
 fn is_chat(id: &str) -> bool {
     id.strip_prefix("agent:").is_some_and(crate::chats::is_chat)
 }

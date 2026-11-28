@@ -18,14 +18,14 @@ import 'visible_codes.dart' show nameInText;
 /// pairing code says ("This Mac" for this Mac's own).
 String claktoryName(Backend backend) {
   final name = backend.workspace.workspace.settings.name;
-  // Whatever it holds, it never reorders the words around it (row 1730).
+  // Whatever it holds, it never reorders the words around it.
   if (name.isNotEmpty) return nameInText(name);
   if (backend.welcomeName.isNotEmpty) return nameInText(backend.welcomeName);
   return nameInText(backend.target?.label ?? thisMacName);
 }
 
 /// [claktoryName] where Settings heads the Claktory's sections or names
-/// the computer its version runs on (settings.md §3, ST1): never "This
+/// the computer its version runs on: never "This
 /// Mac", which is the device's own row there, so this Mac's own Claktory
 /// with no name yet goes by its computer's name ("mac-studio").
 String claktoryNameInSettings(Backend backend) {
@@ -146,7 +146,7 @@ class _ClaktoryIdentityState extends State<ClaktoryIdentity>
                 );
               }
               // Wide: Save beside the field while it's changed; else the
-              // help under it, never beside (settings.md §4.1).
+              // help under it, never beside.
               return ListenableBuilder(
                 listenable: _name,
                 builder: (context, _) => _name.text.trim() == settings.name

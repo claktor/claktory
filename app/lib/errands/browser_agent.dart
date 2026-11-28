@@ -100,3 +100,15 @@ Future<bool> turnOffBrowser(
   );
   return true;
 }
+
+/// Whether [agentId]'s browser is open now, to watch.
+bool browserOpen(Workspace workspace, String agentId) =>
+    switch (browserOf(workspace, agentId)?.state) {
+      AgentBrowserState.AGENT_BROWSER_STATE_STARTING ||
+      AgentBrowserState.AGENT_BROWSER_STATE_WARM ||
+      AgentBrowserState.AGENT_BROWSER_STATE_DRIVEN ||
+      AgentBrowserState.AGENT_BROWSER_STATE_PERSONS_TURN ||
+      AgentBrowserState.AGENT_BROWSER_STATE_TAKEN_OVER ||
+      AgentBrowserState.AGENT_BROWSER_STATE_BROWSING => true,
+      _ => false,
+    };

@@ -3,7 +3,7 @@
 //! account endpoints (usage, profile, the sign-in's token), answering only
 //! the fake tokens claktory-qa writes into the sandbox. factoryd reaches it
 //! through FACTORY_QA_ANTHROPIC_URL, which only a QA build of factoryd reads
-//! (Fugo's guard, in factory-agent's providers/anthropic/qa.rs).
+//! (in factory-agent's providers/anthropic/qa.rs).
 //!
 //! The answers are the script's, as on OpenRouter's wire. While the limit
 //! file (`limit`) says so, the account is at its usage limit: every message
@@ -19,7 +19,7 @@
 //! --account 2`), so a sandbox shows requests moving between accounts. Each
 //! answered message's log line says which account it came on (`account`).
 //!
-//! It keeps Anthropic's Files API too (#382), so a sandbox shows images
+//! It keeps Anthropic's Files API too, so a sandbox shows images
 //! going to Claude once, as files, and named after: an upload is kept in
 //! the sandbox's `claude-files/`, a message naming a file that isn't there
 //! (deleted by hand, as Anthropic letting it go) is refused as Anthropic

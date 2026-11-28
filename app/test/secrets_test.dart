@@ -651,8 +651,7 @@ void main() {
     final request = resend();
     await _show(tester, harness, SecretRequestCard(request));
     expect(find.text('June asks for a secret: Resend'), findsOneWidget);
-    // Its settings folded, to edit; the description only inside Edit
-    // (#533 N13, N15; Lucy's §3.5).
+    // Its settings folded, to edit; the description only inside Edit.
     expect(find.text('Sends mail from claktory.com'), findsNothing);
     expect(find.text('Saved as Resend'), findsOneWidget);
     expect(find.text('June never sees the value.'), findsOneWidget);
@@ -967,7 +966,7 @@ void main() {
       'Mike is finding it: Resend',
     );
     // Handed back to the person (its admin /cleared or deleted): approved
-    // with no admin, it asks them again, as its card does (#327).
+    // with no admin, it asks them again, as its card does.
     final handedBack = resend()
       ..state = SecretRequestState.SECRET_REQUEST_STATE_APPROVED;
     expect(secretRequestSummary(handedBack, workspace), 'Asks for Resend');
@@ -1402,7 +1401,7 @@ void main() {
     expect(find.text('Your secrets'), findsNothing);
   });
 
-  // Matt's dead end (#533, Bruno 41264): a typed comment hid Add and
+  // A dead end: a typed comment hid Add and
   // give, so the secret was never given.
   testWidgets('a typed comment goes with Add and give, which stays; the '
       'buttons never change, the line says what Dismiss does (#533, Lucy '
@@ -1538,8 +1537,8 @@ void main() {
     expect(tester.widget<EditableText>(name).controller.text, 'deploy-key');
     await tester.enterText(name, 'deploy-key-2');
     await tester.tap(_labeled(askEachTimeLabel));
-    // A typed comment goes with Generate, which stays (#533); the buttons
-    // never change (Lucy's rule 7).
+    // A typed comment goes with Generate, which stays; the buttons
+    // never change.
     await tester.enterText(field(_comment), 'Only main.');
     await tester.pump();
     expect(find.text('Generate'), findsOneWidget);
@@ -2017,7 +2016,7 @@ void main() {
         SecretRequestCard(importing()..grantToNobody = true),
       );
       expect(find.text('Import and give to June'), findsNothing);
-      // Never says it's given (Abbacchio's row 730).
+      // Never says it's given.
       expect(find.textContaining('Given to June'), findsNothing);
       expect(
         find.text(
@@ -2179,7 +2178,7 @@ void main() {
       ),
       findsOneWidget,
     );
-    // Said to be the agent's words, never Claktory's (Fugo).
+    // Said to be the agent's words, never Claktory's.
     expect(find.textContaining('As June described it.'), findsOneWidget);
   });
 

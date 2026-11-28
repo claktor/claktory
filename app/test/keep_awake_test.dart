@@ -1,4 +1,4 @@
-// Settings → General's Sleep row (#352 P1): keeping the Mac Claktory runs
+// Settings → General's Sleep row: keeping the Mac Claktory runs
 // on awake while agents work (Workspace.keep_awake), shown only where the
 // Claktory can; the switch is the person's answer (SetKeepAwake). And
 // Needs you's question while keep_awake.ask: Keep it awake or Let it sleep.

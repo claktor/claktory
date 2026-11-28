@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:clock/clock.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
@@ -9,6 +10,7 @@ import 'backend.dart';
 import 'characters/character.dart';
 import 'controls.dart';
 import 'extensions.dart' show logTime;
+import 'highlights.dart' show Glow;
 import 'identity.dart';
 import 'mobile/header.dart';
 import 'mobile/metrics.dart';
@@ -61,12 +63,25 @@ class _MonitorsOverviewState extends State<MonitorsOverview> {
   var _asked = 0;
   late final Backend _backend;
 
+  /// The monitor something opened this page at ([monitorKey]), until the
+  /// list has it; then the one open because of it.
+  String? _goingTo;
+  String? _opened;
+
+  /// The pointing this page last went to.
+  DateTime? _wentTo;
+
+  /// Each monitor's place by [monitorKey], to scroll to it.
+  final _rows = <String, GlobalKey>{};
+
   @override
   void initState() {
     super.initState();
     _backend = AppScope.of(context);
     _backend.monitorsChanged.addListener(_load);
     _backend.connected.addListener(_reconnected);
+    _backend.highlights.pointedAt.addListener(_pointed);
+    _goingTo = _pointedMonitor();
     unawaited(_load());
   }
 
@@ -74,7 +89,50 @@ class _MonitorsOverviewState extends State<MonitorsOverview> {
   void dispose() {
     _backend.monitorsChanged.removeListener(_load);
     _backend.connected.removeListener(_reconnected);
+    _backend.highlights.pointedAt.removeListener(_pointed);
     super.dispose();
+  }
+
+  /// The monitor pointed at in the last few seconds and not gone to yet,
+  /// if any.
+  String? _pointedMonitor() {
+    final pointed = _backend.highlights.pointedAt.value;
+    if (pointed == null || pointed.at == _wentTo) return null;
+    if (clock.now().difference(pointed.at) > const Duration(seconds: 10)) {
+      return null;
+    }
+    final key = pointed.keys.where((key) => key.startsWith('monitor:'));
+    if (key.isEmpty) return null;
+    _wentTo = pointed.at;
+    return key.first;
+  }
+
+  void _pointed() {
+    final key = _pointedMonitor();
+    if (key == null || !mounted) return;
+    _goingTo = key;
+    // A filter that would hide it is cleared.
+    if (_agent.isNotEmpty ||
+        _project.isNotEmpty ||
+        _shown != MonitorsShown.all) {
+      _filter(() {
+        _agent = '';
+        _project = '';
+        _shown = MonitorsShown.all;
+      });
+    } else {
+      setState(() {});
+    }
+  }
+
+  /// Scrolls to [key]'s monitor once this frame is laid out, glowing.
+  void _goTo(String key, Agent? agent) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final place = _rows[key]?.currentContext;
+      if (!mounted || place == null) return;
+      Scrollable.ensureVisible(place, alignment: 0.2);
+      _backend.highlights.glow(key, [agentColor(agent?.color ?? 'slate')]);
+    });
   }
 
   void _reconnected() {
@@ -298,6 +356,16 @@ class _MonitorsOverviewState extends State<MonitorsOverview> {
     for (final item in list?.monitors ?? const <AgentMonitor>[]) {
       (groups[item.agentId] ??= []).add(item);
     }
+    if (_goingTo case final going?) {
+      final found = list?.monitors.where(
+        (item) => monitorKey(item.agentId, item.monitor.id) == going,
+      );
+      if (found != null && found.isNotEmpty) {
+        _goingTo = null;
+        _opened = going;
+        _goTo(going, store.agent(found.first.agentId));
+      }
+    }
     Widget quiet(String text, {Color? color}) => Padding(
       padding: const EdgeInsets.symmetric(vertical: Space.s),
       child: Text(
@@ -334,11 +402,17 @@ class _MonitorsOverviewState extends State<MonitorsOverview> {
             agentId: agentId,
             items: items,
             store: store,
+            opened: _opened,
+            place: (key) => _rows.putIfAbsent(key, GlobalKey.new),
           ),
       ],
     );
   }
 }
+
+/// What points at [agentId]'s monitor [id] (m3 is 3): the Monitors page
+/// goes to it, and it glows there.
+String monitorKey(String agentId, int id) => 'monitor:$agentId#$id';
 
 /// One agent's monitors under its name, which opens its conversation.
 class _AgentGroup extends StatelessWidget {
@@ -347,11 +421,19 @@ class _AgentGroup extends StatelessWidget {
     required this.agentId,
     required this.items,
     required this.store,
+    required this.opened,
+    required this.place,
   });
 
   final String agentId;
   final List<AgentMonitor> items;
   final WorkspaceStore store;
+
+  /// The monitor something opened the page at ([monitorKey]), if any.
+  final String? opened;
+
+  /// Each monitor's place, by [monitorKey].
+  final GlobalKey Function(String key) place;
 
   void _open(BuildContext context) {
     final backend = AppScope.of(context);
@@ -431,17 +513,23 @@ class _AgentGroup extends StatelessWidget {
             ),
           ),
           for (final item in items)
-            MonitorRow(
-              key: ValueKey('${item.agentId}/${item.monitor.id}'),
-              monitor: item.monitor,
-              agentId: item.agentId,
-              store: store,
-              held: item.held,
-              more: (context) => MonitorHistoryView(
-                agentId: item.agentId,
-                monitorId: item.monitor.id,
+            if (monitorKey(item.agentId, item.monitor.id) case final key)
+              Glow(
+                key: place(key),
+                store: AppScope.of(context).highlights,
+                matches: (glowing) => glowing == key,
+                child: MonitorRow(
+                  monitor: item.monitor,
+                  agentId: item.agentId,
+                  store: store,
+                  held: item.held,
+                  opened: opened == key,
+                  more: (context) => MonitorHistoryView(
+                    agentId: item.agentId,
+                    monitorId: item.monitor.id,
+                  ),
+                ),
               ),
-            ),
         ],
       ),
     );

@@ -1,4 +1,4 @@
-//! The move bundle (#217): a whole Claktory in one encrypted file, written
+//! The move bundle: a whole Claktory in one encrypted file, written
 //! by `factoryd export` (`move_export`) and read by `factoryd import`. The
 //! format is docs/MOVE.md's, version 1; this is its only implementation, so
 //! the two sides can't drift apart.

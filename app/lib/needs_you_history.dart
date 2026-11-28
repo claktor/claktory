@@ -6,17 +6,27 @@ import 'package:flutter/widgets.dart';
 import 'app_dock.dart' show openAppsTab;
 import 'apps.dart' show undoAppAccess;
 import 'ask_card.dart'
-    show askOutcome, handoffHost, isAgreement, isPayment, paymentSite;
+    show
+        askOutcome,
+        checkSite,
+        handoffHost,
+        isAgreement,
+        isCheck,
+        isPayment,
+        paymentSite;
 import 'backend.dart';
 import 'characters/character.dart';
 import 'chats.dart' show ChatGlyph, chatTitle, openChat;
 import 'command_card.dart' show commandRunLine, commandSummary;
 import 'controls.dart';
+import 'explorer.dart' show openFile;
 import 'needs_you_alerts.dart' show withheldTitle;
 import 'find.dart' show FindScope;
 import 'forms.dart' show AgentSettingsForm;
 import 'identity.dart';
+import 'layout.dart' show layoutOf, open;
 import 'mobile/metrics.dart';
+import 'mobile/navigation.dart' show PhoneRoutes;
 import 'pipe_timeline.dart' show pipeItemKey, pipeLiaison;
 import 'pipes.dart' show PortalGlyph, pipeChatRevealId, pipeColor;
 import 'protocol/factory/v1/factory.pb.dart';
@@ -331,7 +341,18 @@ bool _ofGivenUp(NeedsYouRecord record) =>
     // An agent saving a command's output as a new secret (save_as, #589):
     // no card either; Claktory's sentence, and the secret's description
     // in the agent's words.
-    record.kind == NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_SECRET_SAVED;
+    record.kind == NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_SECRET_SAVED ||
+    _ofSeal(record);
+
+/// Whether [record] is something an agent did on its own, which no one
+/// decided: given up, saved or sealed.
+bool historyByAgent(NeedsYouRecord record) => _ofGivenUp(record);
+
+/// Whether [record] is an agent sealing a file (the Seal extension): no
+/// card; Claktory's sentence, the seal's note in the agent's words, and it
+/// opens the file.
+bool _ofSeal(NeedsYouRecord record) =>
+    record.kind == NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_SEALED;
 
 /// Whether [record] is the person's own decision about this Claktory, made
 /// in Settings rather than on an agent's card: using the account's new
@@ -444,6 +465,7 @@ String? handoffHistoryTitle(NeedsYouRecord record) {
   final host = handoffHost(ask);
   if (ask.code) return '$host asks for a code';
   if (isPayment(ask)) return 'Asks you to pay on ${paymentSite(ask)}';
+  if (isCheck(ask)) return 'Solve a check on ${checkSite(ask)}';
   // The card's heading, never the page's title (handoff.title), which is
   // the site's words.
   return proseCodes(record.title);
@@ -991,6 +1013,8 @@ String historyWhere(NeedsYouRecord record) => record.chatId.isNotEmpty
     ? 'Open pipe'
     : _settingsPlace(record) != null
     ? 'Open Settings'
+    : _ofSeal(record) && record.sealedPath.isNotEmpty
+    ? 'Open file'
     : 'Open conversation';
 
 /// Opens the conversation [record]'s card is in, at the card when it's
@@ -1013,6 +1037,10 @@ void openHistoryRecord(BuildContext context, NeedsYouRecord record) {
       _ => (place, ''),
     };
     AppScope.openSettingsAt(context, section, setting: setting);
+    return;
+  }
+  if (_ofSeal(record) && record.sealedPath.isNotEmpty) {
+    _openSealed(context, record.agentId, record.sealedPath);
     return;
   }
   // A kind of report made, changed or deleted: what crosses with it.
@@ -1081,6 +1109,37 @@ void openHistoryRecord(BuildContext context, NeedsYouRecord record) {
   }
   if (agent == null) return;
   _openAgentAt(context, agent, record.seq.toInt());
+}
+
+/// Opens the file [agentId] sealed ([path]) in a viewer beside that agent's
+/// conversation, which says how it stands against its seals; beside the
+/// selected agent's once the sealing agent is gone. On a phone, a page over
+/// what shows, for Back.
+void _openSealed(BuildContext context, String agentId, String path) {
+  final backend = AppScope.of(context);
+  if (backend.workspace.agent(agentId) == null) {
+    openFile(context, path);
+    return;
+  }
+  if (PhoneRoutes.of(context)?.showFile(agentId, path) ?? false) return;
+  AppScope.closePage(context);
+  fireAndLog(() async {
+    if (backend.workspace.workspace.selectedAgentId != agentId) {
+      await backend.selectAgent(agentId);
+    }
+    final agent = backend.workspace.agent(agentId);
+    if (agent == null) return;
+    final root = layoutOf(agent);
+    final opened = open(root, path);
+    // Open already: its pane glows.
+    if (identical(opened.root, root)) {
+      backend.highlights.glow('pane:$agentId:${opened.paneId}', [
+        agentColor(agent.color),
+      ]);
+      return;
+    }
+    await backend.setLayout(agentId, opened.root);
+  }());
 }
 
 /// The name of the agent whose proposal [record] was approved in: as it is

@@ -34,6 +34,7 @@ TunnelStatus tunnelStatus({
   int received = 0,
   int linkReceived = 0,
   int dialTimeoutMs = 0,
+  int dialMs = 0,
   TunnelReach reach = TunnelReach.none,
 }) => TunnelStatus(
   phase: phase,
@@ -46,6 +47,7 @@ TunnelStatus tunnelStatus({
   received: received,
   linkReceived: linkReceived,
   dialTimeoutMs: dialTimeoutMs,
+  dialMs: dialMs,
   reach: reach,
 );
 
@@ -105,6 +107,20 @@ class _FreshStatusTunnel extends FakeTunnel {
 
   @override
   TunnelStatus get status => tunnelStatus(path: path);
+}
+
+/// A tunnel whose reconnect ends only when [rebuilt] completes, as one
+/// making its endpoint afresh does.
+class _RebuildingTunnel extends FakeTunnel {
+  _RebuildingTunnel(super.port);
+
+  var rebuilt = Completer<void>();
+
+  @override
+  Future<void> reconnect() async {
+    reconnects++;
+    await rebuilt.future;
+  }
 }
 
 /// Tunnels that never open.
@@ -199,13 +215,12 @@ class _SlowTunnels extends FakeTunnels {
   }
 }
 
-Backend backendWith(Tunnels tunnels, {RemoteFactory? local}) => Backend(
+Backend backendWith(Tunnels tunnels) => Backend(
   workspace: WorkspaceStore(),
   transcript: TranscriptStore(),
   explorer: ExplorerStore(),
   extensionView: ExtensionViewStore(),
   tunnels: tunnels,
-  localPairing: () async => local,
 );
 
 /// A backend's end of the tunnel: the first Hello it gets.
@@ -386,52 +401,8 @@ void main() {
     await server.close(force: true);
   });
 
-  test("this Mac's Factory is reached through the tunnel with its own "
-      'code: its direct address, its token, a key of its own', () async {
-    final (server, hello) = await helloServer();
-    final tunnels = FakeTunnels(FakeTunnel(server.port));
-    final local = parsePairingCode(
-      'factory://?t=$_token&name=this-mac&e=$_endpoint&a=127.0.0.1%3A4919',
-    )!;
-    final backend = backendWith(tunnels, local: local)
-      ..deviceKey = (_) => throw StateError('not a paired device');
-    unawaited(backend.run());
-
-    final message = await hello.timeout(const Duration(seconds: 5));
-    expect(message.hello.token, _token);
-    final (key, endpoint, relays) = tunnels.opened.single;
-    expect(key, matches(RegExp(r'^[0-9a-f]{64}$')));
-    expect(endpoint, _endpoint);
-    expect(relays, isEmpty);
-    expect(tunnels.addresses.single, ['127.0.0.1:4919']);
-    await backend.close();
-    await server.close(force: true);
-  });
-
-  test("this Mac's Factory, its tunnel failing, is reached on its open "
-      "port with its code's token", () async {
-    final (server, hello) = await helloServer();
-    final local = parsePairingCode(
-      'factory://?t=$_token&name=this-mac&e=$_endpoint',
-    )!;
-    final backend = Backend(
-      workspace: WorkspaceStore(),
-      transcript: TranscriptStore(),
-      explorer: ExplorerStore(),
-      extensionView: ExtensionViewStore(),
-      tunnels: _FailingTunnels(),
-      localPairing: () async => local,
-      localEndpoint: 'ws://127.0.0.1:${server.port}',
-    );
-    unawaited(backend.run());
-    final message = await hello.timeout(const Duration(seconds: 10));
-    expect(message.hello.token, _token);
-    await backend.close();
-    await server.close(force: true);
-  });
-
-  test("refused by this Mac's own Factory (its code not written yet), it "
-      'tries again rather than giving up', () async {
+  test("refused by this Mac's own Claktory (not knowing this app yet), it "
+      'says why and tries again rather than giving up', () async {
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     var hellos = 0;
     server.listen((request) async {
@@ -457,16 +428,27 @@ void main() {
       explorer: ExplorerStore(),
       extensionView: ExtensionViewStore(),
       tunnels: _FailingTunnels(),
-      localPairing: () async => null,
       localEndpoint: 'ws://127.0.0.1:${server.port}',
     );
     unawaited(backend.run());
-    final end = DateTime.now().add(const Duration(seconds: 10));
+    // Its backend never closes: it doesn't wait for that.
+    final end = DateTime.now().add(const Duration(seconds: 2));
     while (hellos < 2 && DateTime.now().isBefore(end)) {
       await Future<void>.delayed(const Duration(milliseconds: 20));
     }
     expect(hellos, greaterThanOrEqualTo(2));
     expect(backend.refused.value, isNull);
+    expect(backend.localRefused.value, 'This Claktory needs its token.');
+    // The footer and the main pane say why, and that it keeps trying.
+    final connection = Connection(backend);
+    expect(connection.link, Link.failing);
+    expect(connection.details, 'This Claktory needs its token.');
+    // Said once, not again as the error under it.
+    expect(connection.error, isEmpty);
+    expect(
+      connection.stillTrying,
+      'This Claktory needs its token. Trying again…',
+    );
     await backend.close();
     await server.close(force: true);
   });
@@ -622,6 +604,61 @@ void main() {
     expect(tunnels.tunnel.closed, isFalse);
     expect(tunnels.opened, hasLength(1));
     expect(backend.reconnecting.value, isFalse);
+    await backend.close();
+    await server.close(force: true);
+  });
+
+  test('back from the background, it dials once the tunnel has rebuilt, '
+      'not on the endpoint being replaced', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    var sockets = 0;
+    server.listen((request) async {
+      sockets++;
+      final socket = await WebSocketTransformer.upgrade(request);
+      socket.listen((frame) {
+        final message = ClientMessage.fromBuffer(frame as List<int>);
+        if (message.hasHello()) {
+          socket.add(
+            ServerMessage(
+              replyTo: message.id,
+              welcome: Welcome(serverVersion: 'test'),
+            ).writeToBuffer(),
+          );
+        }
+      });
+    });
+    final tunnel = _RebuildingTunnel(server.port);
+    final backend = backendWith(FakeTunnels(tunnel))
+      ..deviceKey = (_) => 'k' * 64;
+    backend.connectTo(parsePairingCode(_code));
+    unawaited(backend.run());
+    Future<void> until(bool Function() done) async {
+      for (var i = 0; i < 100 && !done(); i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+      }
+      expect(done(), isTrue);
+    }
+
+    await until(() => backend.connected.value);
+    expect(sockets, 1);
+
+    backend.hidden();
+    backend.resumed(now: DateTime.now().add(const Duration(minutes: 1)));
+    expect(tunnel.reconnects, 1);
+    await Future<void>.delayed(const Duration(milliseconds: 400));
+    expect(sockets, 1, reason: 'no dial while the tunnel rebuilds');
+    expect(backend.connected.value, isFalse);
+    tunnel.rebuilt.complete();
+    await until(() => backend.connected.value);
+    expect(sockets, 2, reason: 'one dial, on the new endpoint');
+
+    // A rebuild that never ends holds the next try only so long.
+    tunnel.rebuilt = Completer<void>();
+    backend.tunnelRebuildWithin = const Duration(milliseconds: 300);
+    backend.hidden();
+    backend.resumed(now: DateTime.now().add(const Duration(hours: 1)));
+    expect(tunnel.reconnects, 2);
+    await until(() => backend.connected.value && sockets == 3);
     await backend.close();
     await server.close(force: true);
   });

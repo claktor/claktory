@@ -1,19 +1,27 @@
 //! `factoryd`'s commands for people and agents setting Claktory up from a
-//! shell (`status`, `account …`, `settings set`, `pair --no-wait`, `allow`,
-//! `deny`, `unpair`, `devices`, `provider key --stdin`, `login`), as
-//! onboarding.md specifies. Each talks to the running backend through its
-//! loopback port with this machine's own token (`<home>/remote/local-pairing`),
-//! so the backend stays the one that decides and remembers (tenet 7).
+//! shell (`status`, `account …`, `settings set`, `pair`, `allow`, `deny`,
+//! `unpair`, `devices`, `provider key --stdin`, `login`), as onboarding.md
+//! specifies. Each talks to the running backend through its loopback port
+//! with the tool token (`<home>/tool-token`), so the backend stays the one
+//! that decides and remembers (tenet 7). That token carries only what
+//! agents' commands may do (`authority`): reading Claktory's state,
+//! `settings set` and `pair`, which asks the person's devices to add one
+//! and never gets its code. What only the person does (signing in,
+//! allowing, turning away and removing devices, model sign-ins) is refused
+//! with `person_only` (exit 3): the person does it in the app.
 //!
 //! With `--json` each prints one JSON line on stdout, `{"ok":true,…}` or
 //! `{"ok":false,"error":"<code>","message":"…"}`, and exits with a code per
 //! outcome (`Exit`); without it, a sentence for a person. Secrets never come
 //! in arguments: an API key comes on stdin (`--stdin`).
 //!
-//! `pair`, `allow`, `deny`, `unpair` and `devices` without `--json` (or
-//! `--no-wait`) keep working as before, on their own, without a backend.
+//! `devices` without `--json` (or `--no-wait`) reads the devices file, as
+//! before. `pair`, `allow`, `deny` and `unpair` need the running backend
+//! (`not_running`, exit 4, without it) and write nothing themselves. The one
+//! code a command prints is `pair --show-code`'s, main's own, for the first
+//! device of a new install at its own terminal.
 
-use std::io::{BufRead, IsTerminal, Read};
+use std::io::{BufRead, Read};
 use std::net::SocketAddr;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -76,25 +84,27 @@ impl Answer {
 pub const USAGE: &str = "usage: factoryd [--dev] COMMAND [--json]
 Each prints one JSON line with --json; exit 0 done, 2 the next step is the person's, 3 refused, 4 Claktory isn't running.
   status                                   what this Claktory is and has
+  account authorize --email EMAIL [--service URL]   sign this Claktory in with no code: approve it on one of your devices
   account sign-in --email EMAIL [--service URL] | account verify --code CODE
   account status | account resend | account sign-out
   settings set KEY VALUE                   user.name, name, color, default_model, default_effort
-  pair [NAME] [--no-wait]                  a code to add a device with; without --no-wait or --json, waits for it and asks here;
+  pair [NAME]                              ask to add a device: its code is in Needs you on your connected devices;
                                            without NAME, the device that uses it gives its own name
-  devices | allow DEVICE --number DIGITS | deny DEVICE | unpair DEVICE
-                                           --number: the 4 digits the device's screen shows
+  pair --show-code                         a new install's first device, at its own terminal: shows its code here
+  devices                                  your devices; allow, deny and unpair them on one that's connected
   provider key PROVIDER --stdin [--label LABEL]   an API key, read from stdin
   login [PROVIDER]                         sign in in a browser; with --json, paste the code or address on stdin
   export [--final] [--out FILE] [--skip FOLDER]   this Claktory in one encrypted file, to move it to another computer;
                                            --final stops it here for good, keeping everything (see docs/MOVE.md)
   export --restore | export --delete-moved after --final: brings this copy back, or deletes it once the moved one works
-  move CODE [--skip FOLDER]                 moves this Claktory to the computer that shows CODE (factoryd receive there)
   import BUNDLE [--map FROM=TO]… [--passphrase-stdin]
                                            make this Claktory from one moved from another computer; run again
                                            to finish one that stopped, or import --abandon to undo it
   receive [--committed]                    show a code to move another computer's Claktory here over the network:
                                            paste it into Claktory there (Move to another computer…); run again to carry on;
                                            --json: a line per event, and yes or no to the digits on stdin
+  receive --email EMAIL [--service URL]    the same with your Claktory account, with no code or digits: approve it in
+                                           Settings → Move on a device connected to the Claktory you're moving
   supervise                                runs the backend and keeps it running";
 
 /// How to use `command`, or every command: USAGE's lines for it.
@@ -126,8 +136,7 @@ pub(crate) const CLIENT_NAME: &str = "factoryd-cli";
 /// Runs `args` (after `factoryd`, `--dev` included) if it's one of these
 /// commands; None for anything else, which the caller handles as before.
 pub fn dispatch(args: &[String]) -> Option<ExitCode> {
-    let mut flags = Flags::parse(args)?;
-    flags.interactive = std::io::stdin().is_terminal();
+    let flags = Flags::parse(args)?;
     let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
         Ok(runtime) => runtime,
         Err(error) => {
@@ -184,20 +193,15 @@ pub struct Flags {
     pub code: Option<String>,
     pub service: Option<String>,
     pub label: Option<String>,
-    /// `allow DEVICE --number 0427`: allow it only if it shows these digits.
-    pub number: Option<String>,
+    /// `pair --show-code`: the installer's one code for the first device,
+    /// main's own (`remote::pair_offline`), never this module's.
+    pub show_code: bool,
     /// The command's words: ["account", "sign-in"], ["pair", "Matt's", "iPhone"].
     pub words: Vec<String>,
     /// A flag this module doesn't know, or one without its value.
     pub bad: Option<String>,
     /// --help or -h: say how to use the command, and do nothing.
     pub help: bool,
-    /// Run by a person at a terminal (stdin is one): only then does `allow`
-    /// let a device in on a Claktory that has devices already.
-    pub interactive: bool,
-    /// What the person typed when `allow` asked for the device's digits:
-    /// tests stand in for the terminal with it; None reads the terminal.
-    pub typed: Option<String>,
 }
 
 impl Flags {
@@ -224,7 +228,10 @@ impl Flags {
                 "--code" => flags.code = value("--code"),
                 "--service" => flags.service = value("--service"),
                 "--label" => flags.label = value("--label"),
-                "--number" => flags.number = value("--number"),
+                // `allow DEVICE --number 0427`, from before: a command
+                // allows nothing now.
+                "--number" => drop(value("--number")),
+                "--show-code" => flags.show_code = true,
                 "--help" | "-h" => flags.help = true,
                 // `pair NAME --host ADDRESS`, from before the private tunnel: ignored.
                 "--host" => drop(value("--host")),
@@ -244,11 +251,15 @@ impl Flags {
         }
         let command = flags.words.first().map(String::as_str)?;
         let ours = match command {
-            "status" | "account" | "settings" | "provider" | "help" => true,
-            "pair" | "deny" | "unpair" | "devices" => flags.json || flags.no_wait,
-            // The backend checks the number the person typed (#352 P4), and
-            // refuses a device that has one without it.
-            "allow" => true,
+            "pair" if flags.show_code => false,
+            _ if flags.show_code => {
+                flags.bad = Some("--show-code goes with pair".to_owned());
+                true
+            }
+            // Only the running backend may change devices, and only
+            // the person's devices answer them: never written here.
+            "status" | "account" | "settings" | "provider" | "help" | "pair" | "allow" | "deny" | "unpair" => true,
+            "devices" => flags.json || flags.no_wait,
             "login" => flags.json,
             _ => false,
         };
@@ -272,7 +283,7 @@ pub async fn run(instance: &Instance, flags: &Flags, stdin: impl FnOnce() -> Str
     let known = matches!(
         words.as_slice(),
         ["status"]
-            | ["account", "sign-in" | "verify" | "status" | "resend" | "sign-out"]
+            | ["account", "authorize" | "sign-in" | "verify" | "status" | "resend" | "sign-out"]
             | ["settings", "set", _, _]
             | ["pair", ..]
             | ["allow" | "deny" | "unpair", _, ..]
@@ -285,10 +296,16 @@ pub async fn run(instance: &Instance, flags: &Flags, stdin: impl FnOnce() -> Str
     }
     let mut client = match Client::connect(&instance.home, instance.addr).await {
         Ok(client) => client,
+        // Nothing changes a device without it: no code, no file written.
+        Err(mut answer) if matches!(words.first(), Some(&("pair" | "allow" | "deny" | "unpair"))) => {
+            answer.json["error"] = json!("not_running");
+            return answer;
+        }
         Err(answer) => return answer,
     };
     match words.as_slice() {
         ["status"] => Answer::ok(status(&client.workspace, &instance.home), status_text(&client.workspace, &instance.home)),
+        ["account", "authorize"] => account_authorize(&mut client, flags).await,
         ["account", "sign-in"] => account_sign_in(&mut client, flags).await,
         ["account", "verify"] => account_verify(&mut client, flags).await,
         ["account", "status"] => {
@@ -316,7 +333,7 @@ pub async fn run(instance: &Instance, flags: &Flags, stdin: impl FnOnce() -> Str
             let text = devices_text(&devices);
             Answer::ok(json!({"devices": devices}), text)
         }
-        [verb @ ("allow" | "deny" | "unpair"), device @ ..] => decide_device(&mut client, verb, &device.join(" "), flags).await,
+        [verb @ ("allow" | "deny" | "unpair"), device @ ..] => decide_device(&client, verb, &device.join(" ")),
         ["provider", "key", provider] => provider_key(&mut client, provider, flags, &stdin()).await,
         ["login", provider] => login(&mut client, provider, flags.json).await,
         _ => Answer::refused("usage", USAGE),
@@ -433,18 +450,22 @@ impl Client {
     }
 }
 
-/// The token of this machine's own pairing code: what lets a program on this
-/// machine in on the loopback port.
+/// The tool token (`<home>/tool-token`): what lets these commands in on
+/// the loopback port, held to what agents' commands may do.
 fn local_token(home: &Home) -> Option<String> {
-    let code = std::fs::read_to_string(home.root().join("remote/local-pairing")).ok()?;
-    code.trim().split(['?', '&']).find_map(|part| part.strip_prefix("t=")).map(str::to_owned)
+    crate::authority::read_tool_token(home)
+}
+
+/// Whether a Hello's client_version is these commands'.
+pub(crate) fn is_cli(client_version: &str) -> bool {
+    client_version.starts_with(CLIENT_NAME)
 }
 
 /// The backend on the port turned this user's key away: it's another user's
 /// Claktory (their key is in their own data folder, which only they can
 /// read), or this user's hasn't written its key yet.
 fn not_yours(home: &Home, had_key: bool) -> Answer {
-    let path = home.root().join("remote/local-pairing");
+    let path = home.root().join("tool-token");
     let message = if had_key {
         "This Claktory belongs to another user on this computer: it didn't accept your key. Run the command as the user who runs Claktory."
             .to_owned()
@@ -469,6 +490,8 @@ fn error_answer(error: &v1::Error) -> Answer {
         ErrorCode::Unauthorized => (Exit::Refused, "unauthorized"),
         ErrorCode::VaultLocked => (Exit::NeedsHuman, "vault_locked"),
         ErrorCode::UnsupportedProtocolVersion => (Exit::Refused, "version_mismatch"),
+        // Only the person does it, on their devices or in the app.
+        ErrorCode::PersonOnly => (Exit::Refused, "person_only"),
         _ => (Exit::Refused, "failed"),
     };
     Answer::fail(exit, code, error.message.clone())
@@ -542,6 +565,7 @@ fn account(workspace: &v1::Workspace) -> Value {
     let state = match account.state() {
         State::SignedIn => "signed_in",
         State::AwaitingCode => "awaiting_code",
+        State::AwaitingApproval => "awaiting_approval",
         State::Revoked => "revoked",
         // Not now on the first step: signing in works as from signed out.
         State::Skipped => "skipped",
@@ -556,6 +580,11 @@ fn account(workspace: &v1::Workspace) -> Value {
                 value["sent_from"] = json!(account.code_from);
             }
             let left = (account.code_expires_ms - crate::transcript::now_ms()).max(0) / 1000;
+            value["expires_in"] = json!(left);
+        }
+        State::AwaitingApproval => {
+            value["email"] = json!(account.email);
+            let left = (account.approval_expires_ms - crate::transcript::now_ms()).max(0) / 1000;
             value["expires_in"] = json!(left);
         }
         State::SignedIn | State::Revoked => value["email"] = json!(account.email),
@@ -580,6 +609,68 @@ fn mask(email: &str) -> String {
     match email.split_once('@') {
         Some((user, domain)) => format!("{}…@{domain}", user.chars().next().map(String::from).unwrap_or_default()),
         None => email.to_owned(),
+    }
+}
+
+/// How long `account authorize` waits for the person's approval before it
+/// says it's still waiting (exit 2): run it again to keep waiting.
+const AUTHORIZE_WAIT: Duration = Duration::from_secs(90);
+
+/// `account authorize`: the no-code setup. Asks the account's devices to
+/// approve this Claktory and waits for the person: exit 0 once signed in,
+/// 2 while it still waits (running it again waits on, never asking
+/// twice), 3 when they declined, it ran out or it can't be asked.
+async fn account_authorize(client: &mut Client, flags: &Flags) -> Answer {
+    use v1::ClaktoryAccountState as State;
+    let Some(email) = flags.email.as_deref() else {
+        return Answer::refused("usage", "Give the email: factoryd account authorize --email you@example.com");
+    };
+    let signed_in = |workspace: &v1::Workspace| {
+        let account = workspace.account.clone().unwrap_or_default();
+        (account.state() == State::SignedIn)
+            .then(|| Answer::ok(self::account(workspace), format!("Signed in to your Claktory account as {}.", account.email)))
+    };
+    if let Some(done) = signed_in(&client.workspace) {
+        return done;
+    }
+    if let Some(service) = &flags.service {
+        let set = v1::SetAccountService { url: service.clone() };
+        if let Err(answer) = client.request(client_message::Body::SetAccountService(set)).await {
+            return answer;
+        }
+    }
+    if let Err(answer) = client.request(client_message::Body::AccountAuthorize(v1::AccountAuthorize { email: email.to_owned() })).await {
+        return answer;
+    }
+    // Ended once it's no longer waiting, having been: the Workspace the
+    // request changed may come after its Ack.
+    let mut waited = false;
+    let ended = client
+        .until(AUTHORIZE_WAIT, |workspace| {
+            let account = workspace.account.clone().unwrap_or_default();
+            match account.state() {
+                State::SignedIn => signed_in(workspace),
+                State::AwaitingApproval => {
+                    waited = true;
+                    None
+                }
+                _ if !waited => None,
+                _ => Some(Answer::refused(
+                    "not_approved",
+                    if account.problem.is_empty() { "This Claktory wasn't approved. Ask again.".to_owned() } else { account.problem },
+                )),
+            }
+        })
+        .await;
+    match ended {
+        Some(answer) => answer,
+        None => {
+            let account = account(&client.workspace);
+            let text = format!(
+                "Approve this Claktory on a device signed in to your Claktory account ({email}). The request shows where it came from. Still waiting: run this again to keep waiting."
+            );
+            Answer::needs_human(Answer::ok(account, text))
+        }
     }
 }
 
@@ -686,22 +777,10 @@ fn devices(workspace: &v1::Workspace, home: &Home) -> Vec<Value> {
 /// What the CLI says of a device waiting to be allowed, `name` as
 /// `remote::shown_name` shows it: never its number (#352 P4, Fugo), which
 /// the person reads off the device's own screen.
-pub fn waiting_sentence(id: &str, name: &str) -> String {
+pub fn waiting_sentence(_id: &str, name: &str) -> String {
     format!(
-        "A device calling itself \"{name}\" is waiting. Allow it only if its screen shows the number you type: in a terminal on this computer, run factoryd allow {id} and type the 4 digits on its screen. Over SSH, connect with ssh -t, or it isn't a terminal."
+        "A device calling itself \"{name}\" is waiting. Allow it in Settings → Devices on a device connected to this Claktory, by entering the 4 digits it shows."
     )
-}
-
-/// The line the person types at this computer's terminal after `prompt`;
-/// None without a terminal.
-fn ask_terminal(prompt: &str) -> Option<String> {
-    use std::io::Write;
-    let mut tty = std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty").ok()?;
-    tty.write_all(prompt.as_bytes()).ok()?;
-    tty.flush().ok()?;
-    let mut line = String::new();
-    std::io::BufReader::new(tty).read_line(&mut line).ok()?;
-    Some(line.trim().to_owned())
 }
 
 fn devices_text(devices: &[Value]) -> String {
@@ -725,19 +804,19 @@ fn devices_text(devices: &[Value]) -> String {
     lines.join("\n")
 }
 
+/// `factoryd pair`: asks the person's devices to add one, with no
+/// code here. The code is in Needs you on their devices, on the admin
+/// agent's card, for its 10 minutes.
 async fn pair(client: &mut Client, name: &str) -> Answer {
-    let request = v1::CreatePairing { name: name.trim().to_owned(), ..Default::default() };
-    match client.request(client_message::Body::CreatePairing(request)).await {
-        Ok(Body::PairingCode(code)) => {
-            let expires_in = crate::remote::CODE_LIFETIME.as_secs();
+    let request = v1::RequestAddDevice { name: name.trim().to_owned() };
+    match client.request(client_message::Body::RequestAddDevice(request)).await {
+        Ok(Body::AddDeviceRequested(requested)) => {
+            let minutes = crate::remote::CODE_LIFETIME.as_secs() / 60;
+            let named = if name.trim().is_empty() { "the device".to_owned() } else { crate::remote::shown_name(name.trim()) };
             let text = format!(
-                "Open this code in Claktory on the device ({} minutes, once):\n\n{}\n\nThen allow it: factoryd allow {}",
-                expires_in / 60,
-                code.code,
-                code.device_id
+                "Asked to add {named}. On a device already connected to this Claktory, open Needs you to find {named}'s code; it lasts {minutes} minutes. Scan or paste it on {named}, then allow {named} there."
             );
-            // The state as `devices --json` says it, until the device uses the code.
-            let json = json!({"code": code.code, "device_id": code.device_id, "expires_in": expires_in, "state": "code_unused"});
+            let json = json!({"device_id": requested.device_id, "expires_ms": requested.expires_ms, "state": "requested"});
             Answer::ok(json, text)
         }
         Ok(other) => Answer::refused("failed", format!("Claktory answered {other:?}")),
@@ -763,268 +842,23 @@ fn find_device(workspace: &v1::Workspace, wanted: &str) -> Result<v1::PairedDevi
     }
 }
 
-/// Why `allow` run by a program, not a person at a terminal, lets no device
-/// in once the Claktory has one: from then on, a device that's in allows
-/// new ones (Fugo's rule, #245).
-pub const HAS_DEVICES: &str = "This Claktory already has devices, so only a person can allow a new one: in Settings → Devices on one of them, or in a terminal on this computer with factoryd allow. Over SSH, connect with ssh -t, or it isn't a terminal.";
 
-/// Whether a device other than this machine's own app is allowed in.
-fn has_devices(workspace: &v1::Workspace) -> bool {
-    workspace.remote.as_ref().is_some_and(|remote| remote.devices.iter().any(|device| device.code_expires_ms == 0))
-}
-
-/// The App Store review box's one exception to `HAS_DEVICES` (#365 R3,
-/// Fugo's ruling): there a program (review-pair, as the `review` user) may
-/// allow a device proven through the Claktory's own signed-in account, so a
-/// reviewer can add an iPad after their iPhone. Only while root has put
-/// `MARKER` there, only for a CLI that isn't root (root could put it there
-/// itself), only on Linux, and still with the device's four digits, which
-/// the backend checks. Everywhere else, and for code-paired devices, the
-/// rule holds as it is.
-mod review_box {
-    // Off the Linux box only the tests use the check.
-    #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    #[cfg(unix)]
-    use std::path::Path;
-
-    /// Root's switch, on the review box alone. Never from the environment,
-    /// the settings or an argument.
-    pub(super) const MARKER: &str = "/etc/claktory/review-allow-account";
-    /// The folders above it, each of which must be root's alone too.
-    pub(super) const FOLDERS: [&str; 2] = ["/etc/claktory", "/etc"];
-
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub(super) enum Kind {
-        File,
-        Folder,
-        /// A link (never followed), or anything else.
-        Other,
-    }
-
-    /// What lstat says of a path.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub(super) struct Stat {
-        pub kind: Kind,
-        pub uid: u32,
-        pub mode: u32,
-    }
-
-    /// lstat: a link is a link, not what it points to. None when it isn't there.
-    #[cfg(unix)]
-    pub(super) fn stat(path: &Path) -> Option<Stat> {
-        use std::os::unix::fs::MetadataExt;
-        let meta = std::fs::symlink_metadata(path).ok()?;
-        let kind = match meta.file_type() {
-            kind if kind.is_file() => Kind::File,
-            kind if kind.is_dir() => Kind::Folder,
-            _ => Kind::Other,
-        };
-        Some(Stat { kind, uid: meta.uid(), mode: meta.mode() })
-    }
-
-    /// Root's, and writable by no one else.
-    fn roots(stat: Option<Stat>, kind: Kind) -> bool {
-        stat.is_some_and(|stat| stat.kind == kind && stat.uid == 0 && stat.mode & 0o022 == 0)
-    }
-
-    /// Whether a program may allow this waiting device although the
-    /// Claktory has devices: it proved it's the Claktory's own account's
-    /// (`signed_in`, from the backend), the marker and every folder above it
-    /// are root's alone, and this CLI isn't root.
-    pub(super) fn lets_in(signed_in: bool, marker: Option<Stat>, folders: &[Option<Stat>], euid: u32) -> bool {
-        signed_in && euid != 0 && roots(marker, Kind::File) && !folders.is_empty() && folders.iter().all(|folder| roots(*folder, Kind::Folder))
-    }
-
-    /// `lets_in` on this machine.
-    #[cfg(target_os = "linux")]
-    pub(super) fn here(signed_in: bool) -> bool {
-        let folders = FOLDERS.map(|folder| stat(Path::new(folder)));
-        // SAFETY: geteuid has no preconditions and can't fail.
-        let euid = unsafe { libc::geteuid() };
-        lets_in(signed_in, stat(Path::new(MARKER)), &folders, euid)
-    }
-
-    /// Off: the exception is the Linux review box's alone.
-    #[cfg(not(target_os = "linux"))]
-    pub(super) fn here(_signed_in: bool) -> bool {
-        false
-    }
-
-    /// One line in the system log (and on stderr) for each device it let in.
-    pub(super) fn log(id: &str) {
-        let line = format!("allowed {id} under the review box's account exception");
-        eprintln!("factoryd: {line}");
-        #[cfg(target_os = "linux")]
-        if let Ok(line) = std::ffi::CString::new(line) {
-            // Named, so the journal says "factoryd[pid]:" as for the
-            // backend's own lines: musl's syslog has no name of its own.
-            // SAFETY: a static identifier, then a constant format with one C
-            // string argument.
-            unsafe {
-                libc::openlog(c"factoryd".as_ptr(), libc::LOG_PID, libc::LOG_AUTH);
-                libc::syslog(libc::LOG_AUTH | libc::LOG_NOTICE, c"%s".as_ptr(), line.as_ptr());
-                libc::closelog();
-            }
-        }
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        const ROOTS_FILE: Stat = Stat { kind: Kind::File, uid: 0, mode: 0o100644 };
-        const ROOTS_FOLDER: Stat = Stat { kind: Kind::Folder, uid: 0, mode: 0o040755 };
-        const USER: u32 = 1000;
-
-        fn folders() -> [Option<Stat>; 2] {
-            [Some(ROOTS_FOLDER), Some(ROOTS_FOLDER)]
-        }
-
-        #[test]
-        fn only_roots_marker_for_an_account_proven_device_and_a_cli_that_isnt_root() {
-            // Every condition holds: on.
-            assert!(lets_in(true, Some(ROOTS_FILE), &folders(), USER));
-            // No marker.
-            assert!(!lets_in(true, None, &folders(), USER));
-            // A code-paired device, never.
-            assert!(!lets_in(false, Some(ROOTS_FILE), &folders(), USER));
-            // A root CLI proves nothing.
-            assert!(!lets_in(true, Some(ROOTS_FILE), &folders(), 0));
-            // Someone else's, a link, a folder.
-            assert!(!lets_in(true, Some(Stat { uid: USER, ..ROOTS_FILE }), &folders(), USER));
-            assert!(!lets_in(true, Some(Stat { kind: Kind::Other, mode: 0o120777, ..ROOTS_FILE }), &folders(), USER));
-            assert!(!lets_in(true, Some(Stat { kind: Kind::Folder, ..ROOTS_FILE }), &folders(), USER));
-            // Writable by its group or by anyone.
-            for mode in [0o100664, 0o100646, 0o100666] {
-                assert!(!lets_in(true, Some(Stat { mode, ..ROOTS_FILE }), &folders(), USER), "{mode:o}");
-            }
-            // A folder above it that isn't root's alone, or isn't there.
-            for bad in [
-                Some(Stat { mode: 0o040775, ..ROOTS_FOLDER }),
-                Some(Stat { mode: 0o041777, ..ROOTS_FOLDER }),
-                Some(Stat { uid: USER, ..ROOTS_FOLDER }),
-                Some(Stat { kind: Kind::Other, ..ROOTS_FOLDER }),
-                None,
-            ] {
-                assert!(!lets_in(true, Some(ROOTS_FILE), &[Some(ROOTS_FOLDER), bad], USER), "{bad:?}");
-                assert!(!lets_in(true, Some(ROOTS_FILE), &[bad, Some(ROOTS_FOLDER)], USER), "{bad:?}");
-            }
-            assert!(!lets_in(true, Some(ROOTS_FILE), &[], USER));
-        }
-
-        /// What a test (or anyone but root) can make: a marker of its own,
-        /// in a folder of its own, plain or a link to a root's file. Off.
-        #[cfg(unix)]
-        #[test]
-        fn a_marker_anyone_but_root_can_make_is_off() {
-            let dir = std::env::temp_dir().join(format!("claktory-review-box-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).unwrap();
-            let marker = dir.join("review-allow-account");
-            std::fs::write(&marker, "").unwrap();
-            let euid = unsafe { libc::geteuid() };
-            let mine = stat(&marker).unwrap();
-            assert_eq!(mine.kind, Kind::File);
-            let roots_folders = folders();
-            if euid != 0 {
-                assert_ne!(mine.uid, 0);
-                assert!(!lets_in(true, Some(mine), &roots_folders, euid));
-            }
-            // A link to a file of root's is a link, not that file.
-            let link = dir.join("link");
-            std::os::unix::fs::symlink("/etc/hosts", &link).unwrap();
-            let linked = stat(&link).unwrap();
-            assert_eq!(linked.kind, Kind::Other);
-            assert!(!lets_in(true, Some(linked), &roots_folders, USER));
-            // The folder it's in is the test's.
-            assert!(!lets_in(true, Some(ROOTS_FILE), &[stat(&dir)], USER) || euid == 0);
-            assert_eq!(stat(&dir.join("missing")), None);
-            std::fs::remove_dir_all(&dir).unwrap();
-            // And the real switch isn't there on a machine that isn't the review box.
-            if stat(Path::new(MARKER)).is_none() {
-                assert!(!here(true));
-            }
-            assert!(!here(false));
-        }
-    }
-}
-
-async fn decide_device(client: &mut Client, verb: &str, wanted: &str, flags: &Flags) -> Answer {
-    let number = flags.number.as_deref();
-    let device = match find_device(&client.workspace, wanted) {
-        Ok(device) => device,
+/// `allow`, `deny` and `unpair` are the person's: the person
+/// answers a device on one of their devices, where it shows what it is and
+/// its digits. A command line sends nothing and says where.
+fn decide_device(client: &Client, verb: &str, wanted: &str) -> Answer {
+    let name = match find_device(&client.workspace, wanted) {
+        Ok(device) => crate::remote::shown_name(&device.name),
         Err(answer) => return answer,
     };
-    // As the device calls itself, so without what could reach the terminal.
-    let name = crate::remote::shown_name(&device.name);
-    let pending =
-        client.workspace.remote.as_ref().and_then(|remote| remote.pending_devices.iter().find(|pending| pending.device_id == device.id));
-    let waiting = pending.is_some();
-    // Only the first device may be let in by a program (a setup over SSH),
-    // but on the review box (`review_box`).
-    let mut review_exception = false;
-    if verb == "allow" && waiting && (flags.json || flags.no_wait || !flags.interactive) && has_devices(&client.workspace) {
-        if !pending.is_some_and(|pending| review_box::here(pending.signed_in)) {
-            return Answer::refused("has_devices", HAS_DEVICES);
-        }
-        review_exception = true;
-    }
-    // Allowed only with the digits the person reads off the device's own
-    // screen, which the backend checks (#352 P4, Fugo): never read here.
-    // A person at a terminal who left them out is asked for them (Matt's
-    // `factoryd pair` over SSH, Fugo's ruling 35297); a program isn't.
-    let mut number = number.map(str::trim).unwrap_or_default().to_owned();
-    if verb == "allow" && waiting && number.is_empty() && flags.interactive && !flags.json && !flags.no_wait {
-        let prompt = format!("Type the 4 digits shown on {name}: ");
-        number = match &flags.typed {
-            Some(typed) => typed.trim().to_owned(),
-            None => ask_terminal(&prompt).unwrap_or_default(),
-        };
-    }
-    if verb == "allow" && waiting && number.is_empty() {
-        return Answer::refused("needs_number", waiting_sentence(&device.id, &name));
-    }
-    let id = device.id.clone();
-    let request = match verb {
-        // On a terminal, a person compared the digits: the device is the
-        // owner's by this Allow; from a program it shows the owner's
-        // assertion first (#527 S3).
-        "allow" if waiting => client_message::Body::ApproveDevice(v1::ApproveDevice {
-            device_id: id.clone(),
-            number,
-            from_terminal: flags.interactive && std::io::stdout().is_terminal(),
-        }),
-        "allow" if device.code_expires_ms > crate::transcript::now_ms() => {
-            return Answer::fail(
-                Exit::NeedsHuman,
-                "not_waiting",
-                format!("{name} hasn't used its code yet: open the code on the device, then allow it."),
-            );
-        }
-        "allow" if device.code_expires_ms == 0 => {
-            return Answer::ok(json!({"allowed": id, "already": true}), format!("{name} is already allowed."));
-        }
-        "allow" => return Answer::refused("code_expired", format!("{name}'s code expired: make a new one with factoryd pair.")),
-        "deny" if waiting => client_message::Body::DenyDevice(v1::DenyDevice { device_id: id.clone() }),
-        "deny" => return Answer::refused("not_waiting", format!("{name} isn't waiting to be allowed.")),
-        _ => client_message::Body::UnpairDevice(v1::UnpairDevice { device_id: id.clone() }),
+    let text = match verb {
+        "allow" => format!(
+            "A command can't allow a device. On a device connected to this Claktory, open Needs you or Settings → Devices and type the 4 digits {name} shows."
+        ),
+        "deny" => "A command can't turn a device away. Do it on a device connected to this Claktory, in Needs you or Settings → Devices.".to_owned(),
+        _ => "A command can't remove a device. Do it on a device connected to this Claktory, in Settings → Devices.".to_owned(),
     };
-    match client.request(request).await {
-        Ok(_) => match verb {
-            "allow" if review_exception => {
-                review_box::log(&id);
-                Answer::ok(json!({"allowed": id, "exception": "review_box_account"}), format!("Allowed {name}: it can connect now."))
-            }
-            "allow" => Answer::ok(json!({"allowed": id}), format!("Allowed {name}: it can connect now.")),
-            "deny" => Answer::ok(json!({"denied": id}), format!("Not allowed. {name} can't connect.")),
-            _ => Answer::ok(json!({"unpaired": id}), format!("Removed {name}: it can't connect any more.")),
-        },
-        // A wrong number, as the backend says it (tries left, or turned away).
-        Err(answer) if verb == "allow" && answer.json["error"].as_str() == Some("invalid") => {
-            Answer::refused("wrong_number", answer.text.clone())
-        }
-        Err(answer) => answer,
-    }
+    Answer::refused("person_only", text)
 }
 
 // ---- providers ----
@@ -1260,7 +1094,13 @@ pub mod receive_json {
     pub fn ui(emit: Arc<dyn Fn(Value) + Send + Sync>, lines: Arc<Mutex<UnboundedReceiver<String>>>) -> Ui {
         let (shown, say) = (emit.clone(), emit.clone());
         Ui {
-            code: Arc::new(move |code| shown(code_line(code))),
+            // A move with the account shows no code: one without its secret
+            // only says where receive listens, for tests.
+            code: Arc::new(move |code| {
+                if !code.secret.is_empty() {
+                    shown(code_line(code));
+                }
+            }),
             say: Arc::new(move |text| say(json!({"event": "progress", "message": text}))),
             confirm: Arc::new(move |asked| {
                 let (emit, lines) = (emit.clone(), lines.clone());
@@ -1306,8 +1146,11 @@ mod tests {
         assert!(Flags::parse(&args("status")).is_some());
         assert!(Flags::parse(&args("--dev account sign-in --email a@b.c --json")).is_some_and(|flags| flags.dev && flags.json));
         // As before without --json: waits in the terminal, works offline.
-        assert!(Flags::parse(&args("pair Matt's iPhone")).is_none());
-        assert!(Flags::parse(&args("allow d-1")).is_some(), "the running Claktory checks the number");
+        // Every pair but the installer's --show-code asks the running Claktory.
+        assert!(Flags::parse(&args("pair Matt's iPhone")).is_some_and(|flags| flags.words == ["pair", "Matt's", "iPhone"]));
+        assert!(Flags::parse(&args("pair --show-code")).is_none());
+        assert!(Flags::parse(&args("status --show-code")).is_some_and(|flags| flags.bad.is_some()));
+        assert!(Flags::parse(&args("allow d-1")).is_some() && Flags::parse(&args("deny d-1")).is_some());
         assert!(Flags::parse(&args("login anthropic")).is_none());
         assert!(Flags::parse(&args("pair iPhone --no-wait")).is_some_and(|flags| flags.words == ["pair", "iPhone"]));
         assert!(Flags::parse(&args("supervise")).is_none());
@@ -1318,16 +1161,12 @@ mod tests {
         let help = Flags::parse(&args("pair --help")).expect("ours");
         assert!(help.help && help.words == ["pair"]);
         assert!(Flags::parse(&args("allow -x")).is_some_and(|flags| flags.bad.is_some()));
-        // --number, after the device or before it, and never in its name (Arjun's finding).
+        // --number, from before: never in the device's name.
         for line in ["allow new-device-11 --number 1934", "allow --number 1934 new-device-11", "--dev allow new-device-11 --number 1934"] {
             let flags = Flags::parse(&args(line)).expect(line);
-            assert_eq!(
-                (flags.words, flags.number.as_deref()),
-                (vec!["allow".to_owned(), "new-device-11".to_owned()], Some("1934")),
-                "{line}"
-            );
+            assert_eq!(flags.words, ["allow", "new-device-11"], "{line}");
         }
-        assert!(Flags::parse(&args("pair Phone --host 10.0.0.2")).is_none(), "as before");
+        assert!(Flags::parse(&args("pair Phone --host 10.0.0.2")).is_some_and(|flags| flags.words == ["pair", "Phone"]));
         assert!(Flags::parse(&args("-h")).is_some_and(|flags| flags.help));
         assert!(Flags::parse(&args("--dev")).is_none(), "serves");
         assert!(

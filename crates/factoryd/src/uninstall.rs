@@ -39,7 +39,7 @@ pub(crate) enum Outcome {
 }
 
 impl Outcome {
-    fn exit_code(self) -> u8 {
+    pub(crate) fn exit_code(self) -> u8 {
         match self {
             Outcome::Removed => 0,
             Outcome::Failed => 1,

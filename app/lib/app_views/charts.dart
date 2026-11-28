@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart' show mapEquals;
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/widgets.dart';
 
+import '../controls.dart' show HoverCard;
 import '../identity.dart';
 import '../mobile/metrics.dart';
 import '../scope.dart';
@@ -693,7 +694,7 @@ FlLine chartGridLine(BuildContext context) => FlLine(
 
 /// Where a value axis's label sits: the top one inside the chart, never
 /// over its label, and the bottom one centred on its line, as Grafana keeps
-/// 0 level with the baseline (Zucchero row 794).
+/// 0 level with the baseline.
 SideTitleFitInsideData _valueFit(TitleMeta meta, double value) =>
     value <= meta.min + (meta.max - meta.min) * 1e-6
     ? SideTitleFitInsideData.disable()
@@ -2626,6 +2627,37 @@ class AppStatCard extends StatelessWidget {
   }
 }
 
+/// How many lines a Stat's title takes in [width] (1 or 2), and whether
+/// it's cut past them.
+({int count, bool cut}) statTitleLines(
+  BuildContext context,
+  String label,
+  double width,
+) {
+  final painter = TextPainter(
+    text: TextSpan(text: label, style: panelTitle(context)),
+    textScaler: MediaQuery.textScalerOf(context),
+    textDirection: Directionality.of(context),
+    maxLines: 2,
+  )..layout(maxWidth: math.max(1.0, width));
+  final count = painter.computeLineMetrics().length.clamp(1, 2);
+  final cut = painter.didExceedMaxLines;
+  painter.dispose();
+  return (count: count, cut: cut);
+}
+
+/// Whether a Stat card [width] wide has room for its title [label] on
+/// two lines, as a row of them needs.
+bool statTitleFits(BuildContext context, String label, double width) =>
+    label.isEmpty ||
+    !statTitleLines(context, label, width - (Space.m + 1) * 2).cut;
+
+/// [child], words cut short, with the [whole] of them on a hover or a long
+/// press, in the app's tooltip.
+Widget _withWhole(bool cut, String whole, Widget child) => cut
+    ? HoverCard(holdToShow: true, card: (context) => Text(whole), child: child)
+    : child;
+
 /// A Stat component in Grafana's look: its [label] at the top, the [value]
 /// in the color its [thresholds] give it (or its one [color]), as large as
 /// the panel lets it, its [unit] smaller after it, and under it a spark
@@ -2753,140 +2785,159 @@ class AppStat extends StatelessWidget {
     // The title stays in the panel's own colors, filled or not, as
     // Grafana's header does.
     final labelStyle = panelTitle(context);
-    final labelHeight = label.isEmpty
-        ? 0.0
-        : scaler.scale(labelStyle.fontSize!) * labelStyle.height!;
-    // What larger text adds to the title: a panel of a set height grows
-    // by it, so the value keeps the room it has at the default size.
-    final grown = label.isEmpty
-        ? 0.0
-        : math.max(
-            0.0,
-            labelHeight - labelStyle.fontSize! * labelStyle.height!,
-          );
-    // The title's row, as Grafana's panel header: the value, its spark
-    // line and a fill take what's under it.
-    final head = label.isEmpty ? inset : inset + labelHeight + Space.s;
-    final drawsGraph = graph != 'none' && points.length >= 2 && !noData;
-    // With no height of its own: room for a value about a title's size
-    // over its spark line.
-    final own = head + scaler.scale(95);
-    final total = math.max(height == null ? own : height! + grown, head + 24);
     final semantics = noData ? 'No data' : '$number$suffix';
     return Semantics(
       container: true,
       label: label,
       value: semantics,
       child: ExcludeSemantics(
-        child: SizedBox(
-          height: total,
-          child: LayoutBuilder(
-            builder: (context, constraints) {
-              final width = constraints.maxWidth.isFinite
-                  ? constraints.maxWidth
-                  : 200.0;
-              final room = math.max(1.0, total - head);
-              // The spark line takes the bottom half, as Grafana's does,
-              // shown only where there's room for it.
-              final graphHeight = drawsGraph && room >= 40 ? room * 0.5 : 0.0;
-              // The value as Grafana sizes it for the room under the
-              // title (measured against it from 100 to 300 points), less
-              // where the width is short of it; centred in that room, over
-              // the spark line.
-              final size = noData
-                  ? type.body.fontSize!
-                  : _fitted(
-                      context,
-                      number,
-                      suffix,
-                      width - inset * 2,
-                      math.min(room / 1.15, math.max(12, room * 0.55 - 20)),
-                    );
-              final valueStyle = TextStyle(
-                fontFamily: TextStyles.sans,
-                fontSize: size,
-                height: 1.15,
-                fontWeight: FontWeight.w500,
-                color: valueColor,
-                fontFeatures: const [FontFeature.tabularFigures()],
-              );
-              final text = noData
-                  ? Text(
-                      'No data',
-                      textScaler: TextScaler.noScaling,
-                      style: type.body.copyWith(color: palette.textMuted),
-                    )
-                  : Text.rich(
-                      TextSpan(
-                        children: [
-                          TextSpan(text: number, style: valueStyle),
-                          if (suffix.isNotEmpty)
-                            TextSpan(
-                              text: suffix,
-                              style: valueStyle.copyWith(
-                                fontSize: size * _suffixScale,
-                              ),
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final width = constraints.maxWidth.isFinite
+                ? constraints.maxWidth
+                : 200.0;
+            // The title on up to 2 lines, cut with "…"
+            // past them, the whole of it on a long press or hover.
+            final lines = label.isEmpty
+                ? (count: 0, cut: false)
+                : statTitleLines(context, label, width - inset * 2);
+            final lineHeight =
+                scaler.scale(labelStyle.fontSize!) * labelStyle.height!;
+            final labelHeight = lineHeight * lines.count;
+            // What larger text and a second line add to the title: a
+            // panel of a set height grows by it, so the value keeps the
+            // room it has with one line at the default size.
+            final grown = label.isEmpty
+                ? 0.0
+                : math.max(
+                    0.0,
+                    labelHeight - labelStyle.fontSize! * labelStyle.height!,
+                  );
+            // The title's rows, as Grafana's panel header: the value, its
+            // spark line and a fill take what's under it.
+            final head = label.isEmpty ? inset : inset + labelHeight + Space.s;
+            final drawsGraph = graph != 'none' && points.length >= 2 && !noData;
+            // With no height of its own: room for a value about a title's
+            // size over its spark line.
+            final own = head + scaler.scale(95);
+            final total = math.max(
+              height == null ? own : height! + grown,
+              head + 24,
+            );
+            return SizedBox(
+              height: total,
+              child: Builder(
+                builder: (context) {
+                  final room = math.max(1.0, total - head);
+                  // The spark line takes the bottom half, as Grafana's does,
+                  // shown only where there's room for it.
+                  final graphHeight = drawsGraph && room >= 40
+                      ? room * 0.5
+                      : 0.0;
+                  // The value as Grafana sizes it for the room under the
+                  // title (measured against it from 100 to 300 points), less
+                  // where the width is short of it; centred in that room, over
+                  // the spark line.
+                  final size = noData
+                      ? type.body.fontSize!
+                      : _fitted(
+                          context,
+                          number,
+                          suffix,
+                          width - inset * 2,
+                          math.min(room / 1.15, math.max(12, room * 0.55 - 20)),
+                        );
+                  final valueStyle = TextStyle(
+                    fontFamily: TextStyles.sans,
+                    fontSize: size,
+                    height: 1.15,
+                    fontWeight: FontWeight.w500,
+                    color: valueColor,
+                    fontFeatures: const [FontFeature.tabularFigures()],
+                  );
+                  final text = noData
+                      ? Text(
+                          'No data',
+                          textScaler: TextScaler.noScaling,
+                          style: type.body.copyWith(color: palette.textMuted),
+                        )
+                      : Text.rich(
+                          TextSpan(
+                            children: [
+                              TextSpan(text: number, style: valueStyle),
+                              if (suffix.isNotEmpty)
+                                TextSpan(
+                                  text: suffix,
+                                  style: valueStyle.copyWith(
+                                    fontSize: size * _suffixScale,
+                                  ),
+                                ),
+                            ],
+                          ),
+                          maxLines: 1,
+                          softWrap: false,
+                          // Sized to its room already, at any text size.
+                          textScaler: TextScaler.noScaling,
+                        );
+                  return Stack(
+                    children: [
+                      if (filled)
+                        Positioned(
+                          left: 0,
+                          right: 0,
+                          top: label.isEmpty ? 0 : head,
+                          bottom: 0,
+                          child: DecoratedBox(
+                            decoration: BoxDecoration(
+                              color: colorMode == 'solid' ? shade : null,
+                              gradient: colorMode == 'background'
+                                  ? LinearGradient(colors: _gradient(shade))
+                                  : null,
+                              borderRadius: inCard
+                                  ? null
+                                  : BorderRadius.circular(Radii.control),
                             ),
-                        ],
-                      ),
-                      maxLines: 1,
-                      softWrap: false,
-                      // Sized to its room already, at any text size.
-                      textScaler: TextScaler.noScaling,
-                    );
-              return Stack(
-                children: [
-                  if (filled)
-                    Positioned(
-                      left: 0,
-                      right: 0,
-                      top: label.isEmpty ? 0 : head,
-                      bottom: 0,
-                      child: DecoratedBox(
-                        decoration: BoxDecoration(
-                          color: colorMode == 'solid' ? shade : null,
-                          gradient: colorMode == 'background'
-                              ? LinearGradient(colors: _gradient(shade))
-                              : null,
-                          borderRadius: inCard
-                              ? null
-                              : BorderRadius.circular(Radii.control),
+                          ),
+                        ),
+                      if (graphHeight > 0)
+                        Positioned(
+                          left: 0,
+                          right: 0,
+                          bottom: 0,
+                          height: graphHeight,
+                          child: _Spark(points: points, line: line, area: area),
+                        ),
+                      if (label.isNotEmpty)
+                        Positioned(
+                          left: inset,
+                          right: inset,
+                          top: inset,
+                          child: _withWhole(
+                            lines.cut,
+                            label,
+                            Text(
+                              label,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: labelStyle,
+                            ),
+                          ),
+                        ),
+                      Positioned(
+                        left: inset,
+                        right: inset,
+                        top: head,
+                        bottom: 0,
+                        child: Center(
+                          child: FittedBox(fit: BoxFit.scaleDown, child: text),
                         ),
                       ),
-                    ),
-                  if (graphHeight > 0)
-                    Positioned(
-                      left: 0,
-                      right: 0,
-                      bottom: 0,
-                      height: graphHeight,
-                      child: _Spark(points: points, line: line, area: area),
-                    ),
-                  if (label.isNotEmpty)
-                    Positioned(
-                      left: inset,
-                      right: inset,
-                      top: inset,
-                      child: Text(
-                        label,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: labelStyle,
-                      ),
-                    ),
-                  Positioned(
-                    left: inset,
-                    right: inset,
-                    top: head,
-                    bottom: 0,
-                    child: Center(
-                      child: FittedBox(fit: BoxFit.scaleDown, child: text),
-                    ),
-                  ),
-                ],
-              );
-            },
-          ),
+                    ],
+                  );
+                },
+              ),
+            );
+          },
         ),
       ),
     );
@@ -3010,7 +3061,7 @@ typedef AppTableColumn = ({int index, String title, String format});
 /// aligned in tabular figures, times as "22 Nov 14:00"; at most
 /// [maxTableRows], then how many more. Scrolls sideways when it's wider
 /// than its place.
-class AppTableView extends StatelessWidget {
+class AppTableView extends StatefulWidget {
   const AppTableView({
     super.key,
     required this.table,
@@ -3030,160 +3081,9 @@ class AppTableView extends StatelessWidget {
   /// null.
   final List<AppTableColumn>? columns;
 
-  @override
-  Widget build(BuildContext context) {
-    final palette = Palette.of(context);
-    final type = TypeScale.of(context);
-    final table = this.table;
-    final caption = type.caption.copyWith(color: palette.textFaint);
-    if (table == null) {
-      return Text("Can't show this table.", style: caption);
-    }
-    final shown =
-        columns ??
-        [
-          for (var i = 0; i < table.columns.length; i++)
-            (
-              index: i,
-              title: table.columns[i],
-              format: table.numeric(i) ? 'number' : 'text',
-            ),
-        ];
-    if (shown.isEmpty) return const SizedBox.shrink();
-    final rows = table.rows.take(maxTableRows).toList();
-    final left = table.rows.length - rows.length;
-    String cell(Object? value, String format) => switch (format) {
-      'time' => switch (cellTime(value)) {
-        final time? => readoutTime(time),
-        null => cellText(value),
-      },
-      'number' => switch (cellNumber(value)) {
-        final number? => fullNumber(number),
-        null => cellText(value),
-      },
-      _ => cellText(value),
-    };
-    Widget padded(Widget child, int column, {bool end = false}) => Padding(
-      padding: EdgeInsets.fromLTRB(
-        column == 0 ? 0 : Space.m,
-        Space.xs,
-        0,
-        Space.xs,
-      ),
-      child: Align(
-        alignment: end ? Alignment.centerRight : Alignment.centerLeft,
-        child: child,
-      ),
-    );
-    final tabular = const [FontFeature.tabularFigures()];
-    final headStyle = type.caption.copyWith(
-      color: palette.textFaint,
-      fontWeight: FontWeight.w500,
-    );
-    TextStyle bodyStyle(String format) => type.body.copyWith(
-      color: palette.text,
-      fontFeatures: format == 'text' ? null : tabular,
-    );
-    final cells = [
-      for (final row in rows)
-        [
-          for (final column in shown)
-            column.index < row.length
-                ? cell(row[column.index], column.format)
-                : '',
-        ],
-    ];
-    // Each column as wide as its widest cell, or its heading's longest
-    // word: a long heading wraps between words (at large text, say)
-    // rather than widening the table past its place.
-    final scaler = MediaQuery.textScalerOf(context);
-    final direction = Directionality.of(context);
-    double measured(String text, TextStyle style) {
-      final painter = TextPainter(
-        text: TextSpan(text: text, style: style),
-        textScaler: scaler,
-        textDirection: direction,
-        maxLines: 1,
-      )..layout();
-      final width = painter.width;
-      painter.dispose();
-      return width;
-    }
-
-    final heads = [
-      for (var c = 0; c < shown.length; c++)
-        (c == 0 ? 0 : Space.m) +
-            [
-              for (final word in shown[c].title.split(RegExp(r'\s+')))
-                measured(word, headStyle),
-            ].fold(0.0, math.max).ceilToDouble(),
-    ];
-    final natural = [
-      for (var c = 0; c < shown.length; c++)
-        math.max(
-          heads[c],
-          (c == 0 ? 0 : Space.m) +
-              [
-                for (final row in cells)
-                  measured(row[c], bodyStyle(shown[c].format)),
-              ].fold(0.0, math.max).ceilToDouble(),
-        ),
-    ];
-    // Where the table is wider than its place, its text columns give way,
-    // the widest first, down to a few words (and their heading's longest
-    // word), and their long cells end in "…", as Grafana's do; numbers
-    // and times keep their width. Past that it scrolls sideways.
-    final least = scaler.scale(_leastTextColumn);
-    // A letter and "…" at the text size: the least a text column keeps.
-    final letter = measured('A…', bodyStyle('text')).ceilToDouble();
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        // Never more than the text columns' share of what the numbers and
-        // times leave, so a cut cell shows its "…" and the numbers stay on
-        // screen, as Grafana's columns share a phone's width; down to a
-        // letter and "…", past which the table scrolls.
-        var whole = 0.0;
-        var texts = 0;
-        for (var c = 0; c < shown.length; c++) {
-          if (shown[c].format == 'text') {
-            texts++;
-          } else {
-            whole += natural[c];
-          }
-        }
-        final share = texts == 0 ? 0.0 : (constraints.maxWidth - whole) / texts;
-        final widths = _fitColumns(natural, [
-          for (var c = 0; c < shown.length; c++)
-            shown[c].format == 'text'
-                ? math.min(
-                    natural[c],
-                    math.max(
-                      (c == 0 ? 0 : Space.m) + letter,
-                      math.min(
-                        math.max(heads[c], (c == 0 ? 0 : Space.m) + least),
-                        share,
-                      ),
-                    ),
-                  )
-                : null,
-        ], constraints.maxWidth);
-        return _table(
-          context,
-          shown: shown,
-          cells: cells,
-          rows: rows,
-          left: left,
-          more: table.more,
-          widths: widths,
-          natural: natural,
-          padded: padded,
-          headStyle: headStyle,
-          bodyStyle: bodyStyle,
-          caption: caption,
-        );
-      },
-    );
-  }
+  /// The most lines a long text cell shows before it's cut with "…" and
+  /// its row opens on a tap.
+  static const cellLines = 3;
 
   static double _textWidth(
     String text,
@@ -3267,32 +3167,384 @@ class AppTableView extends StatelessWidget {
     return widths;
   }
 
+  @override
+  State<AppTableView> createState() => _AppTableViewState();
+}
+
+class _AppTableViewState extends State<AppTableView> {
+  /// The rows opened, by their place: every cell whole.
+  final _open = <int>{};
+
+  void _toggle(int row) => setState(() {
+    if (!_open.remove(row)) _open.add(row);
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    final table = widget.table;
+    final caption = type.caption.copyWith(color: palette.textFaint);
+    if (table == null) {
+      return Text("Can't show this table.", style: caption);
+    }
+    final shown =
+        widget.columns ??
+        [
+          for (var i = 0; i < table.columns.length; i++)
+            (
+              index: i,
+              title: table.columns[i],
+              format: table.numeric(i) ? 'number' : 'text',
+            ),
+        ];
+    if (shown.isEmpty) return const SizedBox.shrink();
+    final rows = table.rows.take(maxTableRows).toList();
+    _open.removeWhere((row) => row >= rows.length);
+    final left = table.rows.length - rows.length;
+    String cell(Object? value, String format) => switch (format) {
+      'time' => switch (cellTime(value)) {
+        final time? => readoutTime(time),
+        null => cellText(value),
+      },
+      'number' => switch (cellNumber(value)) {
+        final number? => fullNumber(number),
+        null => cellText(value),
+      },
+      _ => cellText(value),
+    };
+    final tabular = const [FontFeature.tabularFigures()];
+    final headStyle = type.caption.copyWith(
+      color: palette.textFaint,
+      fontWeight: FontWeight.w500,
+    );
+    TextStyle bodyStyle(String format) => type.body.copyWith(
+      color: palette.text,
+      fontFeatures: format == 'text' ? null : tabular,
+    );
+    final cells = [
+      for (final row in rows)
+        [
+          for (final column in shown)
+            column.index < row.length
+                ? cell(row[column.index], column.format)
+                : '',
+        ],
+    ];
+    // Each column as wide as its widest cell, or its heading's longest
+    // word: a long heading wraps between words (at large text, say)
+    // rather than widening the table past its place.
+    final scaler = MediaQuery.textScalerOf(context);
+    final direction = Directionality.of(context);
+    double measured(String text, TextStyle style) =>
+        AppTableView._textWidth(text, style, scaler, direction);
+    double gap(int c) => c == 0 ? 0 : Space.m;
+    final heads = [
+      for (var c = 0; c < shown.length; c++)
+        gap(c) +
+            [
+              for (final word in shown[c].title.split(RegExp(r'\s+')))
+                measured(word, headStyle),
+            ].fold(0.0, math.max).ceilToDouble(),
+    ];
+    final natural = [
+      for (var c = 0; c < shown.length; c++)
+        math.max(
+          heads[c],
+          gap(c) +
+              [
+                for (final row in cells)
+                  measured(row[c], bodyStyle(shown[c].format)),
+              ].fold(0.0, math.max).ceilToDouble(),
+        ),
+    ];
+    // The least a text column gives way to: its heading's longest word,
+    // and never under a few words' width. Numbers and
+    // times keep theirs.
+    final least = scaler.scale(AppTableView._leastTextColumn);
+    final floors = [
+      for (var c = 0; c < shown.length; c++)
+        shown[c].format == 'text'
+            ? math.min(natural[c], math.max(heads[c], gap(c) + least))
+            : null,
+    ];
+    final notes = [
+      if (rows.isEmpty) Text('Nothing to show.', style: caption),
+      if (left > 0 || table.more)
+        Text(
+          left > 0
+              ? 'and ${fullNumber(left.toDouble())}${table.more ? '+' : ''} more'
+              : 'and more',
+          style: caption,
+        ),
+    ];
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final room = constraints.maxWidth;
+        final least = [
+          for (var c = 0; c < shown.length; c++) floors[c] ?? natural[c],
+        ].fold(0.0, (sum, w) => sum + w);
+        // Where the columns don't fit even at their least, every row reads
+        // as a block of its own, one line a column, as a phone's list does
+        // (Apple's compact tables): never cut to a letter, never sideways.
+        if (room.isFinite && least > room + 0.01) {
+          return _framed(
+            _blocks(
+              context,
+              shown: shown,
+              cells: cells,
+              width: room,
+              headStyle: headStyle,
+              bodyStyle: bodyStyle,
+            ),
+            null,
+            notes,
+          );
+        }
+        final widths = AppTableView._fitColumns(natural, floors, room);
+        return _table(
+          context,
+          shown: shown,
+          cells: cells,
+          widths: widths,
+          natural: natural,
+          headStyle: headStyle,
+          bodyStyle: bodyStyle,
+          notes: notes,
+        );
+      },
+    );
+  }
+
+  /// Whether [text] runs past [AppTableView.cellLines] lines [width] wide.
+  bool _runsOver(String text, TextStyle style, double width) {
+    final painter = TextPainter(
+      text: TextSpan(text: text, style: style),
+      textScaler: MediaQuery.textScalerOf(context),
+      textDirection: Directionality.of(context),
+      maxLines: AppTableView.cellLines,
+    )..layout(maxWidth: math.max(1.0, width));
+    final over = painter.didExceedMaxLines;
+    painter.dispose();
+    return over;
+  }
+
+  /// A long text: up to [AppTableView.cellLines] lines and "…", whole when
+  /// [open]; read whole either way.
+  Widget _long(String text, TextStyle style, bool open) => Text(
+    text,
+    style: style,
+    maxLines: open ? null : AppTableView.cellLines,
+    overflow: open ? null : TextOverflow.ellipsis,
+  );
+
+  /// [lines] (a heading, if any, then the rows or blocks) with the notes
+  /// under them: as tall as they are, or [WidgetHeight]'s height with the
+  /// heading kept and the rest scrolling under it.
+  Widget _framed(List<Widget> lines, Widget? heading, List<Widget> notes) {
+    final column = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: lines,
+    );
+    final height = widget.height;
+    if (height == null) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        spacing: Space.xs,
+        children: [
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [?heading, column],
+          ),
+          ...notes,
+        ],
+      );
+    }
+    // A height: the heading stays and the rows scroll under it; the notes
+    // under them, all within the height.
+    return SizedBox(
+      height: height,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        spacing: Space.xs,
+        children: [
+          Flexible(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ?heading,
+                Flexible(
+                  child: _HandOn(
+                    child: SingleChildScrollView(
+                      // No bounce at its ends: a drag past them goes on
+                      // to the page.
+                      physics: const ClampingScrollPhysics(),
+                      child: column,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          ...notes,
+        ],
+      ),
+    );
+  }
+
+  /// Each row as a block: its first cell as its title,
+  /// then each other column's heading with its value, beside it when short
+  /// (a number, a time, words in half the width), else under it; empty
+  /// ones left out. Read as one: "Pericolo. Status, Working. …".
+  List<Widget> _blocks(
+    BuildContext context, {
+    required List<AppTableColumn> shown,
+    required List<List<String>> cells,
+    required double width,
+    required TextStyle headStyle,
+    required TextStyle Function(String) bodyStyle,
+  }) {
+    final scaler = MediaQuery.textScalerOf(context);
+    final direction = Directionality.of(context);
+    final titleStyle = bodyStyle(shown.first.format)
+        .copyWith(fontWeight: FontWeight.w500);
+    return [
+      for (final (r, row) in cells.indexed)
+        () {
+          final open = _open.contains(r);
+          var cut = false;
+          final lines = <Widget>[
+            if (row.first.isNotEmpty) Text(row.first, style: titleStyle),
+          ];
+          final said = [if (row.first.isNotEmpty) row.first];
+          for (var c = 1; c < shown.length; c++) {
+            final value = row[c];
+            if (value.isEmpty) continue;
+            said.add('${shown[c].title}, $value');
+            final style = bodyStyle(shown[c].format);
+            final label = Text(shown[c].title, style: headStyle);
+            // Beside its heading when both fit on the line: a number or a
+            // time, or words in half the width.
+            final wide = AppTableView._textWidth(
+              value,
+              style,
+              scaler,
+              direction,
+            );
+            final beside =
+                (shown[c].format != 'text' || wide <= width / 2) &&
+                AppTableView._textWidth(
+                          shown[c].title,
+                          headStyle,
+                          scaler,
+                          direction,
+                        ) +
+                        Space.m +
+                        wide <=
+                    width;
+            if (beside) {
+              lines.add(
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.baseline,
+                  textBaseline: TextBaseline.alphabetic,
+                  children: [
+                    Expanded(child: label),
+                    const SizedBox(width: Space.m),
+                    Text(value, style: style, textAlign: TextAlign.end),
+                  ],
+                ),
+              );
+            } else {
+              cut = cut || _runsOver(value, style, width);
+              lines.add(
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [label, _long(value, style, open)],
+                ),
+              );
+            }
+          }
+          return Semantics(
+            container: true,
+            label: said.join('. '),
+            excludeSemantics: true,
+            child: _OpenRow(
+              first: r == 0,
+              open: open,
+              onToggle: cut || open ? () => _toggle(r) : null,
+              child: Container(
+                width: width,
+                padding: const EdgeInsets.symmetric(vertical: Space.s),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  mainAxisSize: MainAxisSize.min,
+                  spacing: Space.xs,
+                  children: lines,
+                ),
+              ),
+            ),
+          );
+        }(),
+    ];
+  }
+
   Widget _table(
     BuildContext context, {
     required List<AppTableColumn> shown,
     required List<List<String>> cells,
-    required List<List<Object?>> rows,
-    required int left,
-    required bool more,
     required List<double> widths,
     required List<double> natural,
-    required Widget Function(Widget, int, {bool end}) padded,
     required TextStyle headStyle,
     required TextStyle Function(String) bodyStyle,
-    required TextStyle caption,
+    required List<Widget> notes,
   }) {
     final palette = Palette.of(context);
     final scaler = MediaQuery.textScalerOf(context);
     final direction = Directionality.of(context);
     // The room for words in column [c]: its width less its gap.
     double room(int c) => widths[c] - (c == 0 ? 0 : Space.m);
-    // A heading wraps between words while its longest fits, else keeps
-    // one line cut with "…": never broken mid-word.
+    // A row's cells start at its top: beside one that wraps, the others
+    // read from its first line.
+    Widget padded(Widget child, int c, {bool top = false}) => SizedBox(
+      width: widths[c],
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(
+          c == 0 ? 0 : Space.m,
+          Space.xs,
+          0,
+          Space.xs,
+        ),
+        child: Align(
+          alignment: switch ((shown[c].format == 'number', top)) {
+            (true, true) => Alignment.topRight,
+            (true, false) => Alignment.centerRight,
+            (false, true) => Alignment.topLeft,
+            (false, false) => Alignment.centerLeft,
+          },
+          child: child,
+        ),
+      ),
+    );
+    Widget line(List<Widget> children, {bool top = false}) => Row(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: top
+          ? CrossAxisAlignment.start
+          : CrossAxisAlignment.center,
+      children: children,
+    );
+    // A heading wraps between words, never cut; only a word wider than
+    // the whole table keeps one line cut with "…", read whole.
     Widget heading(int c) {
       final title = shown[c].title;
       final words = title.split(RegExp(r'\s+'));
       final fits = words.every(
-        (word) => _textWidth(word, headStyle, scaler, direction) <= room(c),
+        (word) =>
+            AppTableView._textWidth(word, headStyle, scaler, direction) <=
+            room(c) + 0.5,
       );
       return Text(
         fits ? title : cutText(title, headStyle, room(c), scaler, direction),
@@ -3305,111 +3557,155 @@ class AppTableView extends StatelessWidget {
       );
     }
 
-    Widget body(String text, int c) {
-      final style = bodyStyle(shown[c].format);
-      if (widths[c] >= natural[c]) return Text(text, style: style);
-      final cut = cutText(text, style, room(c), scaler, direction);
-      return Text(
-        cut,
-        semanticsLabel: cut == text ? null : text,
-        style: style,
-        maxLines: 1,
-        softWrap: false,
-        overflow: TextOverflow.clip,
-      );
-    }
+    // A cell whose column is narrower than it wraps, up to 3 lines and
+    // "…"; its row opens on a tap to show it whole.
+    final head = line([
+      for (var c = 0; c < shown.length; c++)
+        Semantics(header: true, child: padded(heading(c), c)),
+    ]);
+    final rows = <Widget>[
+      for (final (r, row) in cells.indexed)
+        () {
+          final open = _open.contains(r);
+          var cut = false;
+          final children = <Widget>[];
+          for (var c = 0; c < shown.length; c++) {
+            final style = bodyStyle(shown[c].format);
+            if (widths[c] >= natural[c] - 0.01) {
+              children.add(padded(Text(row[c], style: style), c, top: true));
+              continue;
+            }
+            cut = cut || _runsOver(row[c], style, room(c));
+            children.add(padded(_long(row[c], style, open), c, top: true));
+          }
+          return _OpenRow(
+            // Under the heading's own line when the rows scroll under it.
+            first: r == 0 && widget.height != null,
+            open: open,
+            onToggle: cut || open ? () => _toggle(r) : null,
+            child: line(children, top: true),
+          );
+        }(),
+    ];
+    final hairline = BorderSide(color: palette.hairline);
+    return _framed(
+      rows,
+      DecoratedBox(
+        position: DecorationPosition.foreground,
+        decoration: BoxDecoration(
+          border: Border(
+            bottom: rows.isEmpty || widget.height == null
+                ? BorderSide.none
+                : hairline,
+          ),
+        ),
+        child: _OpenRow(first: true, child: head),
+      ),
+      notes,
+    );
+  }
+}
 
-    final head = TableRow(
-      children: [
-        for (var c = 0; c < shown.length; c++)
-          Semantics(
-            header: true,
-            child: padded(heading(c), c, end: shown[c].format == 'number'),
-          ),
-      ],
+/// A table's row, or a row's block: a hairline over it (not the first), a
+/// tint while [open], and with [onToggle], a tap, a click (the hand
+/// pointer) or ⏎ and Space when focused opens or closes it.
+class _OpenRow extends StatefulWidget {
+  const _OpenRow({
+    required this.child,
+    this.first = false,
+    this.open = false,
+    this.onToggle,
+  });
+
+  final Widget child;
+  final bool first;
+  final bool open;
+  final VoidCallback? onToggle;
+
+  @override
+  State<_OpenRow> createState() => _OpenRowState();
+}
+
+class _OpenRowState extends State<_OpenRow> {
+  var _focused = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    Widget row = CustomPaint(
+      foregroundPainter: widget.first
+          ? null
+          : _Hairline(palette.hairline, _focused ? palette.signal : null),
+      child: ColoredBox(
+        color: widget.open ? palette.hover : const Color(0x00000000),
+        child: widget.child,
+      ),
     );
-    final lines = [
-      for (final row in cells)
-        TableRow(
-          children: [
-            for (var c = 0; c < shown.length; c++)
-              padded(body(row[c], c), c, end: shown[c].format == 'number'),
-          ],
-        ),
-    ];
-    final line = BorderSide(color: palette.hairline);
-    Table grid(List<TableRow> children, TableBorder border) => Table(
-      columnWidths: {
-        for (final (c, width) in widths.indexed) c: FixedColumnWidth(width),
-      },
-      defaultVerticalAlignment: TableCellVerticalAlignment.middle,
-      border: border,
-      children: children,
-    );
-    final notes = [
-      if (rows.isEmpty) Text('Nothing to show.', style: caption),
-      if (left > 0 || more)
-        Text(
-          left > 0
-              ? 'and ${fullNumber(left.toDouble())}${more ? '+' : ''} more'
-              : 'and more',
-          style: caption,
-        ),
-    ];
-    final height = this.height;
-    if (height == null) {
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        spacing: Space.xs,
-        children: [
-          SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: grid([head, ...lines], TableBorder(horizontalInside: line)),
-          ),
-          ...notes,
-        ],
+    final toggle = widget.onToggle;
+    if (toggle == null) return row;
+    // A row that opens is a control: a click opens it rather than starting
+    // a selection, and the pointer is the hand over its words too.
+    if (widget.first && _focused) {
+      row = CustomPaint(
+        foregroundPainter: _Hairline(null, palette.signal),
+        child: row,
       );
     }
-    // A height: the heading stays and the rows scroll under it, the two
-    // sharing their columns' widths (and sideways scrolling); the notes
-    // under them, all within the height.
-    return SizedBox(
-      height: height,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        spacing: Space.xs,
-        children: [
-          Flexible(
-            child: SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  grid(
-                    [head],
-                    TableBorder(bottom: lines.isEmpty ? BorderSide.none : line),
-                  ),
-                  Flexible(
-                    child: _HandOn(
-                      child: SingleChildScrollView(
-                        // No bounce at its ends: a drag past them goes on
-                        // to the page.
-                        physics: const ClampingScrollPhysics(),
-                        child: grid(lines, TableBorder(horizontalInside: line)),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-          ...notes,
-        ],
+    return FocusableActionDetector(
+      includeFocusSemantics: false,
+      mouseCursor: SystemMouseCursors.click,
+      onShowFocusHighlight: (on) => setState(() => _focused = on),
+      actions: {
+        ActivateIntent: CallbackAction<ActivateIntent>(
+          onInvoke: (_) {
+            toggle();
+            return null;
+          },
+        ),
+      },
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        excludeFromSemantics: true,
+        onTap: toggle,
+        child: SelectionContainer.disabled(child: row),
       ),
     );
   }
+}
+
+/// A table's hairline along a row's top, centred on the line between it
+/// and the row above as a Table's own is; and with [focus], a ring around
+/// it.
+class _Hairline extends CustomPainter {
+  _Hairline(this.color, this.focus);
+
+  final Color? color;
+  final Color? focus;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (color case final color?) {
+      canvas.drawLine(
+        Offset.zero,
+        Offset(size.width, 0),
+        Paint()
+          ..color = color
+          ..strokeWidth = 1,
+      );
+    }
+    if (focus case final focus?) {
+      canvas.drawRect(
+        (Offset.zero & size).deflate(0.5),
+        Paint()
+          ..color = focus
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(_Hairline old) => old.color != color || old.focus != focus;
 }
 
 /// Around a scroll inside the page (a table's rows): a drag that goes past

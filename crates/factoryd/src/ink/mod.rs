@@ -222,12 +222,13 @@ pub(crate) fn picture(home: &crate::home::Home, sha: &str, max: u64, edge: Optio
 }
 
 /// Whether anything kept refers to blob `sha`: a layer's revision (its
-/// drawing or preview) or a review item (its context image). Only those
-/// can be read, and the others are pruned. Each table that names blobs
-/// adds its own question here. Callers choose how to fail when the records
-/// can't be read: reading refuses, pruning keeps.
+/// drawing or preview), a review item (its context image) or a seal (the
+/// version it sealed, `crate::seals`). Only those can be read, and the
+/// others are pruned. Each table that names blobs adds its own question
+/// here. Callers choose how to fail when the records can't be read:
+/// reading refuses, pruning keeps.
 pub(crate) fn referenced(db: &rusqlite::Connection, sha: &str) -> rusqlite::Result<bool> {
-    Ok(layers::refers_to(db, sha)? || crate::annotations::ink::refers_to(db, sha)?)
+    Ok(layers::refers_to(db, sha)? || crate::annotations::ink::refers_to(db, sha)? || crate::seals::refers_to(db, sha)?)
 }
 
 impl Factory {

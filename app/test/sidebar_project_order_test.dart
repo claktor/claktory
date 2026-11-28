@@ -1,4 +1,4 @@
-// Projects go in the order the person drags them to (friend bug #12), as
+// Projects go in the order the person drags them to, as
 // a project's folders do: a project's row drags, and a drop on another
 // project's upper or lower half puts it before or after that one
 // (UpdateProject.before_id); a finger holds first, and a hold let go

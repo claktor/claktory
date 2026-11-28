@@ -1,4 +1,4 @@
-//! factoryd.log stays bounded (#525): whatever started the backend (launchd,
+//! factoryd.log stays bounded: whatever started the backend (launchd,
 //! systemd, scripts/dev.sh) writes its output to `<home>/factoryd.log`,
 //! opened to append, and nothing rotated it. Past [`CAP`], the backend copies
 //! it to `factoryd.log.1` (the one before to `.2`, [`KEPT`] in all) and empties

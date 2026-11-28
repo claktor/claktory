@@ -2,15 +2,18 @@ import 'package:flutter/widgets.dart';
 
 import '../backend.dart';
 import '../controls.dart';
+import '../errands/browser_agent.dart' show browserOpen;
+import '../errands/tab_screens.dart' show pushBrowserWatch;
 import '../extension_about.dart' show hasExtensionView;
 import '../extensions.dart' show enabledExtensions;
 import '../identity.dart';
 import '../layout.dart';
-import '../panes.dart' show pageOfKind, paneGlyph, paneTitle;
+import '../panes.dart' show browserKind, pageOfKind, paneGlyph, paneTitle;
 import '../pinned_agents.dart' show pinLabel;
 import '../protocol/factory/v1/factory.pb.dart';
 import '../scope.dart';
 import 'metrics.dart';
+import 'navigation.dart' show PhoneRoutes;
 
 /// What a phone's ⋯ beside an agent's name lists (research mobile.md §4):
 /// the files beside its conversation, then its extensions with something
@@ -98,6 +101,7 @@ class _PhoneExtensionListState extends State<PhoneExtensionList> {
         // the phone's own screens here, and so are a project's Files.
         if (pane.leaf.kind != chatKind &&
             pane.leaf.kind != filesKind &&
+            pane.leaf.kind != browserKind &&
             pageOfKind(pane.leaf.kind) == null)
           pane,
     ]);
@@ -143,6 +147,21 @@ class _PhoneExtensionListState extends State<PhoneExtensionList> {
               name: 'Versions (${agent.branches})…',
               label: 'Other versions, ${agent.branches}',
               onTap: versions,
+            ),
+          // Only while it's open: there's nothing to watch otherwise.
+          if (browserOpen(workspace, agent.id))
+            _Row(
+              glyph: ExtensionGlyph(
+                icon: 'monitor',
+                name: 'Browser',
+                color: palette.textMuted,
+              ),
+              name: 'Watch browser',
+              onTap: () {
+                final routes = PhoneRoutes.of(context);
+                widget.chosen();
+                if (routes != null) pushBrowserWatch(routes, agent.id);
+              },
             ),
           if (viewers.isNotEmpty) ...[
             const _Heading('Files'),

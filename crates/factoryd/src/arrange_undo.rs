@@ -254,6 +254,7 @@ mod tests {
                 path: format!("/{id}").into(),
                 folders: Vec::new(),
                 archived: false,
+                brief: String::new(),
                 other: Default::default(),
             };
             project.folders.push(crate::config::FolderConfig {

@@ -109,7 +109,9 @@ pub fn open_db(path: &Path, keys: &Keys) -> Result<Connection, String> {
         ));
     }
     db.pragma_update(None, "journal_mode", "WAL").map_err(failed)?;
-    db.pragma_update(None, "synchronous", "NORMAL").map_err(failed)?;
+    // FULL: an epoch the worker acked, and a device merged, survives a
+    // power loss too (Fugo, E11-8): never a sequencer forking back.
+    db.pragma_update(None, "synchronous", "FULL").map_err(failed)?;
     // What's deleted (a forgotten data key, a purged account) is zeroed, not
     // left in free pages.
     db.pragma_update(None, "secure_delete", "ON").map_err(failed)?;
@@ -122,6 +124,7 @@ pub fn open_db(path: &Path, keys: &Keys) -> Result<Connection, String> {
     db.execute_batch(crate::dms::agents::SCHEMA).map_err(failed)?;
     db.execute_batch(crate::dms::review::SCHEMA).map_err(failed)?;
     db.execute_batch(crate::dms::leaves::SCHEMA).map_err(failed)?;
+    crate::dms::leaves::upgrade(&db).map_err(failed)?;
     db.execute_batch(crate::dms::groups::SCHEMA).map_err(failed)?;
     db.execute_batch(crate::dms::handoffs::SCHEMA).map_err(failed)?;
     db.execute_batch(crate::dms::space::SCHEMA).map_err(failed)?;
@@ -253,6 +256,13 @@ impl Worker {
                     }
                 }
             }
+            Request::DeviceListed { account_id, account_key } => match crate::dms::leaves::device_listed(&self.db(), &account_id, &account_key) {
+                Ok(listed) => json(200, &listed),
+                Err(refused) => {
+                    tracing::error!("reading whether a device is on its DM list: {}", refused.2);
+                    error(503, "unavailable", "Something went wrong. Try again later.")
+                }
+            },
             Request::PurgeAccount { account_id, time } => {
                 let mut db = self.db();
                 if let Err(refused) = grants::purge_account(&mut db, &account_id) {

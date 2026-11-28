@@ -156,7 +156,7 @@ impl State {
 }
 
 /// `path` with "~" for the home folder.
-fn expand(path: &str) -> PathBuf {
+pub(crate) fn expand(path: &str) -> PathBuf {
     let home = std::env::home_dir().unwrap_or_else(|| PathBuf::from("/"));
     match path {
         "~" => home,
@@ -307,38 +307,50 @@ pub(crate) fn read_requested(request: &v1::ReadFile) -> v1::FileContent {
 /// `read_file`, hashing ranges of big files only when `hash`.
 fn read(path: &str, offset: u64, max_bytes: u64, hash: bool) -> v1::FileContent {
     let path = expand(path.trim());
-    let mut content = v1::FileContent { path: path.display().to_string(), ..v1::FileContent::default() };
+    read_named(&path, &path, offset, max_bytes, hash)
+}
+
+/// A kept copy of the file `name` (a sealed version), read as `read_file`
+/// reads `name`: its type from its bytes and `name`, and `name` as its path.
+pub(crate) fn read_copy(copy: &Path, name: &Path, offset: u64, max_bytes: u64) -> v1::FileContent {
+    read_named(copy, name, offset, max_bytes, true)
+}
+
+/// Reads `path`, as the file `name` (its type, its path in the answer and
+/// in errors).
+fn read_named(path: &Path, name: &Path, offset: u64, max_bytes: u64, hash: bool) -> v1::FileContent {
+    let mut content = v1::FileContent { path: name.display().to_string(), ..v1::FileContent::default() };
     let failed = |mut content: v1::FileContent, error: String| {
         content.error = error;
         content
     };
     if !path.is_absolute() {
-        return failed(content, format!("{} isn't a full path: start it with / or ~", path.display()));
+        return failed(content, format!("{} isn't a full path: start it with / or ~", name.display()));
     }
-    let metadata = match std::fs::metadata(&path) {
+    let metadata = match std::fs::metadata(path) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return failed(content, format!("No such file: {}", path.display())),
-        Err(error) => return failed(content, format!("Can't read {}: {}", path.display(), plain(&error))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return failed(content, format!("No such file: {}", name.display())),
+        Err(error) => return failed(content, format!("Can't read {}: {}", name.display(), plain(&error))),
     };
     if metadata.is_dir() {
-        return failed(content, format!("{} is a folder", path.display()));
+        return failed(content, format!("{} is a folder", name.display()));
     }
-    let mut file = match std::fs::File::open(&path) {
+    let mut file = match std::fs::File::open(path) {
         Ok(file) => file,
-        Err(error) => return failed(content, format!("Can't read {}: {}", path.display(), plain(&error))),
+        Err(error) => return failed(content, format!("Can't read {}: {}", name.display(), plain(&error))),
     };
     let mut start = Vec::new();
     if let Err(error) = (&mut file).take(512).read_to_end(&mut start) {
-        return failed(content, format!("Can't read {}: {}", path.display(), plain(&error)));
+        return failed(content, format!("Can't read {}: {}", name.display(), plain(&error)));
     }
-    let mime = sniff(&start, &path);
+    let mime = sniff(&start, name);
     let ranged = offset > 0 || is_video(mime) || is_pdf(mime);
     if is_pdf(mime) && metadata.len() > PDF_LIMIT {
         let megabytes = metadata.len().div_ceil(1_000_000);
         return failed(content, format!("This PDF is too big to open here ({megabytes} MB)."));
     }
     if ranged && metadata.len() > VIDEO_LIMIT {
-        return failed(content, format!("{} is too big to play. Claktory plays videos up to 2 GB.", path.display()));
+        return failed(content, format!("{} is too big to play. Claktory plays videos up to 2 GB.", name.display()));
     }
     let limit = if ranged {
         RANGE_LIMIT
@@ -353,11 +365,11 @@ fn read(path: &str, offset: u64, max_bytes: u64, hash: bool) -> v1::FileContent 
     if offset > 0
         && let Err(error) = std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(offset))
     {
-        return failed(content, format!("Can't read {}: {}", path.display(), plain(&error)));
+        return failed(content, format!("Can't read {}: {}", name.display(), plain(&error)));
     }
     let rest = limit.saturating_sub(data.len() as u64);
     if let Err(error) = file.take(rest).read_to_end(&mut data) {
-        return failed(content, format!("Can't read {}: {}", path.display(), plain(&error)));
+        return failed(content, format!("Can't read {}: {}", name.display(), plain(&error)));
     }
     content.mime = mime.to_owned();
     content.size = metadata.len();
@@ -366,9 +378,9 @@ fn read(path: &str, offset: u64, max_bytes: u64, hash: bool) -> v1::FileContent 
     if !content.truncated {
         content.sha256 = crate::encoding::hex(&<sha2::Sha256 as sha2::Digest>::digest(&data));
     } else if ranged && hash {
-        match whole_sha256(&path) {
+        match whole_sha256(path) {
             Ok(sha) => content.sha256 = sha,
-            Err(error) => return failed(content, format!("Can't read {}: {}", path.display(), plain(&error))),
+            Err(error) => return failed(content, format!("Can't read {}: {}", name.display(), plain(&error))),
         }
     }
     content.data = data;

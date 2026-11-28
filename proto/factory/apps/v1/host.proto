@@ -136,6 +136,14 @@ message Call {
   string args = 3;
   // The agent's id.
   string caller = 4;
+  // Its project's id; empty in the workspace.
+  string caller_project = 5;
+  // It's an admin agent (Rivet, say).
+  bool caller_admin = 6;
+  // It has read outside content (a web page, or a pipe from another
+  // Claktory) since its conversation started afresh: what it asks may be
+  // someone else's words.
+  bool caller_tainted = 7;
 }
 
 message Done {
@@ -173,6 +181,9 @@ message Emit {
   string data = 5;
   // Empty for none.
   string dedupe_key = 6;
+  // emit-to: this agent alone, if it's subscribed to the kind and granted
+  // the scope; empty for every agent that is.
+  string to_agent = 7;
 }
 
 message SetStatus {
@@ -239,6 +250,9 @@ message DataQuery {
   string sql = 3;
   // A JSON array, or empty.
   string params = 4;
+  // The agent whose tool call made this query; empty outside a call (a
+  // view, a timer, starting).
+  string caller = 5;
 }
 
 message DataAnswer {

@@ -1,10 +1,13 @@
 import 'dart:async';
 
+import 'package:factory_app/protocol/factory/v1/factory.pb.dart'
+    show BackendService, BackendServiceState;
 import 'package:factory_app/scope.dart';
 import 'package:factory_app/setup.dart';
 import 'package:factory_app/shell.dart';
 import 'package:factory_app/update.dart' show AppBuild;
 import 'package:factory_app/zoom.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -744,6 +747,42 @@ void main() {
       expect(channel.runs.last, 'install --start');
     });
 
+    testWidgets('on Windows it says this PC, and offers what a Mac does', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      final channel = FakeSetupChannel(
+        results: {
+          'install --check': const InstallResult(result: 'stopped', held: true),
+          'install --start': const InstallResult(result: 'started'),
+        },
+      );
+      await show(tester, channel);
+      await tester.pump();
+      expect(find.text('Claktory is turned off'), findsOneWidget);
+      expect(
+        find.textContaining("Your agents aren't running on this PC."),
+        findsOneWidget,
+      );
+      expect(find.textContaining('Mac'), findsNothing);
+      await tester.tap(find.text('Start Claktory'));
+      await tester.pump();
+      await tester.pump();
+      expect(channel.runs.last, 'install --start');
+    });
+
+    test('this computer is this PC on Windows, this Mac elsewhere', () {
+      for (final platform in TargetPlatform.values) {
+        debugDefaultTargetPlatformOverride = platform;
+        expect(
+          thisComputer,
+          platform == TargetPlatform.windows ? 'this PC' : 'this Mac',
+        );
+      }
+      debugDefaultTargetPlatformOverride = null;
+    });
+
     testWidgets('Move to Applications, or Not now', (tester) async {
       final channel = FakeSetupChannel(
         needsMove: true,
@@ -812,5 +851,83 @@ void main() {
       expect(find.text('Download Claktory again'), findsOneWidget);
       expect(find.text('Download'), findsOneWidget);
     });
+  });
+
+  testWidgets("on Windows, General says when it starts and changes it with "
+      "the backend's install --consent", (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final snapshot = workspace()
+      ..backendService = BackendService(
+        state: BackendServiceState.BACKEND_SERVICE_STATE_RUNNING,
+        canStop: true,
+      );
+    final harness = Harness(snapshot);
+    final channel = FakeSetupChannel(
+      results: {
+        'install --check': const InstallResult(
+          result: 'already_installed',
+          running: true,
+          startsAtSignIn: false,
+        ),
+        'install --consent=yes': const InstallResult(
+          result: 'installed',
+          startsAtSignIn: true,
+        ),
+      },
+    );
+    final setup = MacSetup(
+      channel: channel,
+      connected: harness.backend.connected,
+      reconnect: harness.backend.reconnectNow,
+    );
+    addTearDown(setup.dispose);
+    tester.view.physicalSize = const Size(1200, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(
+      WidgetsApp(
+        color: const Color(0xFF000000),
+        builder: (context, _) => SetupScope(
+          setup: setup,
+          child: AppScope(
+            backend: harness.backend,
+            login: harness.login,
+            page: harness.page,
+            appBuild: AppBuild(version: 'v0.1.10', bundlePath: '', quit: () {}),
+            drafts: harness.drafts,
+            history: harness.history,
+            connections: harness.connections,
+            camera: harness.camera,
+            child: const AppZoom(child: Shell()),
+          ),
+        ),
+      ),
+    );
+    await setup.start();
+    harness.page.value = AppPage.settings;
+    harness.backend.settingsSection.value = 'general';
+    await pumpFrames(tester);
+    expect(find.text('When you close Claktory'), findsOneWidget);
+    expect(find.text('Claktory on this PC'), findsOneWidget);
+    expect(
+      find.text(
+        'Your agents keep working after you close Claktory. After you '
+        'restart this PC, open Claktory to start them again.',
+      ),
+      findsOneWidget,
+    );
+    expect(find.text('When you sign in to Windows'), findsOneWidget);
+
+    await tester.tap(find.text('Start Claktory'));
+    await pumpFrames(tester);
+    expect(channel.runs.last, 'install --consent=yes');
+    expect(
+      find.text(
+        'Your agents keep working after you close Claktory, and it starts '
+        'by itself when you sign in to Windows.',
+      ),
+      findsOneWidget,
+    );
   });
 }

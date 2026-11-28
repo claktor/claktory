@@ -1,6 +1,5 @@
 // What's copied from a selection reads as it's laid out: an item's rows on
-// lines of their own, a blank line between items, and nothing trailing
-// (QA rows 46 and Abbacchio's Needs you pass: lines ran together).
+// lines of their own, a blank line between items, and nothing trailing.
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart' show AppPage, AppScope;
 import 'package:fixnum/fixnum.dart';
@@ -111,7 +110,7 @@ void main() {
     expect(text.substring(colour, region2), contains('\n\n'), reason: text);
   });
 
-  // Abbacchio's: ⌘A selected the conversation clicked in before, not Needs
+  // ⌘A selected the conversation clicked in before, not Needs
   // you clicked in since, unless that click was a drag on its words.
   group('⌘A selects where you last clicked', () {
     Harness harness() {
@@ -215,7 +214,7 @@ void main() {
     }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
   });
 
-  // Abbacchio's next two: a click on the pane's tabs, and its area gone.
+  // A click on the pane's tabs, and its area gone.
   group('⌘A in the Needs you page', () {
     Future<(Harness, List<String>)> showHistory(WidgetTester tester) async {
       final copied = watchClipboard(tester);

@@ -1427,4 +1427,111 @@ void main() {
       expect(find.text('Show more'), findsOneWidget);
     });
   });
+
+  group('a failed call', () {
+    // A call of each tool with a view, as an agent writes it. agents_send
+    // names only whom it's for (whether it went shows after), and bash has
+    // a view only once it's a background task, which a failed call isn't.
+    const exempt = {'agents_send', 'bash'};
+    const inputs = <String, Map<String, Object?>>{
+      'propose_to_rivet': {'message': 'Add a tester'},
+      'agents_suggest_talk': {
+        'agent': 'Sam',
+        'message': 'Hi',
+        'reason': 'He knows',
+      },
+      'checklist_add': {
+        'items': ['Fix login'],
+      },
+      'checklist_update': {
+        'updates': [
+          {'id': 1, 'status': 'done'},
+        ],
+      },
+      'memory_read': {'note': 'deploy'},
+      'memory_update': {
+        'ops': [
+          {'op': 'pref_add', 'rule': 'Be brief'},
+        ],
+      },
+      'monitors_add': {
+        'monitors': [
+          {
+            'name': 'CI',
+            'when': {'every': '1h'},
+            'prompt': 'Check CI',
+          },
+        ],
+      },
+      'monitors_change': {
+        'changes': [
+          {'id': 'm3', 'action': 'cancel'},
+        ],
+      },
+      'tasks_list': {},
+      'tasks_stop': {'task': 'task-3'},
+      'show': {'path': '/tmp/report.md'},
+      'image_generate': {'prompt': 'A cat'},
+      'web_search': {
+        'queries': ['flutter'],
+      },
+      'web_fetch': {'url': 'https://example.com'},
+      'db_query': {'sql': 'SELECT 1'},
+      'db_exec': {'sql': 'DELETE FROM leads'},
+      'db_schema': {},
+      'secrets_grant': {
+        'secret': 'AWS',
+        'agents': ['Sam'],
+      },
+      'secrets_revoke': {
+        'secret': 'AWS',
+        'agents': ['Sam'],
+      },
+      'secrets_list': {},
+    };
+
+    test('every view is tried', () {
+      expect(inputs.keys.toSet(), toolViews.keys.toSet().difference(exempt));
+    });
+
+    for (final MapEntry(key: tool, value: input) in inputs.entries) {
+      testWidgets("of $tool says what it couldn't do", (tester) async {
+        await showing(tester, [
+          call(
+            tool,
+            input,
+            output: 'Tool not found.',
+            state: ToolCallState.TOOL_CALL_STATE_FAILED,
+          ),
+        ]);
+        final line = find.byWidgetPredicate(
+          (widget) =>
+              widget is RichText &&
+              widget.text.toPlainText().startsWith("Couldn't"),
+        );
+        expect(inTranscript(line), findsOneWidget);
+        expect(find.text('Failed'), findsOneWidget);
+        expect(find.text('Tool not found.'), findsOneWidget);
+      });
+    }
+
+    testWidgets('of checklist_add never says it added', (tester) async {
+      await showing(tester, [
+        call(
+          'checklist_add',
+          {
+            'items': ['Fix login'],
+          },
+          output: 'Tool not found.',
+          state: ToolCallState.TOOL_CALL_STATE_FAILED,
+        ),
+      ]);
+      expect(
+        find.text("Couldn't add to the checklist", findRichText: true),
+        findsOneWidget,
+      );
+      expect(find.textContaining('Added', findRichText: true), findsNothing);
+      expect(find.text('Fix login', findRichText: true), findsOneWidget);
+    });
+  });
 }

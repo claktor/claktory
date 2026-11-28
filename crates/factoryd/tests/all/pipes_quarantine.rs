@@ -163,7 +163,7 @@ async fn only_the_person_releases_a_liaison() {
     assert!(lines.iter().any(|line| line.text
         == "Liaison is no longer limited to this pipe: it can run commands, reach your files and use secrets on this computer."));
     // It's told, and its tools come back; reading its pipe marked it with
-    // nothing (#346).
+    // nothing.
     let ran = call(&mut client, &mut view, "liaison", "bash", r#"{"command": "echo ran"}"#).await;
     assert!(ran.starts_with("ran"), "{ran}");
     let told = view.entries.iter().any(|entry| {
@@ -256,10 +256,21 @@ async fn a_secret_given_to_a_liaison_isnt_usable_and_a_pipe_reader_marks_no_one(
         })
     })
     .await;
+    // A report reader isn't in a pipe: its warning says what holds it.
+    apply_request(&mut client, &mut view, crate::common::create_agent("site", "Rhea", "")).await;
+    pipes::make_curator_for_test(&factory, "rhea", false).await.expect("a report reader");
+    let grant = v1::GrantSecret { id: id.clone(), agent_id: "rhea".into(), proof: None, fill_only: false };
+    apply_request(&mut client, &mut view, client_message::Body::GrantSecret(grant)).await;
+    view.follow(&mut client, |view| {
+        view.workspace.vault.as_ref().is_some_and(|vault| {
+            vault.secrets[0].warnings.iter().any(|warning| warning == "Rhea can't use it while it reads reports.")
+        })
+    })
+    .await;
     call(&mut client, &mut view, "liaison", "pipe_status", "{}").await;
     assert!(!last_request(&models).system_prompt.contains("gave you these secrets"));
 
-    // Lea reads the pipe and tells Bo: neither is marked (#346), so Bo's
+    // Lea reads the pipe and tells Bo: neither is marked, so Bo's
     // secret command runs and his cards carry no mark.
     let to_lea = v1::UpdatePipe { pipe_id: pipe.clone(), lead_id: Some("lea".into()), ..Default::default() };
     apply_request(&mut client, &mut view, client_message::Body::UpdatePipe(to_lea)).await;
@@ -304,7 +315,7 @@ fn send_args(path: &Path) -> String {
     serde_json::json!({"text": "Here it is.", "files": [path]}).to_string()
 }
 
-/// Friend bug #15 (Fugo's ruling): a liaison sends a file the person attached
+/// A liaison sends a file the person attached
 /// to their own message to it, as it was attached; anything else outside
 /// the outbox is still refused, and one attached over a day ago waits.
 #[tokio::test]
@@ -370,7 +381,7 @@ async fn a_liaison_sends_a_file_the_person_attached_to_it_and_nothing_else() {
     assert!(!outbox.join("brief 3.pdf").exists(), "nothing copied while it waits");
 
     // Changed before the person sends it, it's refused, and the liaison
-    // hears why in one sentence (Abbacchio row 915).
+    // hears why in one sentence.
     let size = std::fs::metadata(&brief.path).expect("there").len();
     std::fs::write(&brief.path, vec![b'x'; usize::try_from(size).expect("small")]).expect("overwritten");
     let send = v1::DecidePipeMessage { pipe_id: pipe.clone(), seq: last.seq, allow: true, ..Default::default() };

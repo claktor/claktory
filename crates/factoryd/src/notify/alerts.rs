@@ -54,6 +54,12 @@ pub(crate) const ALSO_FROM: &str = "
 ALTER TABLE alerts ADD COLUMN also_from TEXT NOT NULL DEFAULT '';
 ";
 
+/// Claktory's own alert about a device (one just allowed): its id, which
+/// may not read it (`read`). '' for every other alert.
+pub(crate) const DEVICE_ID: &str = "
+ALTER TABLE alerts ADD COLUMN device_id TEXT NOT NULL DEFAULT '';
+";
+
 /// How long an unread alert takes other agents' alerts about the same thing
 /// into it (`fold`).
 pub(crate) const FOLD_MS: i64 = 30 * 60_000;
@@ -92,7 +98,7 @@ impl Alerts {
 fn load(factory: &Factory) -> rusqlite::Result<Vec<v1::Alert>> {
     let db = factory.store.db();
     let mut statement = db.prepare(
-        "SELECT id, agent, from_name, title, text, urgent, withheld, sent, seq, also_from FROM alerts WHERE read IS NULL ORDER BY sent, rowid",
+        "SELECT id, agent, from_name, title, text, urgent, withheld, sent, seq, also_from, device_id FROM alerts WHERE read IS NULL ORDER BY sent, rowid",
     )?;
     let rows = statement.query_map([], read_alert)?;
     rows.collect()
@@ -110,6 +116,7 @@ fn read_alert(row: &rusqlite::Row<'_>) -> rusqlite::Result<v1::Alert> {
         sent_ms: row.get(7)?,
         seq: u64::try_from(row.get::<_, i64>(8)?).unwrap_or_default(),
         also_from: names(&row.get::<_, String>(9)?),
+        device_id: row.get("device_id")?,
     })
 }
 
@@ -135,7 +142,7 @@ pub(crate) fn keep(factory: &Factory, mut alert: v1::Alert) -> String {
         (alert.title, alert.text) = (String::new(), String::new());
     }
     let kept = factory.store.db().execute(
-        "INSERT INTO alerts (id, agent, from_name, title, text, urgent, withheld, sent, seq) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        "INSERT INTO alerts (id, agent, from_name, title, text, urgent, withheld, sent, seq, device_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             alert.id,
             alert.agent_id,
@@ -145,7 +152,8 @@ pub(crate) fn keep(factory: &Factory, mut alert: v1::Alert) -> String {
             alert.urgent,
             alert.withheld,
             alert.sent_ms,
-            i64::try_from(alert.seq).unwrap_or(i64::MAX)
+            i64::try_from(alert.seq).unwrap_or(i64::MAX),
+            alert.device_id
         ],
     );
     if let Err(error) = kept {
@@ -158,9 +166,26 @@ pub(crate) fn keep(factory: &Factory, mut alert: v1::Alert) -> String {
 }
 
 /// ReadAlerts: the person read `ids` on `device_id` (`device_name`, as its
-/// hello said). Ids already read or unknown are skipped.
+/// hello said). Ids already read or unknown are skipped. Refused, reading
+/// none, when one is about `device_id` itself: a device just allowed can't
+/// hide the alert that tells the person's other devices of it.
 pub(crate) fn read(factory: &Factory, ids: &[String], device_id: &str, device_name: &str) -> Result<(), RequestError> {
     let now = now_ms();
+    let own = factory
+        .notify
+        .alerts
+        .waiting(factory)
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .any(|alert| ids.contains(&alert.id) && !alert.device_id.is_empty() && alert.device_id == device_id);
+    if own {
+        tracing::warn!(device = device_id, "a device tried to mark read the alert about itself");
+        return Err(RequestError::Account(
+            v1::ErrorCode::InvalidRequest,
+            "This alert is about this device. Mark it read on another of your devices.".to_owned(),
+        ));
+    }
     let read: Vec<v1::Alert> = {
         let mut waiting = factory.notify.alerts.waiting(factory);
         let waiting = waiting.get_or_insert_default();
@@ -198,7 +223,7 @@ pub(crate) struct Read {
 /// `limit`.
 pub(crate) fn between(db: &rusqlite::Connection, since: i64, before: i64, limit: i64) -> rusqlite::Result<Vec<Read>> {
     let mut statement = db.prepare(
-        "SELECT id, agent, from_name, title, text, urgent, withheld, sent, seq, also_from, read, read_device, read_device_name FROM alerts
+        "SELECT id, agent, from_name, title, text, urgent, withheld, sent, seq, also_from, read, read_device, read_device_name, device_id FROM alerts
          WHERE read IS NOT NULL AND read >= ?1 AND read < ?2 ORDER BY read DESC, rowid DESC LIMIT ?3",
     )?;
     let rows = statement.query_map(params![since, before, limit], |row| {

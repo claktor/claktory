@@ -4,7 +4,8 @@
 //! internet. Their phones send and read only through their own home, and
 //! no application message ever reaches the service. Both homes away, then
 //! back; a message from a stale epoch; Matt's home moved to another of his
-//! Claktories; and a flood, capped.
+//! Claktories; a flood, capped; and a first message kept pending at the
+//! friend's home until their device routes the conversation.
 //!
 //! A file of its own: direct messages are a process-wide preview until
 //! People ships.
@@ -22,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use claktory_account::server::{self, Config, Secrets, Service, UserApps, mail};
+use claktory_account::server::{self, Config, Service, UserApps, mail};
 use claktory_dm_crypto::group::Group;
 use claktory_dm_crypto::validation::GroupKind;
 use claktory_user_apps::worker::{self, Worker};
@@ -47,7 +48,7 @@ async fn service(dir: &Path) -> (String, Arc<mail::Memory>) {
     let mail = Arc::new(mail::Memory::default());
     let config = Config { user_apps: Some(UserApps { socket, uid }), ..Config::default() };
     let clock: server::Clock = Arc::new(|| jiff::Timestamp::now().as_second());
-    let service = Service::new(&dir.join("account.db"), Secrets::generate(), config, mail.clone(), clock).expect("the service");
+    let service = Service::new(&dir.join("account.db"), dm_device::service_secrets(), config, mail.clone(), clock).expect("the service");
     tokio::spawn(server::serve(listener, service));
     (url, mail)
 }
@@ -126,7 +127,7 @@ async fn move_home(network: &dm_device::Network, phone: &mut Device, to: &mut Cl
     phone.home = Some(endpoint);
     phone.publish_keys().await;
     phone.set_home_addr(to.addr);
-    while !home_state(&mut to.client).await.is_home {
+    while !home_state(to.addr, phone).await.is_home {
         assert!(Instant::now() < deadline, "the Claktory never heard it's the home");
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -134,17 +135,18 @@ async fn move_home(network: &dm_device::Network, phone: &mut Device, to: &mut Cl
     network.lookup.on_endpoint(&id, WAIT).await.expect("the home is published");
 }
 
-/// The home's state, as a device asks it.
-async fn home_state(client: &mut Client) -> v1::DmHome {
-    match client.request(Request::DmRoutes(v1::DmRoutes { routes: Vec::new() })).await.body {
+/// The home's state, as `device` asks it, over a connection signed in as
+/// it (DmRoutes is a device's).
+async fn home_state(addr: std::net::SocketAddr, device: &Device) -> v1::DmHome {
+    match device.link(addr).await.request(Request::DmRoutes(v1::DmRoutes { routes: Vec::new() })).await.body {
         Body::DmHome(home) => home,
         other => panic!("expected the home, got {other:?}"),
     }
 }
 
 /// The home's state, as `device` asks it with the routes it gave.
-async fn routed_state(client: &mut Client, device: &Device) -> v1::DmHome {
-    match client.request(Request::DmRoutes(v1::DmRoutes { routes: device.routes.clone() })).await.body {
+async fn routed_state(addr: std::net::SocketAddr, device: &Device) -> v1::DmHome {
+    match device.link(addr).await.request(Request::DmRoutes(v1::DmRoutes { routes: device.routes.clone() })).await.body {
         Body::DmHome(home) => home,
         other => panic!("expected the home, got {other:?}"),
     }
@@ -318,7 +320,7 @@ async fn a_moved_home_takes_the_conversation_over() {
     let mini_id = matt.phone.home.expect("the new home").to_vec();
     let deadline = Instant::now() + WAIT;
     loop {
-        let old = home_state(&mut matt.home.client).await;
+        let old = home_state(matt.home.addr, &matt.phone).await;
         assert!(old.peers.iter().all(|peer| peer.home_endpoint == mini_id), "{old:?}");
         if !old.is_home {
             break;
@@ -434,7 +436,7 @@ async fn a_friends_home_that_turns_this_one_away_says_so() {
     matt.phone.positions.remove(&group);
     matt.phone.route(&bo.phone, &[&group]).await;
     let deadline = Instant::now() + WAIT;
-    while home_state(&mut matt.home.client).await.is_home {
+    while home_state(matt.home.addr, &matt.phone).await.is_home {
         assert!(Instant::now() < deadline, "the old home never heard it isn't any more");
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
@@ -443,7 +445,7 @@ async fn a_friends_home_that_turns_this_one_away_says_so() {
     bo.phone.post(&group, "", 0, 1, "Where are you?").await;
     let deadline = Instant::now() + WAIT;
     loop {
-        let state = routed_state(&mut bo.home.client, &bo.phone).await;
+        let state = routed_state(bo.home.addr, &bo.phone).await;
         let peer = state.peers.iter().find(|peer| peer.home_endpoint == old).expect("Matt's old home, still routed");
         if peer.refused == "turned_away" {
             assert!(!peer.reachable, "{peer:?}");
@@ -459,7 +461,7 @@ async fn a_friends_home_that_turns_this_one_away_says_so() {
     bo.phone.route(&matt.phone, &[&group]).await;
     hears(&mut matt.phone, &group, "Where are you?").await;
     let mini_id = matt.phone.home.expect("the new home").to_vec();
-    let state = routed_state(&mut bo.home.client, &bo.phone).await;
+    let state = routed_state(bo.home.addr, &bo.phone).await;
     assert!(!state.peers.is_empty(), "{state:?}");
     assert!(state.peers.iter().all(|peer| peer.home_endpoint == mini_id && peer.refused.is_empty()), "{state:?}");
     assert_eq!(kept_at_the_service(&world), 0);
@@ -623,5 +625,89 @@ async fn a_flood_is_capped_at_both_homes() {
     assert_eq!(codes[60], "busy");
     hears(&mut matt.phone, &with_cy, "cy 60").await;
     assert!(!heard(&matt.phone, "cy 61"));
+    assert_eq!(kept_at_the_service(&world), 0);
+}
+
+/// Matt and Bo, friends, Matt's phone routing Bo's home only as a friend's
+/// (as at friending): Bo's phone makes their conversation and writes first,
+/// while no device of Matt's has taken it in. Matt's home keeps it pending,
+/// never served, and Bo's home hears so, not turned away, keeping its copy.
+async fn first_message_pending(world: &World) -> (Person, Person, String, GroupKind) {
+    let mut matt = world.person("matt", 3).await;
+    let mut bo = world.person("bo", 9).await;
+    let (conversation, generation) = befriend(&matt.phone, &bo.phone, "Bo", 1).await;
+    matt.phone.pin(&bo.phone);
+    bo.phone.pin(&matt.phone);
+    matt.phone.route(&bo.phone, &[]).await;
+    let kind = GroupKind::Conversation { people: [matt.phone.account.clone(), bo.phone.account.clone()] };
+    let body = json!({"kind": "conversation", "conversation_id": conversation, "contact_generation": generation});
+    let group = bo.phone.create(kind.clone(), body).await;
+    let packages = bo.phone.claim(&matt.phone.account.clone(), &[&matt.phone.device_key.clone()]).await;
+    bo.phone.add(&group, packages).await;
+    bo.phone.route(&matt.phone, &[&group]).await;
+    bo.phone.post(&group, "", 0, 1, "Hi Matt, it's Bo").await;
+
+    let matt_home = matt.phone.home.expect("Matt's home").to_vec();
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let state = routed_state(bo.home.addr, &bo.phone).await;
+        let peer = state.peers.iter().find(|peer| peer.home_endpoint == matt_home).expect("Matt's home, routed");
+        if pending_at(world, "matt") == 1 {
+            assert!(peer.reachable && peer.refused.is_empty(), "{peer:?}");
+            assert_eq!(peer.outbox_count, 1, "Bo's home keeps its copy: {peer:?}");
+            break;
+        }
+        assert!(Instant::now() < deadline, "Matt's home never kept Bo's first message pending: {peer:?}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let home = rusqlite::Connection::open(world.root.join("matt/home/dm/home.db")).expect("Matt's home");
+    let logged: i64 = home.query_row("SELECT COUNT(*) FROM log WHERE kind = 'application'", [], |row| row.get(0)).expect("counted");
+    assert_eq!(logged, 0, "never served while pending");
+    (matt, bo, group, kind)
+}
+
+/// What `name`'s home keeps pending.
+fn pending_at(world: &World, name: &str) -> i64 {
+    let home = rusqlite::Connection::open(world.root.join(name).join("home/dm/home.db")).expect("the home's store");
+    home.query_row("SELECT COUNT(*) FROM pending", [], |row| row.get(0)).expect("counted")
+}
+
+/// Bo's outbox for Matt's home, as Bo's home says.
+async fn waiting_for_matt(matt: &Person, bo: &Person) -> u32 {
+    let matt_home = matt.phone.home.expect("Matt's home").to_vec();
+    let state = routed_state(bo.home.addr, &bo.phone).await;
+    state.peers.iter().find(|peer| peer.home_endpoint == matt_home).map_or(0, |peer| peer.outbox_count)
+}
+
+/// Bo's first message to Matt, his new friend, while Matt's phone hasn't
+/// taken their conversation in: once it does and routes it, Matt's home
+/// takes in what it kept, knocks on Bo's at once and Bo's lets go of its
+/// copy, delivered, long before its next try.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_first_message_kept_pending_arrives_once_the_friends_device_routes_it() {
+    let world = World::new().await;
+    let (mut matt, bo, group, kind) = first_message_pending(&world).await;
+    assert_eq!(matt.phone.join_welcomes(|_| kind.clone()).await, std::slice::from_ref(&group));
+    matt.phone.route(&bo.phone, &[&group]).await;
+    hears(&mut matt.phone, &group, "Hi Matt, it's Bo").await;
+    assert_eq!(pending_at(&world, "matt"), 0);
+    let deadline = Instant::now() + WAIT;
+    while waiting_for_matt(&matt, &bo).await > 0 {
+        assert!(Instant::now() < deadline, "Bo's home was never knocked on to send it again");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert_eq!(kept_at_the_service(&world), 0);
+}
+
+/// The same, with Bo's home gone away once Matt's kept the message: Matt
+/// still reads it, from his own home.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_first_message_kept_pending_arrives_with_the_senders_home_away() {
+    let world = World::new().await;
+    let (mut matt, bo, group, kind) = first_message_pending(&world).await;
+    factoryd::dm_device::set_offline_for_test(&bo.home.factory, true);
+    assert_eq!(matt.phone.join_welcomes(|_| kind.clone()).await, std::slice::from_ref(&group));
+    matt.phone.route(&bo.phone, &[&group]).await;
+    hears(&mut matt.phone, &group, "Hi Matt, it's Bo").await;
     assert_eq!(kept_at_the_service(&world), 0);
 }

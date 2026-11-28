@@ -74,6 +74,10 @@ class FakeWorker {
 
   /// The account's live grants, as GET /v1/apps/grants lists them.
   final grants = <Map<String, Object?>>[];
+
+  /// Each account's friends, as GET contacts lists them: unless a test
+  /// sets them, everyone it has a conversation with.
+  final contacts = <String, List<String>>{};
   final log = <String>[];
 
   /// The devices signed out of each account by another of its devices
@@ -388,6 +392,20 @@ class FakeWorker {
         return {'removed': (signedOut[account] ??= {}).add(key)};
       case ('GET', ['', 'v1', 'apps', 'grants']):
         return {'grants': grants};
+      case ('GET', ['contacts']):
+        return {
+          'contacts': [
+            for (final friend
+                in contacts[account] ??
+                    {
+                      for (final group in _groups.values)
+                        if (group.kind == 'conversation' &&
+                            group.accounts.contains(account))
+                          ...group.accounts,
+                    }.where((each) => each != account))
+              {'id': 'contact-$friend', 'account_id': friend},
+          ],
+        };
       case ('POST', ['me', 'handoffs']):
         handoffs.putIfAbsent(body['to']! as String, () => []).add({
           'id': 'h${handoffs.length + 1}',
@@ -1009,7 +1027,10 @@ class FakeDmDevice implements DmDevice {
   final replaced = <DmMember>[];
 
   @override
-  Future<DmCommit?> removeDeadLeaves({required List<int> groupId}) async {
+  Future<DmCommit?> removeDeadLeaves({
+    required List<int> groupId,
+    required List<DmListVersion> listVersions,
+  }) async {
     final here = _groups[dmB64(groupId)]!;
     final dead = [
       for (final member in here.members)
@@ -1452,6 +1473,7 @@ class FakeDmDevice implements DmDevice {
   Future<String> send({
     required List<int> groupId,
     required DmContent content,
+    required List<DmListVersion> listVersions,
     required int nowMs,
   }) async {
     final id = dmB64(groupId);

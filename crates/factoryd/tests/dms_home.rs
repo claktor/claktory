@@ -22,15 +22,59 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use claktory_account::server::{self, Config, Secrets, Service, UserApps, mail};
+use claktory_account::server::{self, Config, Service, UserApps, mail};
 use claktory_dm_crypto::content::Content;
 use claktory_dm_crypto::group::{Group, Incoming};
-use claktory_dm_crypto::validation::GroupKind;
+use claktory_dm_crypto::validation::{GroupKind, Pins};
 use claktory_user_apps::worker::{self, Worker};
 use common::{Client, last_workspace, start, temp_dir};
 use dm_device::{Device, envelope};
 use factory_protocol::v1::{self, client_message::Body as Request, server_message::Body};
 use serde_json::json;
+
+/// A device's own end of the tunnel, on this machine only.
+async fn tunnel_device() -> iroh::Endpoint {
+    iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        .relay_mode(iroh::RelayMode::Disabled)
+        .bind()
+        .await
+        .expect("a device endpoint")
+}
+
+/// A device's app through the tunnel to the Claktory whose folder is `dir`
+/// (its loopback endpoint), saying Hello with `assertion`: the answer.
+async fn knock(dir: &Path, device: &iroh::Endpoint, assertion: &str) -> (Client, Body) {
+    let code = loop {
+        match factoryd::remote::local_code_for_test(&dir.join("home")) {
+            Some(code) => break code,
+            None => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
+        }
+    };
+    let query = code.trim().strip_prefix("factory://?").expect("a code");
+    let values = |name: &str| -> Vec<String> {
+        query.split('&').filter_map(|pair| pair.strip_prefix(&format!("{name}="))).map(|value| value.replace("%3A", ":").replace("%3a", ":")).collect()
+    };
+    let endpoint: iroh::EndpointId = values("e").pop().expect("e=").parse().expect("an endpoint id");
+    let mut addr = iroh::EndpointAddr::new(endpoint);
+    for address in values("a") {
+        addr = addr.with_ip_addr(address.parse().expect("ip:port"));
+    }
+    let connection = device.connect(addr, factoryd::remote::ALPN).await.expect("dialled");
+    let (send, receive) = connection.open_bi().await.expect("a stream");
+    let mut client = Client::over(Box::new(tokio::io::join(receive, send)), Some(Box::new((device.clone(), connection)))).await;
+    let hello = v1::Hello {
+        protocol_version: factory_protocol::PROTOCOL_VERSION,
+        client_version: "test".into(),
+        assertion: assertion.into(),
+        can_confirm: true,
+        device_kind: v1::DeviceKind::Tablet.into(),
+        device_name: "iPad".into(),
+        ..Default::default()
+    };
+    client.send(v1::ClientMessage { id: 1, body: Some(Request::Hello(hello)) }).await;
+    let answer = client.receive().await.body.expect("an answer");
+    (client, answer)
+}
 
 /// The first seq a home gives a group's entries.
 const FIRST: u64 = (1 << 32) + 1;
@@ -48,7 +92,7 @@ async fn service(dir: &Path) -> (String, Arc<mail::Memory>) {
     let mail = Arc::new(mail::Memory::default());
     let config = Config { user_apps: Some(UserApps { socket, uid }), ..Config::default() };
     let clock: server::Clock = Arc::new(|| jiff::Timestamp::now().as_second());
-    let service = Service::new(&dir.join("account.db"), Secrets::generate(), config, mail.clone(), clock).expect("the service");
+    let service = Service::new(&dir.join("account.db"), dm_device::service_secrets(), config, mail.clone(), clock).expect("the service");
     tokio::spawn(server::serve(listener, service));
     (url, mail)
 }
@@ -68,11 +112,14 @@ fn load(device: &Device, group: &str) -> (GroupKind, Vec<u8>) {
 
 /// Seals `text` in the group on `device`, as the app does before DmSend.
 fn seal(device: &Device, group: &str, id: &str, text: &str) -> Vec<u8> {
+    seal_with(device, &device.pins, group, id, text).expect("sealed")
+}
+
+/// Seals `text` as [seal] does, checked against `pins`.
+fn seal_with(device: &Device, pins: &Pins, group: &str, id: &str, text: &str) -> Result<Vec<u8>, claktory_dm_crypto::Error> {
     let (kind, group_id) = load(device, group);
     let content = Content::text(id, text).encode().expect("encoded");
-    device.with(|provider, me| {
-        Group::load(provider, kind, &group_id).expect("loads").expect("kept").send(provider, me, &device.pins, &content).expect("sealed")
-    })
+    device.with(|provider, me| Group::load(provider, kind, &group_id).expect("loads").expect("kept").send(provider, me, pins, &content))
 }
 
 /// What `device` reads in an entry: the text of a friend's or another
@@ -159,16 +206,22 @@ async fn the_persons_devices_send_follow_and_ack_through_their_home() {
     assert_eq!(ipad.join_welcomes(|_| GroupKind::SelfGroup { account: account.clone() }).await, vec![group.clone()]);
     let group_id = URL_SAFE_NO_PAD.decode(&group).expect("an id");
     let (phone_leaf, ipad_leaf) = (phone.device_key.clone(), ipad.device_key.clone());
+    // Each device's requests go under its own leaf, on its own link.
+    let mut phone_link = phone.link(addr).await;
+    let mut tool = Client::connect(addr).await.0;
+    assert!(follow(&mut tool, &ipad_leaf, Vec::new()).await.expect_err("refused").contains("isn't signed in to your account"));
+    assert!(follow(&mut phone_link, &ipad_leaf, Vec::new()).await.expect_err("refused").contains("another device's"));
     let hello = seal(&phone, &group, "message-000000000000000001", "Hello from my phone");
 
     // Not the home yet: nothing taken, nothing followed.
     let receipt = send(&mut phone_link, &phone_leaf, &group_id, hello.clone(), "message-000000000000000001").await.expect("a receipt");
     assert_eq!(result(&receipt), v1::DmSendResult::NotHome);
-    let (mut ipad_link, _, _) = Client::connect(addr).await;
+    let mut ipad_link = ipad.link(addr).await;
     assert!(follow(&mut ipad_link, &ipad_leaf, Vec::new()).await.expect_err("refused").contains("isn't your home"));
 
     // Its home now, holding the group as claktory.com has it.
     factoryd::dm_device::set_home_for_test(&factory, true);
+    factoryd::dm_device::set_listed_for_test(&factory, &[&phone_leaf, &ipad_leaf, "busy-leaf"]);
     let (kind, _) = load(&phone, &group);
     let info = phone.with(|provider, me| {
         Group::load(provider, kind, &group_id).expect("loads").expect("kept").group_info(provider, me).expect("a GroupInfo")
@@ -224,7 +277,7 @@ async fn the_persons_devices_send_follow_and_ack_through_their_home() {
         let receipt = send(&mut phone_link, &phone_leaf, &group_id, sealed, &id).await.expect("a receipt");
         assert_eq!(result(&receipt), v1::DmSendResult::Stored);
     }
-    let (mut ipad_link, _, _) = Client::connect(addr).await;
+    let mut ipad_link = ipad.link(addr).await;
     let cursor = v1::DmCursor { group_id: group_id.clone(), seq: FIRST + 1 };
     let feed = follow(&mut ipad_link, &ipad_leaf, vec![cursor]).await.expect("followed");
     assert!(feed.has_more, "{feed:?}");
@@ -238,16 +291,17 @@ async fn the_persons_devices_send_follow_and_ack_through_their_home() {
     // so it reads on from where it acked.
     let through = vec![v1::DmCursor { group_id: group_id.clone(), seq: FIRST + 4 }];
     ipad_link.ok(Request::DmAck(v1::DmAck { leaf_id: ipad_leaf.clone(), through })).await;
-    let (mut ipad_link, _, _) = Client::connect(addr).await;
+    let mut ipad_link = ipad.link(addr).await;
     let feed = follow(&mut ipad_link, &ipad_leaf, vec![v1::DmCursor { group_id: group_id.clone(), seq: 3 }]).await.expect("followed");
     assert!(!feed.has_more, "{feed:?}");
 
     // A leaf sends at most 60 a minute.
+    let mut busy_link = dm_device::link_as(addr, &account, "busy-leaf").await;
     for n in 0..60 {
-        let refused = send(&mut phone_link, "busy-leaf", &group_id, vec![0; 8], &format!("message-{n:018}")).await;
+        let refused = send(&mut busy_link, "busy-leaf", &group_id, vec![0; 8], &format!("message-{n:018}")).await;
         assert!(refused.is_err(), "not an MLS message");
     }
-    let limited = send(&mut phone_link, "busy-leaf", &group_id, hello, "message-000000000000000099").await.expect("a receipt");
+    let limited = send(&mut busy_link, "busy-leaf", &group_id, hello, "message-000000000000000099").await.expect("a receipt");
     assert_eq!(result(&limited), v1::DmSendResult::RateLimited);
     assert!(limited.retry_after_ms >= 1000, "{limited:?}");
 
@@ -287,6 +341,8 @@ async fn the_persons_devices_hear_when_their_list_makes_this_claktory_the_home()
     let mut phone = Device::new(&dir, &account, 1);
     phone.publish_keys().await;
     phone.enroll(&mut phone_link).await;
+    // Its own connection, signed in as it: DmRoutes is a device's.
+    let mut phone_link = phone.link(addr).await;
     let home = match phone_link.request(Request::DmRoutes(v1::DmRoutes { routes: Vec::new() })).await.body {
         Body::DmHome(home) => home,
         other => panic!("expected the home, got {other:?}"),
@@ -304,4 +360,124 @@ async fn the_persons_devices_hear_when_their_list_makes_this_claktory_the_home()
         let home = link.wait_for(|body| if let Body::DmHome(home) = body { home.is_home.then(|| home.clone()) } else { None }).await;
         assert_eq!(home.endpoint_id.len(), 32);
     }
+}
+
+/// The person locks out a device
+/// that is still paired and following its leaf at their home. Their new
+/// signed list drops it: its follow ends at once, it can't follow or send
+/// again, and nothing more reaches it, though the group still holds it.
+/// Their other devices' messages wait until a commit takes it out.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_locked_out_device_gets_nothing_more_from_the_home() {
+    factoryd::user_apps::dms::set_preview(true);
+    let dir = temp_dir();
+    let (url, mail) = service(&dir).await;
+    std::fs::create_dir_all(dir.join("home")).expect("home");
+    std::fs::write(dir.join("home/config.json"), json!({"account": {"enabled": true, "service": url}}).to_string()).expect("config");
+    let (addr, factory) = start(&dir).await;
+    let (mut phone_link, _, _) = Client::connect(addr).await;
+    sign_in(&mut phone_link, &mail, "matt@example.com").await;
+    let saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("home/account/account.json")).expect("account.json")).expect("JSON");
+    let account = saved["account_id"].as_str().expect("an account").to_owned();
+
+    // Matt's phone enrolls this Claktory and names it his home; his iPad
+    // (C) is on his list too, and both are in his self group.
+    let mut phone = Device::new(&dir, &account, 1);
+    phone.publish_keys().await;
+    phone.enroll(&mut phone_link).await;
+    phone.home = Some(factoryd::dm_device::endpoint_for_test(&factory).expect("an endpoint"));
+    let mut ipad = phone.another(2).await;
+    let mut phone_link = phone.link(addr).await;
+    phone_link.send(v1::ClientMessage { id: 1000, body: Some(Request::DmRoutes(v1::DmRoutes { routes: Vec::new() })) }).await;
+    phone_link.wait_for(|body| if let Body::DmHome(home) = body { home.is_home.then_some(()) } else { None }).await;
+    let group = phone.create(GroupKind::SelfGroup { account: account.clone() }, json!({"kind": "self"})).await;
+    let packages = phone.claim(&account, &[&ipad.device_key]).await;
+    phone.add(&group, packages).await;
+    assert_eq!(ipad.join_welcomes(|_| GroupKind::SelfGroup { account: account.clone() }).await, vec![group.clone()]);
+    let group_id = URL_SAFE_NO_PAD.decode(&group).expect("an id");
+    let (phone_leaf, ipad_leaf) = (phone.device_key.clone(), ipad.device_key.clone());
+    let (kind, _) = load(&phone, &group);
+    let info = phone.with(|provider, me| {
+        Group::load(provider, kind.clone(), &group_id).expect("loads").expect("kept").group_info(provider, me).expect("a GroupInfo")
+    });
+    factoryd::dm_device::seed_for_test(&factory, &info).expect("seeded");
+    let mut phone_link = phone.link(addr).await;
+
+    // The iPad is paired too, through the tunnel, signed in as itself.
+    factory.set_tunnel_online_wait(std::time::Duration::from_millis(100));
+    let tunnel_key = tunnel_device().await;
+    let (mut ipad_tunnel, answer) = knock(&dir, &tunnel_key, &ipad.assertion(&tunnel_key.id().to_string())).await;
+    assert!(matches!(answer, Body::Welcome(_)), "{answer:?}");
+
+    // The iPad follows, and reads what the phone sends.
+    let mut ipad_link = ipad.link(addr).await;
+    follow(&mut ipad_link, &ipad_leaf, Vec::new()).await.expect("followed");
+    let first = seal(&phone, &group, "message-000000000000000001", "Before");
+    let receipt = send(&mut phone_link, &phone_leaf, &group_id, first, "message-000000000000000001").await.expect("a receipt");
+    assert_eq!(result(&receipt), v1::DmSendResult::Stored, "{receipt:?}");
+    let entries = pushed(&mut ipad_link).await;
+    assert_eq!(open(&ipad, &group, &entries[0].envelope).as_deref(), Some("Before"));
+
+    // Locked out: Matt's new list leaves the iPad off. Once the home has
+    // read it, the iPad can't follow again.
+    let before = phone.pins.clone();
+    phone.listed.retain(|listed| listed.leaf_id != ipad_leaf);
+    phone.publish_keys().await;
+    let mut again_link = ipad.link(addr).await;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        match follow(&mut again_link, &ipad_leaf, Vec::new()).await {
+            Err(why) if why.contains("isn't on your device list") => break,
+            other => assert!(std::time::Instant::now() < deadline, "still followed: {other:?}"),
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    let sealed = seal(&ipad, &group, "message-000000000000000002", "From the iPad");
+    let refused = send(&mut again_link, &ipad_leaf, &group_id, sealed, "message-000000000000000002").await.expect("a receipt");
+    assert_eq!(result(&refused), v1::DmSendResult::NotListed);
+
+    // Point 6's backstop: the list that dropped it unpairs it here too. Its
+    // tunnel closes, and its account key lets it in no more.
+    loop {
+        let (_, answer) = knock(&dir, &tunnel_key, &ipad.assertion(&tunnel_key.id().to_string())).await;
+        match answer {
+            Body::Error(error) if error.code() == v1::ErrorCode::Unauthorized && error.message.contains("removed from your account") => break,
+            other => assert!(std::time::Instant::now() < deadline, "still let in: {other:?}"),
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    while !ipad_tunnel.closed().await {
+        assert!(std::time::Instant::now() < deadline, "its tunnel stayed open");
+    }
+
+    // The phone's next message waits while the group still holds the iPad:
+    // on the phone itself (E11-8 point 4), and at the home for one that
+    // didn't check (still on the old list, say).
+    let waits = seal_with(&phone, &phone.pins, &group, "message-000000000000000003", "After");
+    assert!(
+        matches!(waits, Err(claktory_dm_crypto::Error::Waiting { reason: claktory_dm_crypto::validation::Held::Removed, .. })),
+        "{waits:?}"
+    );
+    let held = seal_with(&phone, &before, &group, "message-000000000000000003", "After").expect("sealed on the old list");
+    let receipt = send(&mut phone_link, &phone_leaf, &group_id, held, "message-000000000000000003").await.expect("a receipt");
+    assert_eq!(result(&receipt), v1::DmSendResult::RemovedDeviceInGroup);
+
+    // The phone takes it out; then its message goes, and the iPad's old
+    // follow, ended, gets none of it.
+    let out = phone.with(|provider, me| {
+        Group::load(provider, kind.clone(), &group_id).expect("loads").expect("kept").remove(provider, me, &[&ipad_leaf]).expect("removed")
+    });
+    let body = json!({"commit": envelope(out.commit.clone()), "group_info": envelope(out.group_info.expect("a GroupInfo"))});
+    let (status, taken) = phone.call("POST", &format!("groups/{group}/commits"), body).await;
+    assert_eq!(status, 200, "{taken}");
+    phone.with(|provider, _| Group::load(provider, kind.clone(), &group_id).expect("loads").expect("kept").merge_pending(provider).expect("merged"));
+    // (The home may have pulled it from claktory.com already.)
+    let receipt = send(&mut phone_link, &phone_leaf, &group_id, out.commit, "").await.expect("a receipt");
+    assert!(matches!(result(&receipt), v1::DmSendResult::Stored | v1::DmSendResult::Duplicate), "{receipt:?}");
+    let after = seal(&phone, &group, "message-000000000000000004", "After");
+    let receipt = send(&mut phone_link, &phone_leaf, &group_id, after, "message-000000000000000004").await.expect("a receipt");
+    assert_eq!(result(&receipt), v1::DmSendResult::Stored, "{receipt:?}");
+    let more = tokio::time::timeout(std::time::Duration::from_secs(2), pushed(&mut ipad_link)).await;
+    assert!(more.is_err(), "the locked-out iPad was sent {more:?}");
 }

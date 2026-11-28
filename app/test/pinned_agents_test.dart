@@ -1,4 +1,4 @@
-// Pinned agents (Lucy's ux/pinned-agents.md, Bruno 46946): agents from any
+// Pinned agents: agents from any
 // project the person keeps under Rivet in the sidebar. Pins sit under the
 // workspace's agents, before Projects, each with its role and project; a
 // right click (or a finger's hold let go) offers Pin, Unpin, Move up, Move
@@ -138,7 +138,7 @@ void main() {
     expect((pin.agentId, pin.beforeId), ('speed', ''));
   });
 
-  // Abbacchio's row 1661: the row focused, Shift-F10 or the menu key
+  // The row focused, Shift-F10 or the menu key
   // opens its menu, where VoiceOver on a Mac reaches it.
   testWidgets('a focused row opens its menu from Shift-F10 and the menu '
       'key', (tester) async {
@@ -162,7 +162,7 @@ void main() {
     expect(find.text('Agent settings…'), findsOneWidget);
   });
 
-  // Abbacchio's row 1716, VoiceOver on a Mac: moving the keyboard's focus
+  // VoiceOver on a Mac: moving the keyboard's focus
   // to its cursor tells the app only that the row gained its focus; the
   // row takes the keys then, so Shift-F10 opens its menu, and its items
   // work from VoiceOver's tap.
@@ -242,7 +242,7 @@ void main() {
     expect(find.text('Agent settings…'), findsOneWidget);
   });
 
-  // Abbacchio's row 1734: deleted while its menu is open, its row goes;
+  // Deleted while its menu is open, its row goes;
   // Pin still sends and says why it can't.
   testWidgets("a row's menu open as its agent is deleted: Pin says it is "
       'gone', (tester) async {
@@ -297,7 +297,7 @@ void main() {
     expect(find.text("Dana's project is archived."), findsOneWidget);
   });
 
-  // Abbacchio's NIT, Trish's words: the backend's generic "no agent with id"
+  // The backend's generic "no agent with id"
   // reads as the agent gone.
   testWidgets('a pin refused as the agent is gone says so in words', (
     tester,

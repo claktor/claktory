@@ -1,4 +1,4 @@
-// The agent's header and menu (agent-view.md §3, §4): the name opens its
+// The agent's header and menu: the name opens its
 // settings, the model is a control with Undo, Checklist and Tasks are
 // buttons with their counts, the meter explains itself, ⋯ holds the rest,
 // and things give way in order when it's narrow. With no room beside the
@@ -283,7 +283,7 @@ void main() {
     );
   });
 
-  // Abbacchio's row 1661: VoiceOver on a Mac can't reach the sidebar row's
+  // VoiceOver on a Mac can't reach the sidebar row's
   // custom actions, so ⋯ has Pin, Unpin and a pin's moves too.
   testWidgets('⋯ pins, unpins and moves a pin', (tester) async {
     final pinned = header()
@@ -315,7 +315,7 @@ void main() {
     expect(harness.last.pinAgent.beforeId, '');
   });
 
-  // Abbacchio's row 1716: VoiceOver's VO-Space is the item's semantics
+  // VoiceOver's VO-Space is the item's semantics
   // tap, which did nothing.
   testWidgets("⋯'s items do what they say from VoiceOver's tap", (
     tester,
@@ -340,7 +340,7 @@ void main() {
     semantics.dispose();
   });
 
-  // Abbacchio's row 1734: the agent deleted while its ⋯ menu is open (its
+  // The agent deleted while its ⋯ menu is open (its
   // conversation gone from under the menu), Pin still says why it can't.
   testWidgets('⋯ open as its agent is deleted: Pin says it is gone', (
     tester,
@@ -362,7 +362,7 @@ void main() {
     expect(find.text("June isn't in this Claktory any more."), findsOneWidget);
   });
 
-  // Abbacchio's row 1647: Extensions… opened the settings at the top with
+  // Extensions… opened the settings at the top with
   // the extensions folded, as Agent settings… does.
   testWidgets('Extensions… opens the settings at its extensions, unfolded', (
     tester,

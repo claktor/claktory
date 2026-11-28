@@ -960,6 +960,123 @@ void main() {
     });
   }
 
+  // A dashboard like Fred's "Right now" (long stat titles,
+  // a table with a sentence a row) at a phone's, a narrow iPad's and a
+  // Mac's widths, at the default and the largest text.
+  for (final (width, scale, brightness, open) in [
+    for (final width in [390.0, 560.0, 320.0, 1024.0])
+      for (final scale in [1.0, 3.12]) (width, scale, Brightness.dark, false),
+    (390.0, 1.0, Brightness.light, false),
+    (390.0, 1.0, Brightness.dark, true),
+    (560.0, 1.0, Brightness.dark, true),
+  ]) {
+    final name =
+        'fred_${width.toInt()}_x${scale.toString().replaceAll('.', '_')}'
+        '${open ? '_open' : ''}';
+    testWidgets('${brightness.name}: $name (friend bug #62)', (tester) async {
+      _shade = brightness.name;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      tester.platformDispatcher.textScaleFactorTestValue = scale;
+      addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+      Map<String, Object?> row(String id, List<String> cells) => {
+        ..._row(id, const []),
+        'children': cells,
+        'stackBelow': 768,
+      };
+      const long =
+          'Rebuilding the release images for the Android beta, signing them '
+          'with the upload key, uploading them to the Play Console and then '
+          'telling Bruno which build number went out.';
+      final stats = [
+        ('working', 'Agents working right now', 3),
+        ('waiting', 'Requests waiting for you', 2),
+        ('tokens', 'Tokens used today, all agents', 1400000),
+        ('spend', 'Spend this month', 212),
+      ];
+      await _show(
+        tester,
+        [
+          {
+            'id': 'root',
+            'component': 'Column',
+            'children': ['r0', 'r1'],
+          },
+          row('r0', [for (final (id, _, _) in stats) id]),
+          for (final (id, label, value) in stats)
+            ..._weighted(
+              _card(id, {
+                'component': 'Stat',
+                'label': label,
+                'value': value,
+                'spark': [for (var h = 0; h <= 24; h++) _wave(h, 50, 20, 0)],
+                'thresholds': [
+                  {'color': 'green'},
+                ],
+                // As Charts sends a 3 by 3 panel of its 12-column grid.
+                'height': 140,
+              }),
+              3,
+            ),
+          row('r1', ['agents']),
+          {
+            'id': 'agents',
+            'component': 'Card',
+            'child': 'agents_col',
+            'weight': 12,
+          },
+          {
+            'id': 'agents_col',
+            'component': 'Column',
+            'children': ['agents_title', 'agents_table'],
+          },
+          {
+            'id': 'agents_title',
+            'component': 'Text',
+            'text': 'Agents',
+            'variant': 'title',
+          },
+          {
+            'id': 'agents_table',
+            'component': 'Table',
+            'data': {'@path': '/agents'},
+            'columns': [
+              {'name': 'agent', 'title': 'Agent'},
+              {'name': 'status', 'title': 'Status'},
+              {'name': 'step', 'title': 'Last step', 'format': 'time'},
+              {'name': 'doing', 'title': "What it's doing"},
+            ],
+          },
+        ],
+        {
+          'agents': {
+            'columns': ['agent', 'status', 'step', 'doing'],
+            'rows': [
+              ['Pericolo', 'Working', '2026-11-22 14:02:00', long],
+              [
+                'June',
+                'Waiting',
+                '2026-11-22 13:40:00',
+                'Waiting for your answer on the pricing page before it '
+                    'publishes.',
+              ],
+              ['Bruno', 'Idle', '2026-11-22 12:15:00', 'Handed off.'],
+            ],
+          },
+        },
+        width: width,
+        height: scale > 1 ? 3600 : 1400,
+        brightness: brightness,
+      );
+      expect(tester.takeException(), isNull);
+      if (open) {
+        await tester.tap(find.text('Pericolo'));
+        await tester.pump();
+      }
+      await _golden(tester, name);
+    });
+  }
+
   for (final ratio in [2.0, 3.0]) {
     testWidgets("a filled Stat stays inside its card's hairline at "
         '${ratio.toInt()}x', (tester) async {

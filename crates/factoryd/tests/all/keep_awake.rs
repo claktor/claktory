@@ -121,29 +121,18 @@ async fn the_lid_is_kept_from_sleeping_the_mac_only_while_agents_work_and_it_is_
 }
 
 /// #371 (Fugo, 23585): turning it on is taken only from a connection
-/// authenticated as this Mac's own app, over the loopback port or through
-/// this Mac's own tunnel endpoint as the Mac app connects; a paired device
-/// is refused even from this machine's address, and may turn it off.
+/// authenticated as this Mac's own app (over its socket; the
+/// tests' person token stands for it); a paired device is refused even from
+/// this machine's address, and may turn it off; an agent's command, with
+/// the tool token, is refused it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn only_this_macs_own_app_turns_the_lid_closed_setting_on_over_either_way_in() {
     let dir = temp_dir();
     let (addr, factory) = start(&dir).await;
     factory.set_lid_closed_clamshell(std::sync::Arc::new(Clamshell::default()));
 
-    // This Mac's app through the tunnel, with the local pairing code.
-    let local = crate::remote::parse(&crate::remote::local_pairing(&dir).await);
-    let app = crate::remote::new_device().await;
-    let connection = crate::remote::dial(&app, &local, &local.addresses).await.expect("let in");
-    let (send, receive) = connection.open_bi().await.expect("stream");
-    let mut mac = Client::over(Box::new(tokio::io::join(receive, send)), Some(Box::new((app, connection)))).await;
-    let hello = v1::Hello {
-        protocol_version: factory_protocol::PROTOCOL_VERSION,
-        client_version: "test".into(),
-        token: local.token.clone(),
-        ..Default::default()
-    };
-    mac.send(v1::ClientMessage { id: 1, body: Some(Request::Hello(hello)) }).await;
-    let (workspace, _) = mac.welcomed().await;
+    // This Mac's app.
+    let (mut mac, workspace, _) = Client::connect(addr).await;
     let mut view = View { workspace, ..View::default() };
     assert!(keep_awake(&view).lid_closed_available, "the helper makes it available");
 
@@ -154,14 +143,24 @@ async fn only_this_macs_own_app_turns_the_lid_closed_setting_on_over_either_way_
         other => panic!("expected the refusal, got {other:?}"),
     }
 
-    // The Mac app over the tunnel: on.
+    // The Mac app: on.
     assert!(matches!(apply_request(&mut mac, &mut view, lid(true)).await, Body::Ack(_)));
     view.follow(&mut mac, |view| keep_awake(view).lid_closed() != v1::LidClosedState::LidClosedOff).await;
     // The paired device may turn it off.
     phone.ok(lid(false)).await;
     view.follow(&mut mac, |view| keep_awake(view).lid_closed() == v1::LidClosedState::LidClosedOff).await;
-    // And the loopback port's client, this Mac's too, turns it on again.
-    let (mut script, workspace, _) = Client::connect(addr).await;
-    let mut seen = View { workspace, ..View::default() };
-    assert!(matches!(apply_request(&mut script, &mut seen, lid(true)).await, Body::Ack(_)));
+    // An agent's command, on the loopback port with the tool token: never.
+    let mut script = Client::open(addr).await;
+    let hello = v1::Hello {
+        protocol_version: factory_protocol::PROTOCOL_VERSION,
+        client_version: "test".into(),
+        token: crate::common::tool_token(addr),
+        ..Default::default()
+    };
+    script.send(v1::ClientMessage { id: 1, body: Some(Request::Hello(hello)) }).await;
+    script.welcomed().await;
+    match script.request(lid(true)).await.body {
+        Body::Error(error) => assert_eq!(error.code(), v1::ErrorCode::PersonOnly),
+        other => panic!("expected the refusal, got {other:?}"),
+    }
 }

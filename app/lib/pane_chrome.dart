@@ -55,10 +55,18 @@ class PaneChrome extends InheritedWidget {
 /// comments' count and More, which holds the viewer's own actions and,
 /// for a pane of an agent's layout, Close everywhere.
 class PhonePane {
-  const PhonePane({required this.title, required this.onBack, this.onRemove});
+  const PhonePane({
+    required this.title,
+    required this.onBack,
+    this.onRemove,
+    this.titleSpan,
+  });
 
   /// The file's name.
   final String title;
+
+  /// [title] drawn in parts (an app's, "app" muted), when it has them.
+  final InlineSpan? titleSpan;
 
   /// Back: off this phone's screen only. The pane stays in the agent's
   /// layout, for its other devices.
@@ -94,7 +102,12 @@ class PaneScaffold extends StatelessWidget {
     this.share,
     this.phoneKind = PhoneViewerKind.document,
     this.phoneOverlay,
+    this.notice,
   });
+
+  /// A line under the header about the file (it changed since it was
+  /// sealed): on a phone, under its header and going with it.
+  final Widget? notice;
 
   /// On a phone: a picture or video fills the screen, its chrome over it;
   /// a document keeps its header above it ([PhoneViewerScaffold]).
@@ -127,6 +140,7 @@ class PaneScaffold extends StatelessWidget {
   Widget build(BuildContext context) {
     final chrome = PaneChrome.of(context);
     final share = canShareFiles ? this.share : null;
+    final notice = this.notice;
     if (chrome?.phone case final phone?) {
       return PhoneViewerScaffold(
         kind: phoneKind,
@@ -146,11 +160,23 @@ class PaneScaffold extends StatelessWidget {
         ),
         overlay: phoneOverlay,
         toolbar: toolbar,
+        notice: notice,
         body: body,
       );
     }
     final header = chrome?.header;
-    if (header == null) return body;
+    if (header == null) {
+      if (notice == null) return body;
+      return LayoutBuilder(
+        builder: (context, pane) => Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _capped(pane, notice),
+            Expanded(child: body),
+          ],
+        ),
+      );
+    }
     final shareButton = share == null
         ? null
         : Builder(
@@ -178,19 +204,44 @@ class PaneScaffold extends StatelessWidget {
     // clipped, as the viewer's controls are from their end on a narrow
     // pane beside the conversation. On a Mac, last of them.
     final touch = touchFirst(context);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        header(
-          details,
-          [...controls, if (!touch) ?downloadButton, if (!touch) ?shareButton],
-          pinned: [if (touch) ?shareButton],
-        ),
-        Expanded(child: body),
-      ],
+    return LayoutBuilder(
+      builder: (context, pane) => Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          header(
+            details,
+            [
+              ...controls,
+              if (!touch) ?downloadButton,
+              if (!touch) ?shareButton,
+            ],
+            pinned: [if (touch) ?shareButton],
+          ),
+          if (notice != null)
+            ColoredBox(
+              color: Palette.of(context).sidebar,
+              child: _capped(pane, notice),
+            ),
+          Expanded(child: body),
+        ],
+      ),
     );
   }
+
+  /// At a large text size in a short pane, [notice] takes at most
+  /// [_noticeShare] of it and scrolls, so the file stays in view.
+  static Widget _capped(BoxConstraints pane, Widget notice) => ConstrainedBox(
+    constraints: BoxConstraints(
+      maxHeight: pane.hasBoundedHeight
+          ? pane.maxHeight * _noticeShare
+          : double.infinity,
+    ),
+    child: SingleChildScrollView(child: notice),
+  );
 }
+
+/// The most of a pane's height the line under its header takes.
+const _noticeShare = 0.4;
 
 /// A viewer's header on a phone: Back, the file's name over its details,
 /// then the comments (or Share, for a file that has none) and More, whose
@@ -297,8 +348,8 @@ class PhonePaneHeader extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            pane.title,
+          Text.rich(
+            pane.titleSpan ?? TextSpan(text: pane.title),
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: type.emphasis.copyWith(color: palette.text),

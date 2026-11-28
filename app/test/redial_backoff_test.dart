@@ -73,7 +73,6 @@ Backend _backend(FakeTunnel tunnel) {
           explorer: ExplorerStore(),
           extensionView: ExtensionViewStore(),
           tunnels: FakeTunnels(tunnel),
-          localPairing: () async => null,
         )
         ..deviceKey = ((_) => 'k' * 64)
         ..retryMost = _quick

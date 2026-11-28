@@ -265,7 +265,7 @@ async fn the_explorer_never_shows_a_directory_twice() {
     assert_eq!(shown, [("app", vec!["main.rs"]), ("docs", vec!["guide.md"]), ("research", vec!["found.md"])]);
 }
 
-/// #248: a project's folders come in the order the person drags them to,
+/// A project's folders come in the order the person drags them to,
 /// kept in config.json, the same on every device and after a restart.
 #[tokio::test]
 async fn folders_are_dragged_into_the_order_the_person_wants() {

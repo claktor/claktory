@@ -97,7 +97,7 @@ pub trait Models: Send + Sync {
     ) -> BoxFuture<'a, Result<Option<factory_agent::providers::keys::KeyCredit>, Error>> {
         Box::pin(async { Ok(None) })
     }
-    /// Makes one image on the provider (#403: `crate::extensions::images`),
+    /// Makes one image on the provider (`crate::extensions::images`),
     /// on the account its requests go to now.
     fn make_image<'a>(
         &'a self,
@@ -190,15 +190,15 @@ pub trait Models: Send + Sync {
         Box::pin(async { None })
     }
 
-    /// Deletes at the provider the files of the images of `digests`, which
-    /// a conversation let go of (#382: Anthropic's).
+    /// Deletes at the provider (Anthropic's) the files of the images of
+    /// `digests`, which a conversation let go of.
     fn forget_images(&self, _digests: Vec<String>) -> BoxFuture<'_, ()> {
         Box::pin(async {})
     }
 }
 
 /// The digests of the images in `messages` that may have gone to a
-/// provider as files (#382).
+/// provider as files.
 pub(crate) fn image_digests(messages: &[factory_agent::types::Message]) -> std::collections::HashSet<String> {
     messages
         .iter()

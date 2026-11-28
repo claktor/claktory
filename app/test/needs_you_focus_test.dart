@@ -14,9 +14,11 @@ import 'package:factory_app/review_answer.dart'
     show ReviewAnswering, forgetReviewChoices, reviewChosen;
 import 'package:factory_app/card_answer.dart';
 import 'package:factory_app/identity.dart' show Palette, agentColors;
+import 'package:factory_app/layout.dart' show layoutOf, open;
 import 'package:factory_app/inbox.dart'
     show InboxView, NeedsYouCard, NeedsYouChip, NeedsYouList;
 import 'package:factory_app/transcript.dart' show AgentTints;
+import 'package:factory_app/needs_you_alerts.dart' show aboutThisDevice;
 import 'package:factory_app/needs_you_entries.dart';
 import 'package:factory_app/needs_you_focus.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
@@ -72,9 +74,12 @@ Workspace _waiting({
   ),
 );
 
-final _base = DateTime(2026, 11, 26, 9);
+/// The tests' now: the moment they start, since the stage counts how long a
+/// card has waited by the real clock. A fixed day would read older every
+/// day the tests run.
+final _base = DateTime.now();
 
-/// A question at [seq] that came [minutesAgo] before 9:00.
+/// A question at [seq] that came [minutesAgo] before [_base].
 Entry _ask(int seq, int minutesAgo, {int revision = 0, bool text = false}) =>
     Entry(
       seq: Int64(seq),
@@ -595,6 +600,51 @@ void main() {
       );
     }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
 
+    testWidgets("an alert about this device on the stage: no Mark as read, "
+        'a line saying where, and ⌘↩ reads nothing', (tester) async {
+      final harness = await show(tester);
+      harness.backend.deviceId = 'd7';
+      await harness.apply(
+        tester,
+        harness.backend.workspace.workspace.deepCopy()
+          ..agents.clear()
+          ..alerts.add(
+            Alert(
+              id: 'a1',
+              fromName: 'Studio',
+              title: "Lisa's iPhone can now use Studio.",
+              urgent: true,
+              deviceId: 'd7',
+              sentMs: Int64(DateTime.now().millisecondsSinceEpoch),
+            ),
+          ),
+      );
+      await focusKey(tester);
+      final stage = find.byType(FocusStage);
+      expect(
+        find.descendant(of: stage, matching: find.text(aboutThisDevice)),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(of: stage, matching: find.text('Mark as read')),
+        findsNothing,
+      );
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
+      await tester.tap(
+        find.descendant(
+          of: stage,
+          matching: find.text("Lisa's iPhone can now use Studio."),
+        ),
+      );
+      await settle(tester);
+      expect([
+        for (final message in harness.backend.sent)
+          if (message.hasReadAlerts()) ...message.readAlerts.ids,
+      ], isEmpty);
+    }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+
     testWidgets('saving the recovery key: the stage says what waits and '
         'opens the form, with no conversation to go to', (tester) async {
       final harness = await show(tester);
@@ -668,30 +718,43 @@ void main() {
       expect(harness.backend.sent.last.selectAgent.agentId, 'june');
     }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
 
-    testWidgets("the conversation's chip opens focus mode at its own "
-        'request, with no drop-down', (tester) async {
-      final harness = await show(tester);
-      await harness.apply(
-        tester,
-        harness.backend.workspace.workspace.deepCopy()
-          ..selectedAgentId = 'june',
-      );
-      await settle(tester);
-      // Nothing drops down: no chevron.
-      expect(
-        find.descendant(
-          of: find.byType(NeedsYouChip),
-          matching: find.byType(AnimatedRotation),
-        ),
-        findsNothing,
-      );
-      await tester.tap(find.text('3 need you'));
-      await settle(tester);
-      expect(find.byType(NeedsYouFocus), findsOneWidget);
-      // June's latest request, not the queue's top (Mista's).
-      expect(onStage('Question 2'), findsOneWidget);
-      expect(find.byType(NeedsYouList), findsNothing);
-    }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+    testWidgets(
+      "the conversation's chip drops the bubbles down under it, "
+      'as it always did, and focus mode stays out of it',
+      (tester) async {
+        final harness = await show(tester);
+        await harness.apply(
+          tester,
+          harness.backend.workspace.workspace.deepCopy()
+            ..selectedAgentId = 'june',
+        );
+        await settle(tester);
+        expect(
+          find.descendant(
+            of: find.byType(NeedsYouChip),
+            matching: find.byType(AnimatedRotation),
+          ),
+          findsOneWidget,
+        );
+        await tester.tap(find.text('3 need you'));
+        await settle(tester);
+        expect(find.byType(NeedsYouFocus), findsNothing);
+        expect(
+          find.descendant(
+            of: find.byType(NeedsYouChip),
+            matching: find.byType(NeedsYouList),
+          ),
+          findsOneWidget,
+        );
+        await tester.tap(find.text('3 need you'));
+        await settle(tester);
+        expect(find.byType(NeedsYouList), findsNothing);
+      },
+      variant: TargetPlatformVariant({
+        TargetPlatform.macOS,
+        TargetPlatform.iOS,
+      }),
+    );
 
     testWidgets("the View menu's Focus on Needs You goes in and out", (
       tester,
@@ -756,6 +819,58 @@ void main() {
       );
       await settle(tester);
       expect(onStage('Question 7'), findsOneWidget);
+    });
+
+    testWidgets("a seal in History: its stage says when, never Decided, "
+        'since no one decided it; a card the person answered says Decided', (
+      tester,
+    ) async {
+      final harness = await show(tester);
+      harness.backend.needsYouHistory = [
+        NeedsYouRecord(
+          kind: NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_SEALED,
+          agentId: 'june',
+          agentName: 'June',
+          seq: Int64(5),
+          title: 'June sealed passline.md',
+          agentReason: 'As agreed',
+          sealedPath: '/tmp/passline.md',
+          outcome: NeedsYouOutcome.NEEDS_YOU_OUTCOME_CHANGED,
+          decidedMs: Int64(
+            _base.subtract(const Duration(minutes: 20)).millisecondsSinceEpoch,
+          ),
+        ),
+        NeedsYouRecord(
+          kind: NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_QUESTION,
+          agentId: 'june',
+          agentName: 'June',
+          seq: Int64(4),
+          title: 'Question 4',
+          outcome: NeedsYouOutcome.NEEDS_YOU_OUTCOME_APPROVED,
+          decidedMs: Int64(_base.millisecondsSinceEpoch),
+        ),
+      ];
+      harness.backend.entriesById['june/4'] = _ask(4, 90);
+      await focusKey(tester);
+      final queue = find.byType(FocusQueue);
+      await tester.tap(
+        find.descendant(of: queue, matching: find.text('History')),
+      );
+      await settle(tester);
+      await tester.tap(
+        find.descendant(
+          of: queue,
+          matching: find.text('June sealed passline.md'),
+        ),
+      );
+      await settle(tester);
+      expect(find.textContaining('Decided'), findsNothing);
+      expect(find.textContaining(' ago'), findsWidgets);
+      await tester.tap(
+        find.descendant(of: queue, matching: find.text('Question 4')),
+      );
+      await settle(tester);
+      expect(find.textContaining('Decided'), findsOneWidget);
     });
 
     testWidgets('⌘F finds in the queue; Esc clears it, then leaves', (
@@ -1583,6 +1698,53 @@ void main() {
       expect(context, findsNothing);
     });
 
+    testWidgets('in a narrow window at a large text size, a queue row whose '
+        'wait reads long puts it on a line of its own', (tester) async {
+      tester.view.physicalSize = const Size(1440, 900);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      final harness = Harness(
+        _waiting(june: [1, 2], mista: [7])
+          ..projects.add(Project(id: 'p1', name: 'Factory'))
+          ..agents.first.projectId = 'p1',
+      );
+      harness.backend.entriesById
+        ..['june/1'] = _ask(1, 400 * 24 * 60)
+        ..['june/2'] = _ask(2, 2 * 24 * 60)
+        ..['mista/7'] = _ask(7, 0);
+      await harness.show(tester);
+      await settle(tester);
+      await focusKey(tester);
+      Finder inQueue(String text) => find.descendant(
+        of: find.byType(FocusQueue),
+        matching: find.text(text),
+      );
+      // Where the wait sits in the lines it shares with who asks: in their
+      // top half beside the name, in the bottom half under it.
+      bool under(String age) {
+        final lines = tester.getRect(
+          find
+              .ancestor(of: inQueue(age), matching: find.byType(LayoutBuilder))
+              .first,
+        );
+        debugPrint(
+          'UNDER $age ${tester.getRect(inQueue(age))} $lines ${tester.getRect(find.byType(FocusQueue))}',
+        );
+        return tester.getRect(inQueue(age)).top > lines.center.dy;
+      }
+
+      expect(under('just now'), isFalse, reason: 'beside, while it fits');
+
+      tester.view.physicalSize = const Size(820, 900);
+      tester.platformDispatcher.textScaleFactorTestValue = 1.6;
+      addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+      await settle(tester);
+      expect(tester.takeException(), isNull);
+      expect(under('just now'), isTrue);
+      expect(under('400 days ago'), isTrue);
+      expect(under('2 days ago'), isTrue);
+    });
+
     testWidgets("the header's actions turn to glyphs when the words don't fit "
         'beside who asks', (tester) async {
       await show(tester);
@@ -1632,6 +1794,86 @@ void main() {
         find.descendant(of: stage, matching: find.byType(ReviewAnswering)),
         findsNothing,
       );
+    });
+
+    testWidgets("the card's Review on the stage leaves focus mode for the "
+        'file, expanded beside its conversation, and the window takes '
+        'clicks', (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      final harness = Harness(
+        _waiting(june: [1], mista: [7])
+          ..projects.add(Project(id: 'p1', name: 'Factory'))
+          ..agents.first.projectId = 'p1'
+          ..selectedAgentId = 'mista',
+      );
+      harness.backend.appliesLayouts = true;
+      tester.view.physicalSize = const Size(1440, 900);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      addTearDown(forgetReviewChoices);
+      harness.backend.entriesById
+        ..['june/1'] = _ask(1, 30)
+        ..['mista/7'] = (_ask(7, 5)..askPerson.reviewPath = '/w/round6.png');
+      await harness.show(tester);
+      await settle(tester);
+      await focusKey(tester);
+      await tester.tap(
+        find.descendant(
+          of: find.byType(FocusStage),
+          matching: find.widgetWithText(Button, 'Review'),
+        ),
+      );
+      await settle(tester);
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.byType(NeedsYouFocus), findsNothing);
+      // The file, expanded, in sight: nothing see-through over the window.
+      final back = find.text('Back to Mista');
+      expect(back.hitTestable(), findsOneWidget);
+      for (final opacity in tester.widgetList<Opacity>(
+        find.ancestor(of: back, matching: find.byType(Opacity)),
+      )) {
+        expect(opacity.opacity, 1);
+      }
+      await tester.tap(back);
+      await settle(tester);
+      expect(back, findsNothing);
+    });
+
+    testWidgets('a file its agent opens expanded while focus mode is on '
+        'waits behind it: focus mode still takes clicks', (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      final harness = Harness(
+        _waiting(june: [1], mista: [7])..selectedAgentId = 'mista',
+      );
+      tester.view.physicalSize = const Size(1440, 900);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      harness.backend.entriesById
+        ..['june/1'] = _ask(1, 30)
+        ..['mista/7'] = _ask(7, 5);
+      await harness.show(tester);
+      await settle(tester);
+      await focusKey(tester);
+      final opened = harness.backend.workspace.workspace.deepCopy();
+      final mista = opened.agents.firstWhere((agent) => agent.id == 'mista');
+      final file = open(layoutOf(mista), '/w/round6.png');
+      mista
+        ..layout = file.root
+        ..layoutFocus = file.paneId;
+      harness.backend.workspace.apply(opened);
+      await settle(tester);
+      await tester.pump(const Duration(seconds: 1));
+      expect(onStage('Question 7').hitTestable(), findsOneWidget);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyJ);
+      await settle(tester);
+      await tester.tap(onStage('Question 1'));
+      await settle(tester);
+      // Out of focus mode, the file is there, expanded.
+      await focusKey(tester);
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.text('Back to Mista').hitTestable(), findsOneWidget);
     });
 
     testWidgets("a platform's review that answers the card takes the stage: "

@@ -214,7 +214,14 @@ async fn a_client_on_the_local_port_without_the_token_is_recorded_turned_away() 
         let mut client = Client::open(addr).await;
         let hello = v1::Hello { protocol_version: factory_protocol::PROTOCOL_VERSION, client_version: "test".into(), token: token.into(), ..Default::default() };
         client.send(v1::ClientMessage { id: 1, body: Some(Request::Hello(hello)) }).await;
-        assert!(matches!(client.receive().await.body, Some(Body::Error(_))));
+        // No token at all: an app from before the app's socket, welcomed only to
+        // Claktory's version; turned away all the same.
+        let answer = client.receive().await.body;
+        if token.is_empty() {
+            assert!(matches!(answer, Some(Body::Welcome(_))), "{answer:?}");
+        } else {
+            assert!(matches!(answer, Some(Body::Error(_))), "{answer:?}");
+        }
     }
     let turned = || {
         let mut rows = from(&dir, "backend").into_iter().filter(|row| row.4 == "turned_away").map(|row| row.5).collect::<Vec<_>>();
@@ -223,4 +230,44 @@ async fn a_client_on_the_local_port_without_the_token_is_recorded_turned_away() 
     };
     until(|| turned().len() == 3).await;
     assert_eq!(turned(), ["via=port why=no_token n=1", "via=port why=wrong_token n=1", "via=port why=wrong_token n=1"]);
+}
+
+/// The app's socket removed or replaced by a program running as this user:
+/// the backend notices within seconds, records it, tells the connected
+/// apps and listens there again, so the app reaches it again.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_apps_socket_taken_from_claktory_is_noticed_told_and_taken_back() {
+    use std::os::unix::fs::MetadataExt;
+    let dir = temp_dir();
+    let (addr, factory) = start(&dir).await;
+    let (mut mac, _, _) = Client::connect(addr).await;
+    mac.ok(set(Some(true), false, "", "")).await;
+    let path = factoryd::authority::app_socket_path(&factory);
+    // Another program's socket in its place.
+    std::fs::remove_file(&path).expect("remove");
+    let squatter = std::os::unix::net::UnixListener::bind(&path).expect("bind");
+    let taken = std::fs::symlink_metadata(&path).expect("taken").ino();
+    for _ in 0..400 {
+        if std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.ino() != taken) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    let back = std::fs::symlink_metadata(&path).expect("back").ino();
+    assert_ne!(back, taken, "listening there again");
+    drop(squatter);
+    // Told to the app that's connected, and recorded.
+    let notify = mac
+        .wait_for(|body| match body {
+            Body::Notify(notify) if notify.collapse == "app-socket" => Some(notify.clone()),
+            _ => None,
+        })
+        .await;
+    assert!(notify.title.starts_with("A program on this Mac tried to stand in for"), "{}", notify.title);
+    until(|| from(&dir, "backend").iter().any(|row| row.4 == "app_socket_taken" && row.5 == "why=replaced")).await;
+    // The app's socket answers again: this test isn't the app, so it's
+    // turned away, by this Claktory.
+    let stream = tokio::net::UnixStream::connect(&path).await.expect("connects");
+    drop(stream);
 }

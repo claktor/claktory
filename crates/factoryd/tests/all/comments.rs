@@ -415,7 +415,7 @@ async fn suggested_changes_are_accepted_or_rejected_and_the_agent_hears_which() 
         other => panic!("expected an error, got {other:?}"),
     }
     let before = view.entries.len();
-    // With the person's comment, as theirs (#289).
+    // With the person's comment, as theirs.
     let reject = v1::DecideSuggestion { thread_id: "t-2".into(), accept: false, comment: "Keep the words.".into(), ..Default::default() };
     assert!(matches!(apply_request(&mut client, &mut view, client_message::Body::DecideSuggestion(reject)).await, Body::Ack(_)));
     assert_eq!(std::fs::read_to_string(&path).expect("read"), "one\n2\nfour\n");
@@ -473,7 +473,7 @@ async fn suggested_changes_are_accepted_or_rejected_and_the_agent_hears_which() 
         other => panic!("expected an error, got {other:?}"),
     }
 
-    // Submit (#370): a comment instead of Accept or Reject is a reply on
+    // Submit: a comment instead of Accept or Reject is a reply on
     // the thread, sent at once; the suggestion stays open, the file as it is.
     call(&mut client, &mut view, "writer", r#"call comments_suggest {"path":"notes.txt","quote":{"exact":"uno"},"replacement":"one"}"#)
         .await;
@@ -646,7 +646,7 @@ async fn a_moment_of_a_video_is_told_in_words() {
     assert_eq!(anchors, [AnchorState::Anchored, AnchorState::Outdated], "the one made on an earlier version stays so");
 }
 
-/// #540: a Markdown file shown in a pane is watched with the pictures it
+/// A Markdown file shown in a pane is watched with the pictures it
 /// shows in place, so a picture that changes while the file doesn't is read
 /// again (FileChanged for the picture's own path).
 #[tokio::test]

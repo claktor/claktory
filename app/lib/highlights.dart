@@ -14,8 +14,9 @@ import 'state.dart';
 ///
 /// A glow is for a target key: `agent:<id>`, `project:<id>`,
 /// `folder:<project id>/<folder id>`, `checklist_item:<agent id>#<n>`,
-/// `extension:<agent id>/<extension id>`, `pane:<agent id>:<pane id>` (a
-/// viewer beside an agent's conversation), `settings:` or `marketplace:`.
+/// `monitor:<agent id>#<n>`, `extension:<agent id>/<extension id>`,
+/// `pane:<agent id>:<pane id>` (a viewer beside an agent's conversation),
+/// `settings:` or `marketplace:`.
 /// Each [Glow] widget says which keys it shows, so a target that isn't on
 /// screen (folded away, say) glows on what stands for it.
 ///

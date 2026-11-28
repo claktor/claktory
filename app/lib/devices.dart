@@ -32,7 +32,7 @@ import 'scan_code.dart';
 import 'scope.dart';
 import 'tunnel_client.dart';
 import 'settings_view.dart';
-import 'setup.dart' show downloadMacUrl;
+import 'setup.dart' show downloadMacUrl, thisComputer;
 import 'usage.dart';
 import 'tell_rivet.dart';
 import 'visible_codes.dart' show nameInText;
@@ -114,7 +114,7 @@ class _DevicesSettingsState extends State<DevicesSettings>
             ),
           ),
         // macOS 15 asks before letting the backend take connections from
-        // this network; denied, devices at home go through a relay (#543).
+        // this network; denied, devices at home go through a relay.
         if (backendOnMac(widget.workspace)) ...[
           const SizedBox(height: Space.m),
           Text(
@@ -135,7 +135,7 @@ class _DevicesSettingsState extends State<DevicesSettings>
 }
 
 /// Settings → Devices on a Claktory that runs on a Mac: what lets devices on
-/// the same network connect straight to it (#543).
+/// the same network connect straight to it.
 String localNetworkNote(String mac) =>
     'To let your phone, iPad and other computers on this network connect '
     'faster, turn on Claktory Agents in System Settings → Privacy & '
@@ -211,14 +211,13 @@ class _DeviceRowState extends State<_DeviceRow> with SettingRequests {
         : DateTime.fromMillisecondsSinceEpoch(device.confirmByMs.toInt());
     final late = confirmBy != null && !confirmBy.isAfter(widget.now);
     // On a phone two buttons don't fit beside the words: they go under them,
-    // as they do on any device at large text sizes (an iPad's left the
-    // words a sliver, Zucchero's row 133).
+    // as they do on any device at large text sizes (an iPad's left the words
+    // a sliver).
     final stacked =
         largeText(context) || (isPhoneLayout(context) && confirmBy != null);
     final actions = [
       // Confirming a device is the owner's, this one too, is an approval
-      // made on a phone or Mac (ConfirmDevice, Fugo 52031;
-      // approve_elsewhere.dart).
+      // made on a phone or Mac (ConfirmDevice; approve_elsewhere.dart).
       if (confirmBy != null && !approvesElsewhere)
         Button(
           label: widget.thisDevice ? 'Confirm…' : "Confirm it's yours",
@@ -230,7 +229,7 @@ class _DeviceRowState extends State<_DeviceRow> with SettingRequests {
               : () => run(() => AppScope.of(context).confirmDevice(device.id)),
         ),
       // Removing a device could leave the person no phone or Mac to approve
-      // with (Fugo 51974): done there, never on Windows.
+      // with: done there, never on Windows.
       if (!approvesElsewhere) Button(label: 'Remove', onPressed: _unpair),
     ];
     return Container(
@@ -353,7 +352,7 @@ class PairDeviceForm extends StatefulWidget {
 class _PairDeviceFormState extends State<PairDeviceForm> {
   final _name = TextEditingController();
 
-  /// The number typed off the device's screen to allow it (#352 P4).
+  /// The number typed off the device's screen to allow it.
   final _number = TextEditingController();
 
   /// What the device is, as the person says: a phone or tablet scans its
@@ -445,9 +444,9 @@ class _PairDeviceFormState extends State<PairDeviceForm> {
                 waiting != null && !_deciding && isDeviceNumber(_number.text);
             return FormFrame(
               // The name the device gave itself: what reorders text shows
-              // by its code (proseCodes, Fugo).
+              // by its code (proseCodes).
               title: 'Allow ${nameInText(device.name)} to connect?',
-              // Typed off its screen, never shown here (#352 P4): only
+              // Typed off its screen, never shown here: only
               // someone who can see the device lets it in.
               body: 'To allow it, type the number its screen shows.',
               error: _error,
@@ -631,7 +630,7 @@ PairingWay pairingWayOf(DeviceKind kind) => switch (kind) {
   _ => PairingWay.either,
 };
 
-/// What a pairing code's QR code holds (#352 P6): its [link]
+/// What a pairing code's QR code holds: its [link]
 /// (PairingCode.link), which a phone's camera opens in Claktory or its
 /// store, when it's exactly [code] as a link; else [code] itself.
 String pairingQrText(String code, String link) =>
@@ -713,7 +712,7 @@ class _PairingInstructionsState extends State<PairingInstructions> {
       'In Claktory on $device, click Add a Claktory and paste this code.',
       style: body,
     );
-    // Where to get the app first (#352 P6): a Camera can't open the code
+    // Where to get the app first: a Camera can't open the code
     // without it, and the code runs out meanwhile.
     final getApp = Padding(
       padding: const EdgeInsets.only(top: Space.s),
@@ -773,7 +772,7 @@ final androidAppUrl = Uri.parse('https://claktory.com/android');
 /// Opens an app's page; tests replace it.
 Future<bool> Function(Uri url) openAppPage = launchUrl;
 
-/// "Don't have the app?", with where to get it (#352 P6): for iPhone and
+/// "Don't have the app?", with where to get it: for iPhone and
 /// iPad, and Android, or for a Mac when the new device is a [computer].
 class GetTheApp extends StatelessWidget {
   const GetTheApp({super.key, this.computer = false});
@@ -1004,7 +1003,7 @@ class _QrPainter extends CustomPainter {
   bool shouldRepaint(_QrPainter old) => old.modules != modules;
 }
 
-/// Add a Claktory (Lucy's devices-signin.md §3): the Claktories on the
+/// Add a Claktory: the Claktories on the
 /// person's account first, each a row that asks in place, and a code one
 /// quiet link away, never both at once. Opened from + at the rail's foot,
 /// and at the code ([code]) wherever a new code is the way back. The
@@ -1014,8 +1013,7 @@ class FactoryChooser extends StatefulWidget implements ModalWidth {
 
   final VoidCallback close;
 
-  /// A form dialog of at most 460 (devices-signin.md §8.8; Abbacchio's
-  /// row 1710).
+  /// A form dialog of at most 460.
   @override
   double get modalWidth => 460;
 
@@ -1029,8 +1027,7 @@ class FactoryChooser extends StatefulWidget implements ModalWidth {
 class _FactoryChooserState extends State<FactoryChooser> {
   final _code = TextEditingController();
 
-  /// Whether Scan code shows beside the field: where there's a camera
-  /// (friend bug #2).
+  /// Whether Scan code shows beside the field: where there's a camera.
   var _canScan = false;
 
   /// With a code, rather than from the account: never on Windows, which
@@ -1038,7 +1035,7 @@ class _FactoryChooserState extends State<FactoryChooser> {
   late var _withCode = widget.code && !approvesElsewhere;
 
   /// On an iPad, iPhone or Android device with a camera, a code is
-  /// scanned first (§7: Scan code is the primary); Paste code brings the
+  /// scanned first (Scan code is the primary); Paste code brings the
   /// field.
   var _pasting = false;
 
@@ -1084,7 +1081,7 @@ class _FactoryChooserState extends State<FactoryChooser> {
   }
 
   /// A code connects only once the person says so, as every way a code
-  /// comes in does (Fugo): the check, in this dialog, never a second one.
+  /// comes in does: the check, in this dialog, never a second one.
   Future<void> _check(RemoteFactory target) async {
     if (_lookingUp) return;
     setState(() => _lookingUp = true);
@@ -1115,7 +1112,7 @@ class _FactoryChooserState extends State<FactoryChooser> {
         claktories?.localBackend ?? scope.backend.localBackend;
     final setUpHere = !hasLocalBackend && (claktories?.canChooseLocal ?? false)
         ? QuietLink(
-            label: 'Set up Claktory on this Mac',
+            label: 'Set up Claktory on $thisComputer',
             onTap: () {
               widget.close();
               claktories!.setLocalBackend(true);
@@ -1156,7 +1153,7 @@ class _FactoryChooserState extends State<FactoryChooser> {
             YourClaktories(
               hideConnected: true,
               // A Mac with its own Claktory is signed in through it, which
-              // Settings → Account says (§6).
+              // Settings → Account says.
               accountLine: !hasLocalBackend,
               onConnect: (target) => unawaited(_connect(target)),
               onAsking: (asking) => setState(() => _asking = asking),
@@ -1225,7 +1222,7 @@ class _FactoryChooserState extends State<FactoryChooser> {
                   pasted,
                   device: thisDeviceKind,
                   // An iPhone's or iPad's Claktory is on a Mac, as the
-                  // phone's pairing screen says (Zucchero's row 219).
+                  // phone's pairing screen says.
                   where: defaultTargetPlatform == TargetPlatform.iOS
                       ? onMac
                       : whereItRuns,
@@ -1274,9 +1271,9 @@ class _FactoryChooserState extends State<FactoryChooser> {
 }
 
 /// Add a Claktory's frame, as [FormFrame] lays a form out (Cmd+Enter
-/// presses [primary]), for its states: none until a row is chosen (§3:
-/// the row is the button), no Cancel while a row asks, and [quiet] links
-/// at the left of the buttons, wrapping under them where they don't fit.
+/// presses [primary]), for its states: none until a row is chosen (the
+/// row is the button), no Cancel while a row asks, and [quiet] links at
+/// the left of the buttons, wrapping under them where they don't fit.
 class _AddFrame extends StatelessWidget {
   const _AddFrame({
     required this.title,

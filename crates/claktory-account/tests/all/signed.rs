@@ -83,7 +83,11 @@ async fn a_check_in_updates_what_the_service_knows_and_names_the_epoch() {
             epoch: 1,
             periods_recorded: 0,
             periods_ignored: 0,
-            recovery_key: None
+            recovery_key: None,
+            authorizations_waiting: Vec::new(),
+            moves_waiting: Vec::new(),
+            removed_device_keys: Vec::new(),
+            removed_cursor: None,
         }
     );
 

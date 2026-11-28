@@ -534,8 +534,9 @@ pub struct Factory {
     unarchived: tokio::sync::Notify,
     /// The app's token on Windows for this start of the backend
     /// (`windows::app_token`), in memory only and never logged; none when it
-    /// couldn't be written (`connection::app_token_matches`).
-    #[cfg(windows)]
+    /// couldn't be written (`connection::app_token_matches`). Test builds
+    /// have it everywhere, for the tests of what it may do.
+    #[cfg(any(windows, feature = "test-hooks"))]
     pub(crate) app_token: Mutex<Option<zeroize::Zeroizing<String>>>,
 }
 
@@ -677,6 +678,10 @@ pub(crate) struct Runtime {
     /// Its conversation is being taken back or switched (`crate::fork`):
     /// no run takes what's queued until that's done.
     pub(crate) forking: bool,
+    /// It asked to start over (`extensions::start_over`), in the
+    /// conversation of this epoch, and why: its run ends with that step,
+    /// and its conversation is cleared before it takes anything queued.
+    pub(crate) start_over: Option<(u64, String)>,
     /// Cancels the run in progress; taken when the person stops it.
     pub(crate) abort: Option<AbortHandle>,
     /// The run in progress in the store.
@@ -813,13 +818,15 @@ impl Factory {
     pub async fn open(home: Home, models: Arc<dyn Models>) -> Result<Arc<Factory>, OpenError> {
         tokio::fs::create_dir_all(home.workspace()).await?;
         // Only this user may open the home, and the loopback port wants the
-        // local pairing code's token from the first client on.
+        // tool token from the first client on.
         let local = home.clone();
         match tokio::task::spawn_blocking(move || crate::remote::prepare_local(&local)).await {
             Ok(Ok(())) => {}
-            Ok(Err(error)) => tracing::error!(%error, "could not write this machine's pairing code"),
-            Err(error) => tracing::error!(%error, "could not write this machine's pairing code"),
+            Ok(Err(error)) => tracing::error!(%error, "could not ready who may connect from this computer"),
+            Err(error) => tracing::error!(%error, "could not ready who may connect from this computer"),
         }
+        // The app's socket, there before anyone's served.
+        crate::authority::open(&home);
         let mut created = false;
         let mut dropped_browsers = Vec::new();
         let (config, config_error) = match tokio::fs::read_to_string(home.config_path()).await {
@@ -996,7 +1003,7 @@ impl Factory {
             watches: crate::watch::Hub::default(),
             diagnostics: crate::diagnostics::Recorder::default(),
             unarchived: tokio::sync::Notify::new(),
-            #[cfg(windows)]
+            #[cfg(any(windows, feature = "test-hooks"))]
             app_token: Mutex::new(None),
             key_color,
             key_seed,
@@ -1267,6 +1274,7 @@ impl Factory {
                     path: path.clone(),
                     folders: Vec::new(),
                     archived: false,
+                    brief: String::new(),
                     other: Default::default(),
                 });
                 Ok(path)
@@ -1280,16 +1288,11 @@ impl Factory {
         Ok(())
     }
 
-    /// Renames a project, or archives it or brings it back (`archived`).
-    /// UpdateProject: `before` moves it in the sidebar's order (friend bug
-    /// #12), before that project, or last with "".
-    pub async fn update_project(
-        &self,
-        id: &str,
-        name: Option<&str>,
-        archived: Option<bool>,
-        before: Option<&str>,
-    ) -> Result<(), RequestError> {
+    /// Renames a project, archives it or brings it back (`archived`), or
+    /// sets its brief. UpdateProject: `before` moves it in the sidebar's
+    /// order, before that project, or last with "".
+    pub async fn update_project(&self, request: &v1::UpdateProject) -> Result<(), RequestError> {
+        let v1::UpdateProject { project_id: id, name, archived, before_id: before, brief } = request;
         self.edit_config(|config| {
             if config.project(id).is_none() {
                 return Err(RequestError::UnknownProject(id.to_owned()));
@@ -1297,14 +1300,17 @@ impl Factory {
             if let Some(before) = before {
                 crate::arrange::move_project(&mut config.projects, id, before)?;
             }
-            let Some(project) = config.projects.iter_mut().find(|project| project.id == id) else {
+            let Some(project) = config.projects.iter_mut().find(|project| project.id == *id) else {
                 return Err(RequestError::UnknownProject(id.to_owned()));
             };
             if let Some(name) = name {
                 project.name = name.trim().to_owned();
             }
             if let Some(archived) = archived {
-                project.archived = archived;
+                project.archived = *archived;
+            }
+            if let Some(brief) = brief {
+                project.brief = brief.trim().to_owned();
             }
             Ok(())
         })
@@ -2168,7 +2174,8 @@ impl Factory {
         if let Err(error) = crate::extensions::ask::restore(&self.store, &self.command_runs, id, &mut transcript) {
             tracing::error!(agent = %id, %error, "could not read its questions; answered ones show as waiting");
         }
-        if let Err(error) = crate::extensions::devices::restore(&self.store, id, &mut transcript) {
+        let admin = self.lock().config.agent(id).is_some_and(crate::proposals::is_admin);
+        if let Err(error) = crate::extensions::devices::restore(&self.store, id, admin, &mut transcript) {
             tracing::error!(agent = %id, %error, "could not read the devices it adds; they show as waiting");
         }
         if let Err(error) = crate::pipes::start::restore(&self.store, id, &mut transcript) {
@@ -2251,7 +2258,7 @@ impl Factory {
             || connects.iter().any(|proposal| proposal.state() == v1::ConnectProposalState::Pending)
             || crate::proposals::pending_of(&self.store, id)
             || crate::extensions::ask::pending_of(&self.store, id)
-            || crate::extensions::devices::waiting_of(&self.store, id)
+            || crate::extensions::devices::waiting_of(&self.store, id, self.lock().config.agent(id).is_some_and(crate::proposals::is_admin))
             || crate::pipes::start::waiting_of(&self.store, id)
             || crate::user_apps::pending_of(&self.store, id)
             || crate::apps::access::pending_of(&self.store, id)
@@ -2938,6 +2945,7 @@ impl Factory {
                 archived: project.archived,
                 report_forward: crate::pipes::handoff::project_view(self, &project.id),
                 collapsed: inner.state.collapsed_projects.contains(&project.id),
+                brief: project.brief.clone(),
             });
         }
         let mut agents = Vec::new();
@@ -3054,28 +3062,20 @@ impl Factory {
             vault.locked_why = crate::vault::signins::locked_why(&self.vault, problem);
         }
         // Given to a contained agent, a secret is out of its commands (it has
-        // none): one used for errands may only have it filled in Claktory's
-        // browser, on its sites; one limited to a pipe can't use it at all.
+        // none), so it can't use it at all; the warning says why.
         for secret in &mut vault.secrets {
-            let fillable = !secret.sites.is_empty() && !secret.ask_each_time && secret.connection.is_none();
-            // Only what stands in the way (Abbacchio 1767).
-            let to_fill = match (secret.connection.is_some(), secret.sites.is_empty(), secret.ask_each_time) {
-                (true, _, _) => ": the browser never fills in a connected service.",
-                (false, true, true) => ". To let it fill this in, add sites to the secret and turn off Ask each time.",
-                (false, true, false) => ". To let it fill this in, add sites to the secret.",
-                (false, false, _) => ". To let it fill this in, turn off Ask each time.",
-            };
             for grant in &secret.grants {
                 if self.pipes.contained(&grant.agent_id) {
                     let name = config.agent(&grant.agent_id).map_or(grant.agent_id.as_str(), |agent| agent.name.as_str());
-                    secret.warnings.push(match (self.pipes.errand_agent(&grant.agent_id), fillable) {
-                        (true, true) => format!("While {name} runs errands, it can fill this in only on the secret's sites."),
-                        (true, false) => format!("While {name} runs errands, it can't use this{to_fill}"),
-                        (false, _) => format!("{name} can't use it while it's limited to a pipe."),
+                    secret.warnings.push(if self.pipes.curator(&grant.agent_id) {
+                        format!("{name} can't use it while it reads reports.")
+                    } else {
+                        format!("{name} can't use it while it's limited to a pipe.")
                     });
                 }
             }
         }
+
         if vault.exists {
             vault.connectors = self.broker.catalog();
             vault.flows = self.broker.flows();
@@ -3138,6 +3138,7 @@ impl Factory {
             open_panel: inner.state.selected_agent.as_deref().and_then(|agent| open_panel(inner, agent)).unwrap_or_default().to_owned(),
             highlights: config.highlights,
             attribution: config.attribution,
+            device_activity: false,
             selected_agent_id: inner.state.selected_agent.clone().unwrap_or_default(),
             config_error: inner.config_error.clone().unwrap_or_default(),
             providers: inner

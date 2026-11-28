@@ -73,6 +73,20 @@
     return left > 0 && top > 0 && r.left + scrollX < document.documentElement.scrollWidth;
   }
 
+  /** A wrapper with no box of its own that shows what's in it: display:
+   *  contents, or no size with its children overflowing it where they
+   *  show. Its children are judged one by one. One that clips them, or is
+   *  hidden, hides them. */
+  function boxless(el) {
+    if (el.closest('[aria-hidden=true],[hidden],[inert]')) return false;
+    const style = getComputedStyle(el);
+    // It has no box, so checkVisibility says no: what's in it is judged.
+    if (style.display === 'contents') return true;
+    if (el.checkVisibility && !el.checkVisibility({checkOpacity: true, checkVisibilityCSS: true})) return false;
+    const r = el.getBoundingClientRect();
+    return (r.width <= 0 || r.height <= 0) && style.overflowX === 'visible' && style.overflowY === 'visible';
+  }
+
   function fileLabel(el) {
     return el.tagName === 'LABEL' && el.control instanceof HTMLInputElement && el.control.type === 'file';
   }
@@ -437,13 +451,26 @@
       const r = root.getBoundingClientRect();
       const area = Math.max(0, Math.min(r.right, innerWidth) - Math.max(r.left, 0)) * Math.max(0, Math.min(r.bottom, innerHeight) - Math.max(r.top, 0));
       const covers = area / Math.max(1, innerWidth * innerHeight);
+      // A dialog to sign in or write in (a password, a post, a message) is
+      // where the work is, not something in its way.
+      if (writes(root, 'input[type=password], textarea, [contenteditable=""], [contenteditable=true], [contenteditable=plaintext-only]')) continue;
       let kind = null;
-      if (COOKIE_WORDS.test(textOf(root).slice(0, 4000)) && pressables(root).length) kind = 'cookie notice';
+      // A cookie notice asks nothing to be typed.
+      if (COOKIE_WORDS.test(textOf(root).slice(0, 4000)) && pressables(root).length && !writes(root, 'input')) kind = 'cookie notice';
       else if (covers >= 0.3 || (modal(root) && covers > 0.02) || (blocked && covers > 0.1)) kind = 'pop-up';
       if (kind) found.push({root, kind, covers, shown: count});
     }
     return found;
   }
+  /** Whether `root` holds a field matching `selector` that a person writes
+   *  in and that shows (never a box to tick, a switch or a button). */
+  function writes(root, selector) {
+    return deepQuery(selector, root).some((field) => {
+      if (field instanceof HTMLInputElement && ['checkbox', 'radio', 'button', 'submit', 'reset', 'hidden', 'range', 'color', 'file', 'image'].includes((field.type || '').toLowerCase())) return false;
+      return visible(field);
+    });
+  }
+
   // The overlay `el` is in, if any, among `covering`.
   const overlayOf = (el, covering) => covering.find((o) => inside(o.root, el));
 
@@ -586,7 +613,7 @@
           if (blocks.includes(node) || pastCutoff(node)) return NodeFilter.FILTER_REJECT;
           if (node.shadowRoot && !errand()) notes.open_shadow_roots++;
           else if (node instanceof HTMLElement && chrome.dom && chrome.dom.openOrClosedShadowRoot(node)) notes.closed_shadow_roots++;
-          if (!visible(node)) return NodeFilter.FILTER_REJECT;
+          if (!visible(node)) return boxless(node) ? NodeFilter.FILTER_SKIP : NodeFilter.FILTER_REJECT;
           // What's typed into an editable region is a value: never read.
           if (node.isContentEditable && node.getAttribute('contenteditable') !== null) return NodeFilter.FILTER_REJECT;
           return NodeFilter.FILTER_SKIP;
@@ -890,6 +917,22 @@
 
   // Where the wheel turns: (x, y) if it still may, or another such place;
   // and how far the page is scrolled and can be.
+  // How far down the page scrolls to bring `id` to the middle of the
+  // screen, out from under a sticky ad or bar: 0 when it's on screen and
+  // nothing covers it.
+  function clearSpot(id) {
+    const t = known(id);
+    if (t.error) return t;
+    if (!visible(t.el)) return {error: 'stale_target', why: 'hidden'};
+    const r = t.el.getBoundingClientRect();
+    const x = Math.min(Math.max(r.left + r.width / 2, 0), innerWidth - 1), y = r.top + r.height / 2;
+    if (inViewport(r) && y >= 0 && y < innerHeight) {
+      const top = fromPoint(x, y);
+      if (top && (top === t.el || inside(t.el, top))) return {by: 0};
+    }
+    return {by: Math.round(y - innerHeight / 2)};
+  }
+
   function wheelSpot(x, y) {
     const where = {scroll_y: Math.round(scrollY), scroll_max: Math.max(0, Math.round(document.documentElement.scrollHeight - innerHeight)), view_width: innerWidth, view_height: innerHeight};
     if (Number.isFinite(x) && Number.isFinite(y) && wheelable(x, y)) return Object.assign(where, {x, y});
@@ -974,6 +1017,7 @@
     if (cmd.op === 'focused' && typeof cmd.target === 'string') return focused(cmd.target, cmd.frame === true);
     if (cmd.op === 'typed' && typeof cmd.target === 'string' && typeof cmd.text === 'string') return typed(cmd.target, cmd.text);
     if (cmd.op === 'wheel_spot') return wheelSpot(cmd.x, cmd.y);
+    if (cmd.op === 'clear_spot' && typeof cmd.target === 'string') return clearSpot(cmd.target);
     return null;
   }
 

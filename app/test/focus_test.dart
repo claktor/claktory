@@ -340,6 +340,7 @@ void main() {
           received: 0,
           linkReceived: 0,
           dialTimeoutMs: 0,
+          dialMs: 0,
           reach: TunnelReach.none,
         );
         await tester.tap(find.text('Update'));

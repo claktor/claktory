@@ -2,9 +2,11 @@
 //! computer would. Search goes to free public engines (see `engines`)
 //! with no account or key; every request looks like one real browser (its
 //! TLS handshake, HTTP/2 settings and headers, from `primp`), is paced for
-//! the whole Factory, and a block is never retried but cooled down. Pages
-//! are read as Markdown without a model call.
+//! the whole Factory, and a block is never retried but cooled down. When
+//! the person has added a Brave Search API key to the vault, that's asked
+//! first (`brave_api`). Pages are read as Markdown without a model call.
 
+mod brave_api;
 mod convert;
 mod engines;
 mod fence;
@@ -165,7 +167,8 @@ async fn run_search(factory: Arc<Factory>, agent: String, args: serde_json::Valu
     };
     let options =
         search::Options { domains: search::canonical_domains(args.domains), recency, limit: args.limit.unwrap_or(8).clamp(1, 10) };
-    let (answers, blocked) = factory.web.search.search(&agent, &queries, &options).await;
+    let key = factory.vault.own_value(&brave_api::VARIABLES).map(Arc::new);
+    let (answers, blocked) = factory.web.search.search(&agent, &queries, &options, key).await;
     let person = factory.lock().config.person().to_owned();
     let text = searched(&answers, &blocked, &person);
     if answers.iter().all(|answer| answer.unavailable.is_some()) {

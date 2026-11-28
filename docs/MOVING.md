@@ -35,8 +35,8 @@ new computer. Your devices find it there by themselves.
 If the terminal side stops (Ctrl-C, a dropped connection), nothing is lost:
 run the same install command again and it carries on — a move already under
 way resumes where it stopped; a code nobody had used yet is replaced by a
-fresh one. From a terminal on the old computer, `factoryd move CODE` does
-what the app's Move steps do.
+fresh one. Only you start a move, in the app: `factoryd move` in a
+terminal is refused, since a terminal can't tell you from an agent.
 
 ### Letting Rivet set up the new computer
 

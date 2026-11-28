@@ -1,0 +1,84 @@
+id = "calendar"
+name = "Calendar"
+version = "0.1.2"
+world = "claktory:app@1.1"
+publisher = "claktory"
+description = "Your agents' schedules, deadlines and long-running work in one calendar. Ask an agent to change anything on it."
+icon = "calendar"
+storage_mb = 10
+memory_mb = 32
+instructions = """
+Calendar shows the person everything time-based, on every device: your agents' monitors (their next fires, and what already fired), checklist items' dates (when a blocked one is checked again, a parked one resumes, the person is asked again), background tasks and runs over 30 minutes, and events agents place (a release, a deadline, a launch, a QA pass). The person reads it and opens an entry where it lives; to change something, they ask an agent.
+
+- calendar_list shows what's on in a range (the next 7 days unless you say; at most 62), derived entries and placed events, one line each with its id. calendar_get shows one.
+- Times are the Mac's clock: "2026-12-03 14:00" (or with an offset, "2026-12-03 14:00+01:00"); "2026-12-03" alone is a date (an all-day event); "now+2d" works too. Answers write times with their offset.
+- Place an event with calendar_put {event: {title, start, end?, all_day?, calendar?, repeat?, note?, deadline?, link?}}: repeat is {every: day|week|month, interval?, on?: [mo…su] (with week), until? or count?}; deadline: true marks a point that matters; link {agent, item? | monitor? | task?} makes it open there, and must exist. To change one, send it whole with its id and the _rev you read; calendar_move {id, start, end?} moves it, keeping its length; calendar_delete removes it. Every change keeps the version before (calendar_get with previous: true).
+- Monitors, checklist items, tasks and runs only show here: change them where they live (monitors_change, checklist_update), never with Calendar's tools.
+- A reminder that should wake someone is a monitor, never a Calendar event: Calendar never wakes an agent or notifies the person. Asked to "remind me Friday", add a monitor for then whose prompt says to notify_person; it shows on the calendar by itself. If you place an event and also set a monitor for it, link the event to the monitor: if someone else moves or deletes the event, Calendar tells you (event "moved"), so you can move the monitor too.
+- You see and change your own project's placed events (admin agents all of them). What an agent places after reading the web or a pipe is marked as from outside.
+- calendar_calendars lists the calendars events can go in (such as Releases) and makes one ({put: {name, color?}}); calendar_prefs sets the week's first day, the kinds of entries shown (hidden_layers: monitors, checklists, tasks, events) and the view it opens on, the same on every device.
+"""
+
+[[scopes]]
+id = "view"
+label = "See the calendar"
+tools = ["calendar_list", "calendar_get"]
+reads_data = true
+
+[[scopes]]
+id = "edit"
+label = "Add and change things on the calendar"
+tools = ["calendar_list", "calendar_get", "calendar_put", "calendar_move", "calendar_delete", "calendar_calendars", "calendar_prefs"]
+reads_data = true
+
+[[events]]
+kind = "moved"
+scope = "edit"
+label = "Someone moved or deleted an event you linked to your monitor"
+
+[[tools]]
+name = "calendar_list"
+description = "What's on the calendar in a range: monitors' fires, checklist items' dates, tasks, long runs and placed events, one line each with its id, in the Mac's time."
+parameters = { type = "object", properties = { from = { type = "string", description = "\"2026-12-03\", \"2026-12-03 14:00\", \"now-1d\"; now if left out." }, to = { type = "string", description = "Its end (a date includes that day); 7 days after from if left out, at most 62." }, layers = { type = "array", items = { type = "string", enum = ["monitors", "checklists", "tasks", "events"] }, description = "Only these kinds; all if left out." }, agent = { type = "string", description = "Only this agent's entries (its id)." } } }
+
+[[tools]]
+name = "calendar_get"
+description = "One placed event whole, with its _rev, or its previous version; for a monitor, item, task or run, where it comes from."
+parameters = { type = "object", required = ["id"], properties = { id = { type = "string", description = "As calendar_list gives it: e3 for a placed event." }, previous = { type = "boolean", description = "The version before its last change, or before it was deleted." } } }
+
+[[tools]]
+name = "calendar_put"
+description = "Places an event, or changes one whole (with its id and the _rev you read). Keeps the version it replaces."
+parameters = { type = "object", required = ["event"], properties = { event = { type = "object", required = ["title", "start"], properties = { id = { type = "string" }, _rev = { type = "integer" }, title = { type = "string" }, start = { type = "string", description = "\"2026-12-03 14:00\" (the Mac's time, or with an offset), or \"2026-12-03\" for an all-day event." }, end = { type = "string", description = "Its end; for an all-day event, its last day." }, all_day = { type = "boolean" }, calendar = { type = "string", description = "A calendar's id (calendar_calendars)." }, repeat = { type = "object", required = ["every"], properties = { every = { type = "string", enum = ["day", "week", "month"] }, interval = { type = "integer", minimum = 1, maximum = 99 }, on = { type = "array", items = { type = "string", enum = ["mo", "tu", "we", "th", "fr", "sa", "su"] } }, until = { type = "string" }, count = { type = "integer", minimum = 1, maximum = 1000 } } }, note = { type = "string" }, deadline = { type = "boolean", description = "A point that matters, drawn with a flag." }, link = { type = "object", required = ["agent"], description = "Where it opens: an agent, or its item, monitor or task.", properties = { agent = { type = "string" }, item = { type = "integer" }, monitor = { type = "string", description = "Such as m3." }, task = { type = "string", description = "Such as task-3." } } } } } } }
+
+[[tools]]
+name = "calendar_move"
+description = "Moves a placed event, keeping its length unless you give end."
+parameters = { type = "object", required = ["id", "start"], properties = { id = { type = "string" }, start = { type = "string" }, end = { type = "string" }, _rev = { type = "integer", description = "The _rev you read, to be sure no one changed it since." } } }
+
+[[tools]]
+name = "calendar_delete"
+description = "Deletes a placed event. Its last version is kept: calendar_get with previous: true, then calendar_put, brings it back."
+parameters = { type = "object", required = ["id"], properties = { id = { type = "string" } } }
+
+[[tools]]
+name = "calendar_calendars"
+description = "The calendars placed events can go in, such as Releases or Deadlines; makes, renames or deletes one."
+parameters = { type = "object", properties = { put = { type = "object", required = ["name"], properties = { id = { type = "string" }, name = { type = "string" }, color = { type = "string", enum = ["green", "yellow", "blue", "orange", "red", "purple", "dark-green", "dark-yellow", "dark-blue", "dark-orange", "dark-red", "dark-purple", "text"] } } }, delete = { type = "string", description = "A calendar's id; refused while events are in it." } } }
+
+[[tools]]
+name = "calendar_prefs"
+description = "How the person's calendar is arranged on every device: the week's first day, the kinds of entries hidden, the view it opens on. Leave everything out to read them."
+parameters = { type = "object", properties = { week_starts = { type = "string", enum = ["", "monday", "sunday", "saturday"], description = "\"\" for each device's own." }, hidden_layers = { type = "array", items = { type = "string", enum = ["monitors", "checklists", "tasks", "events"] } }, view = { type = "string", enum = ["", "day", "week", "agenda"] } } }
+
+[[views]]
+id = "main"
+title = "Calendar"
+
+[[data]]
+kind = "schedule"
+reason = "To show your agents' monitors and checklist items by name, with their schedules and dates, and each agent's project."
+
+[[data]]
+kind = "activity"
+reason = "To show when your agents' monitors fire and their tasks and long runs, without names, if you don't give it Schedule."

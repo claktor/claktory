@@ -107,6 +107,8 @@ class _Routes implements PhoneRoutes {
 
   @override
   bool showFile(String agentId, String path) => false;
+  @override
+  bool pushConversation(String agentId, {String panel = ''}) => false;
 
   @override
   bool showPane(String agentId, String paneId) => false;
@@ -780,6 +782,52 @@ void main() {
       await tester.tap(find.text('Project settings'));
       await pumpFrames(tester);
       expect(await chosen, 'settings');
+      semantics.dispose();
+    });
+
+    testWidgets('the action that is on now has a check and reads as selected', (
+      tester,
+    ) async {
+      final semantics = tester.ensureSemantics();
+      late BuildContext context;
+      await _show(tester, _Context((found) => context = found));
+      unawaited(
+        showActions<String>(
+          context,
+          actions: const [
+            SheetAction('Agents', 'agents', checked: true),
+            SheetAction('Files', 'files'),
+          ],
+        ),
+      );
+      await pumpFrames(tester);
+      final check = find.byWidgetPredicate(
+        (widget) => widget is ExtensionGlyph && widget.icon == 'check',
+      );
+      expect(check, findsOneWidget);
+      final agents = tester.getRect(find.text('Agents'));
+      final mark = tester.getRect(check);
+      expect(mark.center.dy, moreOrLessEquals(agents.center.dy, epsilon: 1));
+      expect(mark.left, greaterThanOrEqualTo(agents.right));
+      expect(
+        tester.getSemantics(find.bySemanticsLabel('Agents')),
+        matchesSemantics(
+          label: 'Agents',
+          isButton: true,
+          hasSelectedState: true,
+          isSelected: true,
+          hasTapAction: true,
+        ),
+      );
+      expect(
+        tester.getSemantics(find.bySemanticsLabel('Files')),
+        matchesSemantics(
+          label: 'Files',
+          isButton: true,
+          hasSelectedState: true,
+          hasTapAction: true,
+        ),
+      );
       semantics.dispose();
     });
 

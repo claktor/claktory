@@ -215,6 +215,10 @@ struct Row {
     handoff: Option<v1::ErrandHandoff>,
     action_error: String,
     codes_kept_as: String,
+    /// SEALED: the file.
+    sealed_path: String,
+    /// Its agent's name when it happened, for one deleted since.
+    name_then: String,
     /// All the text a search looks in, lowercase.
     search: String,
 }
@@ -380,6 +384,8 @@ impl Row {
             handoff: None,
             action_error: String::new(),
             codes_kept_as: String::new(),
+            sealed_path: String::new(),
+            name_then: String::new(),
             search: String::new(),
         }
     }
@@ -724,6 +730,22 @@ fn from_factory(
     from_protected(db, window, found)?;
     from_recovery_key_changes(db, window, found)?;
     from_browser_switches(db, window, names, found)?;
+    from_seals(db, window, names, found)?;
+    Ok(())
+}
+
+/// Files agents sealed (`crate::seals`), with no card: Claktory's sentence,
+/// the seal's note apart, and the file.
+fn from_seals(db: &Connection, window: &Window, names: &HashMap<String, String>, found: &mut Found) -> rusqlite::Result<()> {
+    let seals = crate::seals::between(db, window.since, window.before, i64::from(MAX_SCAN) + 1)?;
+    found.changes(seals, |seal| {
+        let mut row = Row::new(Kind::Sealed, seal.id.to_string(), seal.agent.clone(), Outcome::Changed, seal.at, seal.at);
+        row.title = cut(&seal.title(names), MAX_TITLE);
+        row.reason = cut(&seal.note, MAX_REPLY);
+        row.sealed_path = seal.path.clone();
+        row.name_then = seal.agent_name.clone();
+        row.searched(&[&seal.note, &seal.path])
+    });
     Ok(())
 }
 
@@ -1159,6 +1181,7 @@ fn card<'a>(entries: impl DoubleEndedIterator<Item = &'a v1::Entry>, row: &Row) 
             (Some(Entry::ToolCall(call)), Kind::SecretSaved) if crate::vault::saved::saved_of(call).as_deref() == Some(row.id.as_str()) => {
                 Vec::new()
             }
+            (Some(Entry::ToolCall(call)), Kind::Sealed) if crate::seals::sealed_of(call).as_deref() == Some(row.id.as_str()) => Vec::new(),
             (Some(Entry::ToolCall(call)), Kind::Conversation)
                 if crate::fork::history::change_of(call).as_deref() == Some(row.conversation.change.as_str()) =>
             {
@@ -1264,7 +1287,8 @@ impl Factory {
                 let name = if chat {
                     String::new()
                 } else {
-                    inner.config.agent(&row.agent).map_or_else(|| row.agent.clone(), |agent| agent.name.clone())
+                    let gone = if row.name_then.is_empty() { &row.agent } else { &row.name_then };
+                    inner.config.agent(&row.agent).map_or_else(|| gone.clone(), |agent| agent.name.clone())
                 };
                 let entries =
                     inner.agents.get(&row.agent).and_then(|runtime| runtime.transcript.as_ref()).map(|transcript| transcript.in_memory());
@@ -1320,7 +1344,7 @@ impl Factory {
                         _ if row.outcome == Outcome::Resolved => row.reason,
                         Kind::Model => row.model.reason,
                         Kind::Conversation => row.conversation.reason,
-                        Kind::SecretGivenUp | Kind::GivenUp | Kind::SecretSaved => row.reason,
+                        Kind::SecretGivenUp | Kind::GivenUp | Kind::SecretSaved | Kind::Sealed => row.reason,
                         _ => row.app.reason,
                     },
                     model_change_id: row.model.change,
@@ -1354,6 +1378,7 @@ impl Factory {
                     handoff: row.handoff,
                     action_error: row.action_error,
                     codes_kept_as: row.codes_kept_as,
+                    sealed_path: row.sealed_path,
                 }
             })
             .collect();

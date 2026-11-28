@@ -8,14 +8,15 @@ import 'dart:math' as math;
 import 'package:factory_app/app_views/app_view.dart';
 import 'package:factory_app/app_views/charts.dart';
 import 'package:factory_app/app_views/transport.dart';
-import 'package:factory_app/controls.dart' show ExtensionGlyph, Pressable;
+import 'package:factory_app/controls.dart'
+    show ExtensionGlyph, HoverCard, Pressable;
 import 'package:factory_app/identity.dart';
 import 'package:factory_app/mobile/device.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart' as pb;
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/foundation.dart';
-import 'package:flutter/rendering.dart' show RenderParagraph;
+import 'package:flutter/rendering.dart' show RenderParagraph, RendererBinding;
 import 'package:flutter/services.dart' show LogicalKeyboardKey;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -460,155 +461,231 @@ void main() {
     expect(find.text('item 200'), findsNothing);
   });
 
-  testWidgets('a table wider than its place cuts its long text with "…", '
-      'numbers whole; the whole text still read out (Zucchero row 378)', (
+  Future<void> showPages(
+    WidgetTester tester,
+    List<List<Object?>> rows, {
+    Size size = const Size(480, 844),
+  }) => _show(
+    tester,
+    [
+      _root(['pages']),
+      {
+        'id': 'pages',
+        'component': 'Table',
+        'data': {'@path': '/pages'},
+        'columns': [
+          {'name': 'page', 'title': 'Page', 'format': 'text'},
+          {'name': 'views', 'title': 'Views', 'format': 'number'},
+        ],
+      },
+    ],
+    {
+      'pages': _table(['page', 'views'], rows),
+    },
+    size: size,
+  );
+
+  RenderParagraph paragraph(WidgetTester tester, String text) =>
+      tester.renderObject(
+        find.descendant(of: find.text(text), matching: find.byType(RichText)),
+      );
+
+  testWidgets('a long cell wraps to 3 lines, then "…"; a tap on its row '
+      'opens it whole and another closes it; a row with nothing cut takes no '
+      'tap; numbers whole, nothing scrolls sideways (friend bug #62)', (
     tester,
   ) async {
     const long =
-        'A page title long enough to run well past the width of a phone';
+        'Rebuilding the release images for the Android beta, signing them '
+        'with the upload key, uploading them to the Play Console and then '
+        'telling Bruno which build number went out';
+    const short = 'Two lines of words, wrapped in the column';
     final semantics = tester.ensureSemantics();
-    await _show(
-      tester,
-      [
-        _root(['pages']),
-        {
-          'id': 'pages',
-          'component': 'Table',
-          'data': {'@path': '/pages'},
-          'columns': [
-            {'name': 'page', 'title': 'Page', 'format': 'text'},
-            {'name': 'views', 'title': 'Views', 'format': 'number'},
-          ],
-        },
-      ],
-      {
-        'pages': _table(
-          ['page', 'views'],
-          [
-            [long, 1234567],
-            ['Home', 12],
-          ],
-        ),
-      },
-      size: const Size(480, 844),
-    );
+    await showPages(tester, [
+      [long, 1234567],
+      [short, 3],
+      ['Home', 12],
+    ]);
     expect(tester.takeException(), isNull);
-    RenderParagraph paragraph(String text) => tester.renderObject(
-      find.descendant(of: find.text(text), matching: find.byType(RichText)),
+    final cell = tester.widget<Text>(find.text(long));
+    expect(cell.maxLines, AppTableView.cellLines);
+    expect(paragraph(tester, long).didExceedMaxLines, isTrue);
+    final lineHeight = tester.getSize(find.text('Home')).height;
+    expect(
+      tester.getSize(find.text(long)).height,
+      closeTo(lineHeight * 3, 0.5),
     );
-    final cut = _cut(tester, long).data!;
-    expect(cut, endsWith('…'));
-    expect(long, startsWith(cut.substring(0, cut.length - 1)));
-    expect(paragraph(cut).didExceedMaxLines, isFalse);
-    expect(paragraph('Home').didExceedMaxLines, isFalse);
-    expect(paragraph('1,234,567').didExceedMaxLines, isFalse);
-    // The table fits: its numbers end inside the screen, nothing to scroll.
+    // A shorter one wraps without "…", and its row takes no tap.
+    expect(paragraph(tester, short).didExceedMaxLines, isFalse);
+    expect(tester.getSize(find.text(short)).height, greaterThan(lineHeight));
+    expect(paragraph(tester, '1,234,567').didExceedMaxLines, isFalse);
+    // Beside a wrapped cell, the row's others read from its first line.
+    expect(
+      tester.getTopLeft(find.text('1,234,567')).dy,
+      tester.getTopLeft(find.text(long)).dy,
+    );
     expect(
       tester.getRect(find.text('1,234,567')).right,
       lessThanOrEqualTo(480),
     );
-    final scroll = tester.state<ScrollableState>(
+    expect(
       find.descendant(
         of: find.byType(AppTableView),
         matching: find.byType(Scrollable),
       ),
+      findsNothing,
     );
-    expect(scroll.position.maxScrollExtent, 0);
+    // Read whole.
     expect(find.bySemanticsLabel(long), findsOneWidget);
+    // A row with nothing cut: no hand, no tap.
+    for (final whole in ['Home', short]) {
+      expect(
+        find.ancestor(
+          of: find.text(whole),
+          matching: find.byType(FocusableActionDetector),
+        ),
+        findsNothing,
+      );
+    }
+    // A tap opens the row, tinted; another closes it.
+    await tester.tap(find.text('1,234,567'));
+    await tester.pump();
+    expect(tester.widget<Text>(find.text(long)).maxLines, isNull);
+    expect(paragraph(tester, long).didExceedMaxLines, isFalse);
+    expect(
+      tester.getSize(find.text(long)).height,
+      greaterThan(lineHeight * 3.5),
+    );
+    expect(
+      find.ancestor(
+        of: find.text(long),
+        matching: find.byWidgetPredicate(
+          (w) => w is ColoredBox && w.color.a > 0,
+        ),
+      ),
+      findsOneWidget,
+    );
+    await tester.tap(find.text(long));
+    await tester.pump();
+    expect(tester.widget<Text>(find.text(long)).maxLines, 3);
     semantics.dispose();
   });
 
-  testWidgets("at the largest text a long cell's column is never wider than "
-      'the table\'s place, so its "…" shows (Scolippi 31339)', (tester) async {
+  testWidgets('on a Mac, a row that opens shows the hand, and ⏎ opens it '
+      'when focused (friend bug #62)', (tester) async {
+    const long =
+        'Rebuilding the release images for the Android beta, signing them '
+        'with the upload key, uploading them to the Play Console and then '
+        'telling Bruno which build number went out';
+    await showPages(tester, [
+      [long, 1],
+    ]);
+    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await mouse.addPointer(location: tester.getCenter(find.text(long)));
+    addTearDown(mouse.removePointer);
+    await tester.pump();
+    expect(
+      RendererBinding.instance.mouseTracker.debugDeviceActiveCursor(1),
+      SystemMouseCursors.click,
+    );
+    Focus.of(tester.element(find.text(long))).requestFocus();
+    await tester.pump();
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pump();
+    expect(tester.widget<Text>(find.text(long)).maxLines, isNull);
+  });
+
+  testWidgets('a table whose columns don\'t fit at their least reads as '
+      'blocks: the first cell its title, each other column its heading and '
+      'value, short ones beside it, long ones under it; one element read '
+      'whole; nothing cut to a letter (friend bug #62, Scolippi 31339)', (
+    tester,
+  ) async {
     tester.platformDispatcher.textScaleFactorTestValue = 3.1;
     addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
     const long = 'Compare the phone bar against Grafana at the largest size';
-    await _show(
-      tester,
-      [
-        _root(['pages']),
-        {
-          'id': 'pages',
-          'component': 'Table',
-          'data': {'@path': '/pages'},
-          'columns': [
-            {'name': 'page', 'title': 'Page', 'format': 'text'},
-            {'name': 'views', 'title': 'Views', 'format': 'number'},
-          ],
-        },
-      ],
-      {
-        'pages': _table(
-          ['page', 'views'],
-          [
-            [long, 12],
-          ],
-        ),
-      },
-      size: const Size(320, 844),
-    );
-    expect(tester.takeException(), isNull);
-    final cell = tester.getRect(find.text(_cut(tester, long).data!));
-    final place = tester.getRect(find.byType(AppTableView));
-    expect(cell.right, lessThanOrEqualTo(place.right + 0.5));
-  });
-
-  testWidgets("at the largest text a text column leaves the numbers' room: "
-      'they stay on screen, the text cut (Scolippi 32633, Zucchero rows '
-      '437–440)', (tester) async {
-    tester.platformDispatcher.textScaleFactorTestValue = 3.12;
-    addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
-    await _show(
-      tester,
-      [
-        _root(['users']),
-        {
-          'id': 'users',
-          'component': 'Table',
-          'data': {'@path': '/users'},
-          'columns': [
-            {'name': 'size', 'title': 'Claktories', 'format': 'text'},
-            {'name': 'users', 'title': 'Users', 'format': 'number'},
-          ],
-        },
-      ],
-      {
-        'users': _table(
-          ['size', 'users'],
-          [
-            ['1 Claktory', 7],
-            ['3–5 Claktories', 1],
-            ['6+ Claktories', 1],
-          ],
-        ),
-      },
-      // The test's font is wide: 560 is about an SE's 375 in the app's.
-      size: const Size(560, 844),
-    );
+    final semantics = tester.ensureSemantics();
+    await showPages(tester, [
+      [long, 12],
+      ['Home', null],
+    ], size: const Size(320, 844));
     expect(tester.takeException(), isNull);
     final place = tester.getRect(find.byType(AppTableView));
+    // The title whole, wrapped, never cut.
+    final title = tester.widget<Text>(find.text(long));
+    expect(title.maxLines, isNull);
+    expect(title.style!.fontWeight, FontWeight.w500);
     expect(
-      tester.getRect(find.text('7')).right,
+      tester.getRect(find.text(long)).right,
       lessThanOrEqualTo(place.right + 0.5),
     );
-    // Cut with "…" right after a letter, never after a space ("3–5…"),
-    // the whole words read out.
-    for (final whole in ['3–5 Claktories', '6+ Claktories']) {
-      final cut = _cut(tester, whole).data!;
-      expect(cut, endsWith('…'), reason: whole);
-      expect(cut, isNot(endsWith(' …')), reason: whole);
-    }
-    // The heading isn't broken mid-word: one line, cut, or whole words.
-    final heading = tester.widget<Text>(
-      find.byWidgetPredicate(
-        (w) =>
-            w is Text &&
-            (w.data == 'Claktories' || w.semanticsLabel == 'Claktories'),
-      ),
+    // Views and its heading too wide for one line at this size: under it,
+    // inside the place.
+    final views = tester.getRect(find.text('12'));
+    final heading = tester.getRect(find.text('Views'));
+    expect(views.right, lessThanOrEqualTo(place.right + 0.5));
+    expect(views.top, greaterThanOrEqualTo(heading.bottom - 0.5));
+    expect(heading.top, greaterThan(tester.getRect(find.text(long)).bottom));
+    // An empty cell leaves its line out: one "Views" only.
+    expect(find.text('Views'), findsOneWidget);
+    // No heading row: Page isn't shown.
+    expect(find.text('Page'), findsNothing);
+    expect(find.bySemanticsLabel('$long. Views, 12'), findsOneWidget);
+    expect(find.bySemanticsLabel('Home'), findsOneWidget);
+    semantics.dispose();
+  });
+
+  testWidgets('in blocks a long value goes under its heading, 3 lines and '
+      '"…", and a tap on the block opens it (friend bug #62)', (tester) async {
+    const long =
+        'Rebuilding the release images for the Android beta, signing them '
+        'with the upload key, uploading them to the Play Console and then '
+        'telling Bruno which build number went out';
+    await _show(
+      tester,
+      [
+        _root(['agents']),
+        {
+          'id': 'agents',
+          'component': 'Table',
+          'data': {'@path': '/agents'},
+        },
+      ],
+      {
+        'agents': _table(
+          ['Agent', 'Status', 'Last step', 'What it is doing'],
+          [
+            ['Pericolo', 'Working', 1402, long],
+          ],
+        ),
+      },
+      size: const Size(390, 844),
     );
-    expect(heading.maxLines, 1);
-    expect(heading.data, endsWith('…'));
-    expect(heading.semanticsLabel, 'Claktories');
+    expect(tester.takeException(), isNull);
+    final place = tester.getRect(find.byType(AppTableView));
+    final label = tester.getRect(find.text('What it is doing'));
+    final value = tester.getRect(find.text(long));
+    expect(value.top, greaterThanOrEqualTo(label.bottom));
+    expect(value.left, place.left);
+    expect(tester.widget<Text>(find.text(long)).maxLines, 3);
+    expect(paragraph(tester, long).didExceedMaxLines, isTrue);
+    // Short ones beside their heading, at the right edge.
+    for (final (heading, value) in [
+      ('Status', 'Working'),
+      ('Last step', '1,402'),
+    ]) {
+      final at = tester.getRect(find.text(value));
+      expect(at.right, closeTo(place.right, 0.5), reason: value);
+      expect(
+        at.center.dy,
+        closeTo(tester.getRect(find.text(heading)).center.dy, 3),
+        reason: value,
+      );
+    }
+    await tester.tap(find.text('Pericolo'));
+    await tester.pump();
+    expect(tester.widget<Text>(find.text(long)).maxLines, isNull);
+    expect(paragraph(tester, long).didExceedMaxLines, isFalse);
   });
 
   testWidgets('a narrow table keeps its cells whole and spreads its columns '
@@ -642,14 +719,20 @@ void main() {
     expect(tester.getRect(find.text('12')).right, closeTo(table.right, 0.5));
     expect(tester.getRect(find.text('views')).right, closeTo(table.right, 0.5));
     expect(tester.getRect(find.text('Home')).left, table.left);
-    final widths = tester
-        .widget<Table>(find.byType(Table))
-        .columnWidths!
-        .values
-        .map((w) => (w as FixedColumnWidth).value)
-        .toList();
-    expect(widths[0], closeTo(table.width / 2, 0.5));
-    expect(widths.fold(0.0, (sum, w) => sum + w), closeTo(table.width, 0.01));
+    double column(String text) => tester
+        .widget<SizedBox>(
+          find
+              .ancestor(
+                of: find.text(text),
+                matching: find.byWidgetPredicate(
+                  (w) => w is SizedBox && w.width != null,
+                ),
+              )
+              .first,
+        )
+        .width!;
+    expect(column('Home'), closeTo(table.width / 2, 0.5));
+    expect(column('Home') + column('12'), closeTo(table.width, 0.01));
   });
 
   testWidgets('a table with a height fills it, as a Grafana table panel '
@@ -1205,6 +1288,166 @@ void main() {
     expect(wide, hasLength(1), reason: 'side by side');
   });
 
+  List<Map<String, Object?>> statRow(
+    List<String> titles, {
+    bool gap = false,
+    double? stackBelow = 768,
+  }) => [
+    _root(['grid']),
+    {
+      'id': 'grid',
+      'component': 'Row',
+      'stackBelow': ?stackBelow,
+      'children': [
+        for (var i = 0; i < titles.length; i++) 'c$i',
+        if (gap) 'gap',
+      ],
+    },
+    for (final (i, title) in titles.indexed) ...[
+      {'id': 'c$i', 'component': 'Card', 'child': 's$i', 'weight': 4},
+      {
+        'id': 's$i',
+        'component': 'Stat',
+        'label': title,
+        'value': i + 1,
+        'height': 100,
+      },
+    ],
+    if (gap) {'id': 'gap', 'component': 'Column', 'children': [], 'weight': 4},
+  ];
+
+  /// The Stat cards' lines: how many cards each has, top to bottom.
+  List<int> statLines(WidgetTester tester) {
+    final tops = <double, int>{};
+    for (final card in find.byType(AppStatCard).evaluate()) {
+      final top = tester.getTopLeft(find.byWidget(card.widget)).dy;
+      tops[top] = (tops[top] ?? 0) + 1;
+    }
+    return [for (final top in tops.keys.toList()..sort()) tops[top]!];
+  }
+
+  testWidgets("a Stat's title takes 2 lines, its panel growing by the "
+      'second; past 2 it ends in "…", whole on a hold and read whole '
+      '(friend bug #62)', (tester) async {
+    const one = 'Spend';
+    const two = 'Agents working right now on this Claktory';
+    final three = 'Tokens used today by every agent on this Claktory ' * 3;
+    final semantics = tester.ensureSemantics();
+    await _show(
+      tester,
+      statRow([one, two, three]),
+      null,
+      size: const Size(390, 1400),
+    );
+    expect(tester.takeException(), isNull);
+    expect(statLines(tester), [1, 1, 1], reason: 'one under another');
+    double tall(String title) => tester
+        .getSize(
+          find.ancestor(
+            of: find.text(title),
+            matching: find.byType(AppStatCard),
+          ),
+        )
+        .height;
+    final line = tester.getSize(find.text(one)).height;
+    expect(tester.getSize(find.text(two)).height, closeTo(line * 2, 0.5));
+    expect(tall(two) - tall(one), closeTo(line, 0.5));
+    expect(tall(three), closeTo(tall(two), 0.5));
+    // Only the one past 2 lines is cut, with the whole on a hold.
+    expect(
+      tester
+          .renderObject<RenderParagraph>(
+            find.descendant(
+              of: find.text(three),
+              matching: find.byType(RichText),
+            ),
+          )
+          .didExceedMaxLines,
+      isTrue,
+    );
+    for (final (title, held) in [
+      (two, findsNothing),
+      (three, findsOneWidget),
+    ]) {
+      expect(
+        find.ancestor(of: find.text(title), matching: find.byType(HoverCard)),
+        held,
+        reason: title,
+      );
+    }
+    expect(find.bySemanticsLabel(three), findsOneWidget);
+    semantics.dispose();
+  });
+
+  testWidgets('a row of Stat cards too narrow for 160 each, or for its '
+      'titles on 2 lines, takes fewer to a line, balanced, the gaps left out; '
+      'wide, it stays one line; below stackBelow, one under another '
+      '(friend bug #62)', (tester) async {
+    final short = [for (var i = 0; i < 6; i++) 'Runs $i'];
+    // An iPad in portrait: 6 to a line would be about 140 each.
+    await _show(tester, statRow(short), null, size: const Size(900, 1200));
+    expect(tester.takeException(), isNull);
+    expect(statLines(tester), [3, 3]);
+    // Every card in a line as wide as the others, the line's width full.
+    final first = find
+        .byType(AppStatCard)
+        .evaluate()
+        .map((e) => tester.getRect(find.byWidget(e.widget)));
+    expect(first.map((r) => r.width.round()).toSet(), hasLength(1));
+    // 5 and a gap: 3 + 2, the gap gone.
+    await tester.pumpWidget(const SizedBox());
+    await _show(
+      tester,
+      statRow(short.take(5).toList(), gap: true),
+      null,
+      size: const Size(900, 1200),
+    );
+    expect(statLines(tester), [3, 2]);
+    final last = tester.getRect(find.byType(AppStatCard).last);
+    expect(
+      last.right,
+      closeTo(tester.getRect(find.byType(AppStatCard).at(2)).right, 0.5),
+    );
+    // Titles that would need a third line at 3 to a line: 2 to a line.
+    final long = [
+      for (var i = 0; i < 6; i++) 'Tokens used today by all of the agents $i',
+    ];
+    await tester.pumpWidget(const SizedBox());
+    await _show(tester, statRow(long), null, size: const Size(900, 1200));
+    expect(statLines(tester), [2, 2, 2]);
+    for (final title in long) {
+      expect(
+        tester
+            .renderObject<RenderParagraph>(
+              find.descendant(
+                of: find.text(title),
+                matching: find.byType(RichText),
+              ),
+            )
+            .didExceedMaxLines,
+        isFalse,
+        reason: title,
+      );
+    }
+    // Wide: one line, as before.
+    await tester.pumpWidget(const SizedBox());
+    await _show(tester, statRow(short), null, size: const Size(1600, 1200));
+    expect(statLines(tester), [6]);
+    // Below stackBelow: one under another, as Grafana's phone layout.
+    await tester.pumpWidget(const SizedBox());
+    await _show(tester, statRow(short), null, size: const Size(700, 1600));
+    expect(statLines(tester), [1, 1, 1, 1, 1, 1]);
+    // Without stackBelow, the same rule rather than one per line.
+    await tester.pumpWidget(const SizedBox());
+    await _show(
+      tester,
+      statRow(short, stackBelow: null),
+      null,
+      size: const Size(700, 1600),
+    );
+    expect(statLines(tester), [3, 3]);
+  });
+
   testWidgets('at the largest text on a phone, half-width charts stack, '
       "and their axes' words stay whole and under their labels", (
     tester,
@@ -1328,15 +1571,14 @@ void main() {
       tester.getSize(find.text('Command started')).height,
       greaterThan(tester.getSize(find.text('Agent')).height * 1.5),
     );
-    final scroll = tester
-        .state<ScrollableState>(
-          find.descendant(
-            of: find.byType(AppTableView),
-            matching: find.byType(Scrollable),
-          ),
-        )
-        .position;
-    expect(scroll.maxScrollExtent, 0);
+    // Nothing scrolls sideways.
+    expect(
+      find.descendant(
+        of: find.byType(AppTableView),
+        matching: find.byType(Scrollable),
+      ),
+      findsNothing,
+    );
   });
 
   testWidgets('chips are as wide as their words, several to a line', (
@@ -3562,9 +3804,3 @@ void main() {
     });
   });
 }
-
-/// A table cell cut to fit: its Text, whose words end in "…" and whose
-/// whole words are read out.
-Text _cut(WidgetTester tester, String whole) => tester.widget<Text>(
-  find.byWidgetPredicate((w) => w is Text && w.semanticsLabel == whole),
-);

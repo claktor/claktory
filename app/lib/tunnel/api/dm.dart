@@ -7,9 +7,9 @@ import '../frb_generated.dart';
 
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `add_group`, `apply_view`, `become_leaf`, `bytes32`, `change_group`, `change_pins`, `commit`, `committed`, `delete_row`, `each`, `envelope_json`, `every_leaf`, `from_content`, `group_kind`, `group_row`, `has`, `holds`, `json`, `keep_rotation`, `keep_side`, `keep`, `listed_ids`, `load`, `member_line`, `merge_own`, `message`, `not_joined`, `note_removed`, `of`, `open_handoff`, `openmls_group_id`, `own_message`, `pending_commit`, `place`, `proposal_place`, `proposal_position`, `read_envelope`, `read_row`, `read_view`, `recertify`, `refusal`, `roster`, `rotated_pins`, `safety`, `save_pins`, `save_row`, `sent_at`, `set_up`, `snapshot`, `sql`, `state`, `store`, `take`, `to_content`, `unchecked`, `unlisted`, `view_name`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Kept`, `PendingRow`, `Pending`, `ProposalPlace`, `Snapshot`, `State`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `try_from`
+// These functions are ignored because they are not marked as `pub`: `add_group`, `apply_view`, `become_leaf`, `bytes32`, `change_group`, `change_pins`, `commit_place`, `commit`, `committed`, `delete_row`, `each`, `envelope_json`, `every_leaf`, `forked_place`, `from_content`, `give_up`, `group_kind`, `group_row`, `guard`, `has`, `holds`, `json`, `keep_rotation`, `keep_side`, `keep`, `listed_ids`, `load`, `made`, `member_line`, `merge_own`, `message`, `not_joined`, `note_removed`, `now_ms`, `of`, `of`, `open_handoff`, `openmls_group_id`, `own_message`, `pending_commit`, `place`, `proposal_place`, `proposal_position`, `read_envelope`, `read_row`, `read_view`, `recertify`, `refusal`, `roster`, `rotated_pins`, `safety`, `save_pins`, `save_row`, `sent_at`, `set_up`, `settle`, `snapshot`, `sql`, `state`, `stateless`, `store`, `take_others`, `take`, `to_content`, `unchecked`, `unlisted`, `view_name`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Forked`, `Kept`, `PendingRow`, `Pending`, `ProposalPlace`, `Snapshot`, `State`, `Stateless`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `try_from`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`
 
 /// 32 new random bytes: a key for the platform key store (the identity,
@@ -124,6 +124,25 @@ abstract class DmDevice implements RustOpaqueInterface {
   /// [leaf_id] was removed (signed out): no longer listed as replaced.
   Future<void> forgetReplaced({required String leafId});
 
+  /// How this device's state of [group_id] stands against the worker's
+  /// (GET groups' `epoch` and `confirmation_tag`, base64url), E11-8:
+  /// - a commit of its own made under [PENDING_FOR] ago: [DmForkState::Pending],
+  ///   nothing changed;
+  /// - one older, with the worker past the epoch it was made at: Behind
+  ///   (the feed settles it: its own back, merged, or another's first);
+  ///   at that epoch still: given up, [DmForkState::PendingCleared];
+  /// - no state here (a rejoin refused): Forked;
+  /// - past the worker, or at its epoch with another confirmation tag:
+  ///   Forked, kept so changes and sends are refused
+  ///   ([DmGroupErrorKind::Forked]) until [DmDevice::resync_group]'s
+  ///   commit is taken;
+  /// - behind it: Behind; otherwise InStep.
+  Future<DmForkState> forkCheck({
+    required List<int> groupId,
+    required BigInt workerEpoch,
+    required String confirmationTag,
+  });
+
   /// Every group this device is in.
   Future<List<DmGroup>> groups();
 
@@ -200,6 +219,10 @@ abstract class DmDevice implements RustOpaqueInterface {
   /// account is fine there, since removing only takes access away. Never
   /// for showing who's in or trusting what a leaf says ([members] does).
   Future<List<DmMember>> leaves({required List<int> groupId});
+
+  /// The device lists this device took, oldest first (E11-8): whose,
+  /// which version, when. No keys.
+  Future<List<DmListAdopted>> listsAdopted();
 
   /// Who's in [group_id] now, as their certificates say (those that
   /// pass the checks now).
@@ -331,13 +354,28 @@ abstract class DmDevice implements RustOpaqueInterface {
   /// leaf of the person's out of [group_id] (under a key other than this
   /// device's, on no list of the new one), so none holds the new epoch's
   /// secrets. None when there's none.
-  Future<DmCommit?> removeDeadLeaves({required List<int> groupId});
+  ///
+  /// [list_versions] are GET groups' (the worker's): a device of the
+  /// person's own taken off their list goes too (E11-8), but only once
+  /// this device's own list is at the worker's version, so one on an
+  /// older list never takes out a device added since
+  /// ([DmGroupErrorKind::ListsStale]).
+  Future<DmCommit?> removeDeadLeaves({
+    required List<int> groupId,
+    required List<DmListVersion> listVersions,
+  });
 
   /// Removes the leaves [leaf_ids] from [group_id].
   Future<DmCommit> removeMembers({
     required List<int> groupId,
     required List<String> leafIds,
   });
+
+  /// The device its person removed from their account whose leaf is
+  /// still in [group_id] (Held::Removed, E11-8): its name ("" when it has
+  /// none), when that's what [waiting_for] waits for, until one of that
+  /// person's devices takes it out (remove_dead_leaves); None otherwise.
+  Future<String?> removedHeld({required List<int> groupId});
 
   /// The person's devices a start-over took out of their groups (under
   /// the key it replaced), until the person removes them.
@@ -348,6 +386,21 @@ abstract class DmDevice implements RustOpaqueInterface {
   /// never signed out by a sweep (Fugo: a surviving old device is the
   /// person's alarm when someone else started over), and shown apart.
   Future<List<String>> replacedLeaves({required List<int> groupId});
+
+  /// Joins [group_id] again from the worker's GroupInfo ([group_info],
+  /// an envelope's JSON) once [DmDevice::fork_check] found it forked
+  /// (E11-8): an external commit, every member checked as a rejoin
+  /// checks them, never a re-add by the home; the feed goes on after
+  /// [seq]. Its state waits aside until the worker takes the commit
+  /// ([DmDevice::commit_taken], or its coming back in the feed); then
+  /// take out what's dead at once ([DmDevice::remove_dead_leaves]) and
+  /// send [DmResync::resend] again. A GroupInfo below the highest epoch
+  /// this device reached is refused as [DmGroupError::stuck].
+  Future<DmResync> resyncGroup({
+    required List<int> groupId,
+    required String groupInfo,
+    required PlatformInt64 seq,
+  });
 
   /// The commit or proposal [envelope] held in [group_id] proves that
   /// [account] replaced the key its leaf is under, which the worker lists
@@ -388,10 +441,17 @@ abstract class DmDevice implements RustOpaqueInterface {
   /// retry id, it gives the same envelope (JSON) until that comes back.
   /// Refused in a conversation while the friend's security key changed
   /// and the person hasn't seen it ([seen]).
+  ///
+  /// Refused, typed, while the group's state here is forked or gone
+  /// ([DmGroupErrorKind::Forked]), and while a member's device list here
+  /// is older than the worker's [list_versions] (GET groups'), so a
+  /// device its person took off isn't sent to on an old list
+  /// ([DmGroupErrorKind::ListsStale], E11-8).
   Future<String> send({
     required List<int> groupId,
     required DmContent content,
     required PlatformInt64 nowMs,
+    required List<DmListVersion> listVersions,
   });
 
   /// Marks this device as gone over to its home ([home_drained]).
@@ -691,6 +751,30 @@ class DmDeviceList {
           home == other.home;
 }
 
+/// How this device's state of a group stands against the worker's
+/// ([DmDevice::fork_check], E11-8).
+enum DmForkState {
+  /// Same epoch, same confirmation tag.
+  inStep,
+
+  /// The worker is past it: catch up from the feed.
+  behind,
+
+  /// Past the worker, or at its epoch with another confirmation tag, or
+  /// with no state at all: it joins again ([DmDevice::resync_group]).
+  /// Nothing changes there, nor is sent, until then.
+  forked,
+
+  /// A commit of this device's made under [PENDING_FOR] ago waits for
+  /// the worker's answer: nothing changed; ask again later.
+  pending,
+
+  /// A commit of this device's waited longer, and the worker is at the
+  /// epoch it was made at, so never took it: given up (a rejoin's state
+  /// dropped). Ask again: it may be in step now, or need to rejoin.
+  pendingCleared,
+}
+
 /// A group this device is in.
 class DmGroup {
   final Uint8List groupId;
@@ -738,6 +822,71 @@ class DmGroup {
           epoch == other.epoch &&
           moved == other.moved &&
           pending == other.pending;
+}
+
+/// A refusal from a change to a group or a send, typed (E11-8).
+class DmGroupError implements FrbException {
+  final DmGroupErrorKind kind;
+
+  /// The group it's about (empty for [DmGroupErrorKind::Failed]).
+  final Uint8List groupId;
+
+  /// Forked: it can't join again from the worker's GroupInfo, which is
+  /// below the highest epoch this device reached. It says so to the
+  /// group's devices (`POST groups/<id>/out-of-step`), one makes an
+  /// empty commit, and it resyncs past it.
+  final bool stuck;
+
+  /// ListsStale: whose lists to fetch.
+  final List<String> accounts;
+
+  /// What went wrong, as words (for Failed, as before).
+  final String message;
+
+  const DmGroupError({
+    required this.kind,
+    required this.groupId,
+    required this.stuck,
+    required this.accounts,
+    required this.message,
+  });
+
+  @override
+  int get hashCode =>
+      kind.hashCode ^
+      groupId.hashCode ^
+      stuck.hashCode ^
+      accounts.hashCode ^
+      message.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DmGroupError &&
+          runtimeType == other.runtimeType &&
+          kind == other.kind &&
+          groupId == other.groupId &&
+          stuck == other.stuck &&
+          accounts == other.accounts &&
+          message == other.message;
+}
+
+/// Why a change to a group or a send was refused (E11-8).
+enum DmGroupErrorKind {
+  /// This device's state of the group is forked from the worker's
+  /// ([DmForkState::Forked]): resync first.
+  forked,
+
+  /// A commit of this device's waits for the worker: settle it first
+  /// ([DmDevice::fork_check]).
+  pending,
+
+  /// A member's device list here is older than the worker's: fetch those
+  /// [DmGroupError::accounts]' lists, then send again.
+  listsStale,
+
+  /// Anything else, as [DmGroupError::message] says.
+  failed,
 }
 
 /// Which group, from the person's own records (the worker's group list as
@@ -895,6 +1044,52 @@ class DmJoining {
 /// What kind of leaf: one of the person's devices, or one of their
 /// Claktories.
 enum DmLeafKind { device, claktory }
+
+/// One device list this device took (E11-8): whose, which version, when.
+/// No keys.
+class DmListAdopted {
+  final String account;
+  final BigInt version;
+  final PlatformInt64 atMs;
+
+  const DmListAdopted({
+    required this.account,
+    required this.version,
+    required this.atMs,
+  });
+
+  @override
+  int get hashCode => account.hashCode ^ version.hashCode ^ atMs.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DmListAdopted &&
+          runtimeType == other.runtimeType &&
+          account == other.account &&
+          version == other.version &&
+          atMs == other.atMs;
+}
+
+/// One account's device list version, as the worker has it (GET groups'
+/// `list_versions`), for [DmDevice::send].
+class DmListVersion {
+  final String account;
+  final BigInt version;
+
+  const DmListVersion({required this.account, required this.version});
+
+  @override
+  int get hashCode => account.hashCode ^ version.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DmListVersion &&
+          runtimeType == other.runtimeType &&
+          account == other.account &&
+          version == other.version;
+}
 
 /// One leaf on a device list.
 class DmListed {
@@ -1303,6 +1498,31 @@ class DmRemoval {
           names == other.names &&
           keep == other.keep &&
           newKey == other.newKey;
+}
+
+/// What a rejoin to get back in step with the worker made
+/// ([DmDevice::resync_group]).
+class DmResync {
+  /// The external commit, for the worker; once taken, take out what's
+  /// dead at once ([DmDevice::remove_dead_leaves]).
+  final DmCommit commit;
+
+  /// The retry ids of this device's messages to the group that never
+  /// went: send each again through the unsent path, encrypted anew.
+  final List<String> resend;
+
+  const DmResync({required this.commit, required this.resend});
+
+  @override
+  int get hashCode => commit.hashCode ^ resend.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DmResync &&
+          runtimeType == other.runtimeType &&
+          commit == other.commit &&
+          resend == other.resend;
 }
 
 /// A rotation under way on this device (dms-e2ee §2.1), kept in the sealed

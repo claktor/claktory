@@ -191,6 +191,24 @@ PY
     fi
     printf 'CLAKTORY_BROWSER_REF=%s\nCLAKTORY_BROWSER_IMAGE=%s@%s\nCLAKTORY_BROWSER_ARCHIVE_SHA256=%s\n' "$ref" "$name" "$digest" "$sha" >"$out/browser-image.env"
     echo "archived $ref: $(($(stat -f %z "$out/claktory-browser.oci.tar.zst") / 1048576)) MB, $digest" >&2
+    # Earlier versions of this image go once this one is archived: here they're
+    # only build output, since a Claktory runs its browser from its release's
+    # archive in Apple's container, never from this store. base and
+    # base-<chrome> stay for the next build, and so does any version made in
+    # the last 3 hours, which another build may still be saving.
+    "$ENGINE" images --format json | python3 -c '
+import json, re, sys, time
+name, keep = sys.argv[1], sys.argv[2]
+for image in json.load(sys.stdin):
+    if image.get("Created", 0) > time.time() - 3 * 3600:
+        continue
+    for ref in image.get("Names") or []:
+        repo, _, tag = ref.rpartition(":")
+        if repo == f"localhost/{name}" and ref != keep and re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?", tag):
+            print(ref)
+' "$name" "$ref" | sort -u | while read -r old; do
+      "$ENGINE" rmi "$old" >/dev/null 2>&1 && echo "removed the earlier $old" >&2 || true
+    done || echo "earlier versions of $name weren't cleared (their list didn't read)" >&2
     ;;
   *) die "doesn't know $1 (base or archive)" ;;
 esac

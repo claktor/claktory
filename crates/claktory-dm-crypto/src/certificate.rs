@@ -1,4 +1,4 @@
-//! Leaf certificates (dms-e2ee.md §2): the identity key's signature over
+//! Leaf certificates: the identity key's signature over
 //! one leaf of a person's, a device or a Claktory: who it belongs to
 //! (`account_id`), which leaf it is, the leaf's MLS signature key, its name
 //! and when it was made. It rides in the leaf's MLS credential, a
@@ -20,7 +20,7 @@ pub const MAX_LEAF_ID: usize = 128;
 pub const MAX_NAME: usize = 64;
 
 /// What kind of leaf: one of the person's devices, or one of their
-/// Claktories (dms-e2ee.md §2, "Claktories").
+/// Claktories.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum LeafKind {
     Device,
@@ -187,7 +187,7 @@ pub fn hidden_marks(text: &str) -> Vec<bool> {
     marks
 }
 
-/// Whether the zero width joiner at `at` joins two emoji (Fugo 53113): the
+/// Whether the zero width joiner at `at` joins two emoji: the
 /// character after it is a pictograph, and so is the one before it, with at
 /// most one U+FE0F and one skin tone (U+1F3FB–1F3FF) between (❤️‍🔥, 🧑🏽‍💻).
 /// That only joins their glyphs; anywhere else it could hide something.
@@ -407,8 +407,8 @@ pub(crate) mod tests {
     }
 
     /// A zero width joiner is an emoji sequence's only between two
-    /// pictographs, the earlier with at most its U+FE0F and a skin tone
-    /// (Fugo 53113); tag characters stay hidden.
+    /// pictographs, the earlier with at most its U+FE0F and a skin tone;
+    /// tag characters stay hidden.
     #[test]
     fn a_joiner_only_between_pictographs() {
         for joined in ["👩\u{200d}💻", "🏳\u{fe0f}\u{200d}🌈", "❤\u{fe0f}\u{200d}🔥", "🧑🏽\u{200d}💻", "👨\u{200d}👩\u{200d}👧"] {

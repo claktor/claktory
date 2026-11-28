@@ -1,4 +1,4 @@
-//! Claktory's background service on a Mac (friend bug #24): whether the
+//! Claktory's background service on a Mac: whether the
 //! LaunchAgent's supervisor runs this backend, and putting it back in charge
 //! when it doesn't.
 //!
@@ -14,7 +14,7 @@
 //! holds the port); and this backend stops as SIGTERM stops it, finishing
 //! what it's writing.
 //!
-//! Stopping and starting it from the Mac app (friend bug #27) uses
+//! Stopping and starting it from the Mac app uses
 //! launchd's own enabled flag: a stopped Claktory's job is disabled and
 //! booted out, so KeepAlive can't bring it back and launchd doesn't load it
 //! at login, until the app's `factoryd install --start` enables and loads it
@@ -32,6 +32,10 @@
 //! tests or QA run elsewhere (`FACTORY_HOME`) say nothing, unless
 //! `FACTORY_SERVICE_LABEL` names a job of their own for QA to try this with
 //! (`~/Library/LaunchAgents/<label>.plist`), never Claktory's.
+//!
+//! On Windows the service is the sign-in task's supervisor
+//! (`windows::service`): StopEngine stops it the same way, with the task
+//! for the job, and `factoryd install --start` starts it again.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -236,18 +240,7 @@ pub(crate) fn check(factory: &Arc<Factory>) {
         let home = factory.home.clone();
         let supervised = std::env::var_os(crate::update::SUPERVISED).is_some();
         let stop = factory.service.when_app_quits() == QuitMode::Stop;
-        let view = tokio::task::spawn_blocking(move || {
-            job_here(&home).map(|(job, label)| {
-                let view = examine(&home, &job, &label, supervised);
-                // Running, so started: whatever stopped it is over.
-                let _ = std::fs::remove_file(stopped_marker(&home));
-                if view.can_stop {
-                    set_enabled(&job, &label, !stop);
-                }
-                view
-            })
-        })
-        .await;
+        let view = tokio::task::spawn_blocking(move || here(&home, supervised, stop)).await;
         if let Ok(Some(view)) = view {
             if view.state == State::ByHand as i32 {
                 tracing::warn!(can_restore = view.can_restore, "Claktory wasn't started by its background service");
@@ -256,6 +249,31 @@ pub(crate) fn check(factory: &Arc<Factory>) {
             factory.broadcast_workspace(&factory.lock());
         }
     });
+}
+
+/// How this backend runs, if it's one to say anything about: and in stop
+/// mode, the job disabled.
+#[cfg(not(windows))]
+fn here(home: &Home, supervised: bool, stop: bool) -> Option<v1::BackendService> {
+    job_here(home).map(|(job, label)| {
+        let view = examine(home, &job, &label, supervised);
+        // Running, so started: whatever stopped it is over.
+        let _ = std::fs::remove_file(stopped_marker(home));
+        if view.can_stop {
+            set_enabled(&job, &label, !stop);
+        }
+        view
+    })
+}
+
+/// On Windows, run by its supervisor from the sign-in task
+/// (`windows::service`), which follows the person's choice rather than
+/// stop mode.
+#[cfg(windows)]
+fn here(home: &Home, _supervised: bool, _stop: bool) -> Option<v1::BackendService> {
+    crate::windows::service::here(home)?;
+    let _ = std::fs::remove_file(stopped_marker(home));
+    Some(v1::BackendService { state: State::Running.into(), can_stop: true, ..Default::default() })
 }
 
 /// `launchctl enable` or `disable`: whether launchd loads the job at login
@@ -305,6 +323,7 @@ pub(crate) async fn set_when_app_quits(factory: &Factory, mode: QuitMode) -> Res
 
 /// Disables the job, then boots it out: launchd stops the supervisor and,
 /// through it, this backend. In a session of its own, as RESTORE.
+#[cfg(not(windows))]
 const STOP: &str = r#"
 lc="$1" domain="$2" label="$3"
 sleep 1
@@ -352,16 +371,7 @@ pub(crate) async fn stop(factory: &Arc<Factory>, local: bool, quitting: bool) ->
     }
     let home = factory.home.clone();
     let by = if quitting { "quit" } else { "switch" };
-    let started = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-        let Some((job, label)) = job_here(&home) else {
-            return Err(std::io::Error::other("Claktory's background service isn't on this Mac"));
-        };
-        let marker = serde_json::json!({"by": by, "time": crate::transcript::now_ms()});
-        std::fs::write(stopped_marker(&home), marker.to_string())?;
-        let mut command = launch_agent::helper(&home, STOP)?;
-        command.arg(&job.launchctl).arg(&job.domain).arg(&label);
-        command.spawn().map(drop)
-    })
+    let started = tokio::task::spawn_blocking(move || begin_stop(&home, by))
     .await
     .map_err(|error| RequestError::Usage(error.to_string()))
     .and_then(|started| started.map_err(RequestError::Io));
@@ -382,17 +392,55 @@ pub(crate) async fn stop(factory: &Arc<Factory>, local: bool, quitting: bool) ->
         let _ = std::fs::remove_file(stopped_marker(&factory.home));
         let stop = factory.service.when_app_quits() == QuitMode::Stop;
         let home = factory.home.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            if let Some((job, label)) = job_here(&home) {
-                set_enabled(&job, &label, !stop);
-            }
-        })
-        .await;
+        let _ = tokio::task::spawn_blocking(move || stop_failed(&home, stop)).await;
         *guard(&factory.service.phase) = Phase::Running;
         factory.service.set(view);
         factory.broadcast_workspace(&factory.lock());
     });
     Ok(())
+}
+
+/// Records what stops Claktory (`by`), then has it stopped: on a Mac by a
+/// helper that disables the job and boots it out (STOP).
+#[cfg(not(windows))]
+fn begin_stop(home: &Home, by: &str) -> std::io::Result<()> {
+    let Some((job, label)) = job_here(home) else {
+        return Err(std::io::Error::other("Claktory's background service isn't on this Mac"));
+    };
+    let marker = serde_json::json!({"by": by, "time": crate::transcript::now_ms()});
+    std::fs::write(stopped_marker(home), marker.to_string())?;
+    let mut command = launch_agent::helper(home, STOP)?;
+    command.arg(&job.launchctl).arg(&job.domain).arg(&label);
+    command.spawn().map(drop)
+}
+
+/// On Windows by asking its supervisor to stop, the sign-in task disabled
+/// first when the person's switch stops it (`windows::service::stop`).
+#[cfg(windows)]
+fn begin_stop(home: &Home, by: &str) -> std::io::Result<()> {
+    let Some(task) = crate::windows::service::here(home) else {
+        return Err(std::io::Error::other("Claktory's sign-in task isn't on this PC"));
+    };
+    let marker = serde_json::json!({"by": by, "time": crate::transcript::now_ms()});
+    std::fs::write(stopped_marker(home), marker.to_string())?;
+    crate::windows::service::stop(home, &task, by == "switch")
+}
+
+/// A stop that didn't happen: the job enabled again unless stop mode keeps
+/// it disabled.
+#[cfg(not(windows))]
+fn stop_failed(home: &Home, stop_mode: bool) {
+    if let Some((job, label)) = job_here(home) {
+        set_enabled(&job, &label, !stop_mode);
+    }
+}
+
+/// On Windows, the sign-in task as the person chose.
+#[cfg(windows)]
+fn stop_failed(home: &Home, _stop_mode: bool) {
+    if let Some(task) = crate::windows::service::here(home) {
+        crate::windows::service::stop_failed(home, &task);
+    }
 }
 
 /// RestoreBackendService: the helper waits for this backend to stop and
@@ -553,7 +601,7 @@ mod tests {
         assert!(asked(&dir).contains("enable gui/501/dev.factory.factoryd\nprint"), "enabled first: {}", asked(&dir));
     }
 
-    /// Friend bug #27, Fugo's requirements: only this Mac's own app, only
+    /// A stop comes only from this Mac's own app, only
     /// where its service runs it, and never while an update goes in or is
     /// on trial.
     #[test]

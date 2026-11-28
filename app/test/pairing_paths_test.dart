@@ -25,9 +25,6 @@ const _allowed = {
   'lib/mobile/local_network.dart': 1,
   // The rail: This Mac, a saved Claktory, the first saved.
   'lib/rail.dart': 3,
-  // The shell's request (#245): only while nothing is saved, from a file
-  // only a program on this Mac can write, its digits checked by the agent.
-  'lib/setup_link.dart': 1,
   // The helper itself.
   'lib/scope.dart': 1,
 };

@@ -217,6 +217,19 @@ pub(super) async fn retry_claktory_removals(service: &Service) -> usize {
     heard
 }
 
+/// Asks the worker whether the device with `account_key` is on its
+/// account's current signed DM device list, and when and by whom the
+/// account's DM identity was set up. None without a worker.
+pub(super) async fn device_listed(service: &Service, account_id: &str, account_key: &str) -> Result<Option<ipc::DeviceListed>, String> {
+    let Some(apps) = service.config.user_apps.clone() else { return Ok(None) };
+    let request = Request::DeviceListed { account_id: account_id.to_owned(), account_key: account_key.to_owned() };
+    match ipc::ask(&apps.socket, apps.uid, &request, &[]).await {
+        Ok((200, body)) => serde_json::from_slice(&body).map(Some).map_err(|error| format!("the worker answered something else: {error}")),
+        Ok((status, _)) => Err(format!("the worker answered {status}")),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 /// Tells the worker an account was deleted, so its apps forget it; its
 /// deletion queued that (`db::delete_account`), and it's done once the
 /// worker says so. Until then (the worker down, say), it's asked again

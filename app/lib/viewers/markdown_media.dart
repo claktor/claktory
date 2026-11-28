@@ -27,6 +27,7 @@ import '../share_files.dart'
         downloadLabel,
         shareFrom;
 import '../visible_codes.dart' show shownName;
+import 'image.dart' show ImageViewer;
 import 'registry.dart';
 
 /// The pictures a Markdown file shows in place, by extension: what
@@ -379,6 +380,10 @@ class _MarkdownPictureState extends State<MarkdownPicture>
     with FileLoading<MarkdownPicture> {
   @override
   String get path => widget.path;
+
+  @override
+  Widget sealedViewer(FileSeal sealed) =>
+      ImageViewer(path: path, sealed: sealed);
 
   /// A GIF comes whole, so it moves; other pictures may come as a copy
   /// made for this screen, as the image viewer's do.

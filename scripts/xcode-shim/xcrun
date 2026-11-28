@@ -1,0 +1,9 @@
+#!/bin/bash
+# xcrun, as Flutter runs xcodebuild through it, with Swift packages' own
+# sandbox off for xcodebuild (use.sh says when and why); any other tool as
+# it is.
+if [[ "${1:-}" == xcodebuild ]]; then
+  shift
+  exec /usr/bin/xcrun xcodebuild -IDEPackageSupportDisableManifestSandbox=YES -IDEPackageSupportDisablePluginExecutionSandbox=YES "$@"
+fi
+exec /usr/bin/xcrun "$@"

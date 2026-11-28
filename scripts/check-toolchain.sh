@@ -11,23 +11,24 @@
 #
 # The archives are kept in CLAKTORY_TOOLCHAIN_CACHE
 # (~/Library/Caches/claktory-toolchain), each checked against the manifest's
-# hash every time; a new Rust means a new pin here and in
+# hash every time; a new Rust means a new pin in scripts/toolchain.pins and in
 # app/rust/rust-toolchain.toml (they must agree).
 set -euo pipefail
 
-RUST_VERSION=1.97.1
-RUST_CHANNEL_SHA256=03569b1886ceb5c05276b50c8431ab111de944cd6140fe1fa7d821dd8e0f29cf
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+RUST_VERSION="$(sed -n 's/^RUST_VERSION=\([0-9][0-9.]*\)$/\1/p' "$ROOT/scripts/toolchain.pins")"
+RUST_CHANNEL_SHA256="$(sed -n 's/^RUST_CHANNEL_SHA256=\([0-9a-f]\{64\}\)$/\1/p' "$ROOT/scripts/toolchain.pins")"
+[[ -n "$RUST_VERSION" && -n "$RUST_CHANNEL_SHA256" ]] || { echo "scripts/toolchain.pins has no RUST_VERSION or RUST_CHANNEL_SHA256" >&2; exit 1; }
 RUSTUP_VERSION=1.29.3
 RUSTUP_SHA256=63752a1919a3a4793173ec70f8f212621a7ce38ba6a246095984482f4de20f9f
 HOST=aarch64-apple-darwin
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CACHE="${CLAKTORY_TOOLCHAIN_CACHE:-$HOME/Library/Caches/claktory-toolchain}"
 RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
 TOOLCHAIN="$RUST_VERSION-$HOST"
 
 pinned="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' "$ROOT/app/rust/rust-toolchain.toml" 2>/dev/null || true)"
-[[ -z "$pinned" || "$pinned" == "$RUST_VERSION" ]] || { echo "app/rust/rust-toolchain.toml pins Rust $pinned, scripts/check-toolchain.sh $RUST_VERSION: make them agree" >&2; exit 1; }
+[[ -z "$pinned" || "$pinned" == "$RUST_VERSION" ]] || { echo "app/rust/rust-toolchain.toml pins Rust $pinned, scripts/toolchain.pins $RUST_VERSION: make them agree" >&2; exit 1; }
 
 RUSTUP="$(command -v rustup || true)"
 [[ -n "$RUSTUP" ]] || { echo "no rustup on PATH" >&2; exit 1; }

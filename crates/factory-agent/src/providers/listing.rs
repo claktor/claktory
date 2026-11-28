@@ -22,8 +22,9 @@ use crate::types::Model;
 pub const LIST_LIMIT: usize = 8 * 1024 * 1024;
 const NAME_LIMIT: usize = 200;
 /// The version Codex's model list is asked for as: models for newer
-/// clients than this are left out of its answer.
-pub const CODEX_CLIENT_VERSION: &str = "0.150.0";
+/// clients than this are left out of its answer, so it's Codex's latest
+/// release.
+pub const CODEX_CLIENT_VERSION: &str = "0.172.0";
 
 /// The providers whose list Claktory reads from them.
 pub const PROVIDERS: [&str; 5] = ["anthropic", "openai", "openai-codex", "openrouter", "grok"];
@@ -462,7 +463,7 @@ fn new_model(provider: &str, id: &str, entry: &Value, bundled: &[Model]) -> Opti
         .or_else(|| entry.get("name").filter(|_| provider == "grok"))
         .and_then(Value::as_str)
         .map(|name| name.chars().filter(|c| !c.is_control()).take(NAME_LIMIT).collect::<String>().trim().to_owned())
-        .filter(|name| !name.is_empty())
+        .filter(|name| !name.is_empty() && !name.eq_ignore_ascii_case(id))
         .unwrap_or_else(|| pretty(id));
     if provider == "anthropic" {
         // Fallbacks name other models by what this one's maker chose.

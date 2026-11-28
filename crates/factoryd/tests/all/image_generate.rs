@@ -180,7 +180,7 @@ async fn an_agent_whose_model_makes_images_makes_one_into_its_own_folder() {
     assert_eq!(std::fs::read(&path).expect("the image"), png(48, 32));
     assert!(made.output.contains(&path), "{}", made.output);
     // ChatGPT chooses the size and quality: the result gives what it made,
-    // and what was asked for (#403).
+    // and what was asked for.
     assert!(made.output.contains("(48×32 PNG)"), "{}", made.output);
     assert!(made.output.contains("You asked for 1536×1024 at low quality; ChatGPT chooses the final size and quality."), "{}", made.output);
     assert_eq!(

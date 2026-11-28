@@ -398,8 +398,7 @@ class ZoomSetting extends StatelessWidget {
     final palette = Palette.of(context);
     final level = zoom.level;
     final mac = defaultTargetPlatform == TargetPlatform.macOS;
-    // Android's phones and tablets, with a keyboard only sometimes
-    // (Risotto 49783, Trish 49821).
+    // Android's phones and tablets, with a keyboard only sometimes.
     final note = mac
         ? 'Only on this Mac. Press ⌘+ or ⌘− to zoom, and ⌘0 for actual size.'
         : defaultTargetPlatform == TargetPlatform.android
@@ -407,7 +406,7 @@ class ZoomSetting extends StatelessWidget {
               'Ctrl− to zoom, and Ctrl+0 for actual size.'
         : 'Only on this computer. Press Ctrl+ or Ctrl− to zoom, and Ctrl+0 '
               'for actual size.';
-    // Its help under the menu, never beside it (settings.md §4.1).
+    // Its help under the menu, never beside it.
     return SettingRow(
       label: 'Zoom',
       child: Column(

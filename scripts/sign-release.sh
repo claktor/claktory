@@ -34,20 +34,27 @@
 # --dry-run signs with the Developer ID (only the identity is needed) and
 # checks the signatures, but sends nothing to Apple: it says what it would
 # send. Try it on a copy, never on a published release.
+#
+# --notarize-only signs nothing: for a release the build service's signer has
+# already signed (scripts/release-from-service.sh), where this Mac's
+# account holds no Developer ID key. It checks the signatures as below
+# (Developer ID, CLAKTORY_TEAM_ID's team, required, nothing open to
+# injection), then notarizes and staples as below.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/scripts/lib.sh"
 
 DIR="${1:-}"
-DRY_RUN=false
+DRY_RUN=false NOTARIZE_ONLY=false
 case "${2:-}" in
   "") ;;
   --dry-run) DRY_RUN=true ;;
+  --notarize-only) NOTARIZE_ONLY=true ;;
   *) DIR="" ;;
 esac
 if [[ -z "$DIR" || ! -f "$DIR/factoryd" ]]; then
-  echo "usage: scripts/sign-release.sh RELEASE_DIR [--dry-run]" >&2
+  echo "usage: scripts/sign-release.sh RELEASE_DIR [--dry-run | --notarize-only]" >&2
   exit 2
 fi
 APP="$(find "$DIR" -maxdepth 1 -name '*.app' -type d | head -1)"
@@ -71,10 +78,27 @@ if [[ -e "$APP/Contents/Library/LaunchDaemons" || -e "$APP/Contents/Helpers/clak
   exit 1
 fi
 
-IDENTITY="$(developer_id_identity)"
 KEY=false
 notary_key && KEY=true
-if ! $DRY_RUN && ! { [[ -n "$IDENTITY" ]] && $KEY; }; then
+if $NOTARIZE_ONLY; then
+  $KEY || { echo "no notarization key (~/.appstoreconnect/claktory.env, see above)" >&2; exit 1; }
+  [[ -n "${CLAKTORY_TEAM_ID:-}" ]] || { echo "--notarize-only needs CLAKTORY_TEAM_ID, the team every piece must be signed by" >&2; exit 1; }
+  # Whoever signed it, as the signature says: a Developer ID, of this team.
+  IDENTITY="$(codesign -dvv "$DIR/factoryd" 2>&1 | sed -n 's/^Authority=\(Developer ID Application: .*\)$/\1/p' | head -1)"
+  [[ -n "$IDENTITY" ]] || { echo "$DIR/factoryd isn't signed with a Developer ID" >&2; exit 1; }
+  [[ "$IDENTITY" == *"($CLAKTORY_TEAM_ID)" ]] || { echo "$DIR isn't signed by team CLAKTORY_TEAM_ID" >&2; exit 1; }
+  for code in "$APP" ${SUPERVISOR:+"$SUPERVISOR"} ${APPS_HOST:+"$APPS_HOST"} ${SPEECH:+"$SPEECH"} ${VIDEO:+"$VIDEO"} ${RG:+"$RG"} ${JQ:+"$JQ"}; do
+    info="$(codesign -dvv "$code" 2>&1)"
+    [[ "$(sed -n 's/^Authority=\(Developer ID Application: .*\)$/\1/p' <<<"$info" | head -1)" == "$IDENTITY" ]] ||
+      { echo "${code#"$DIR"/} isn't signed by $IDENTITY" >&2; exit 1; }
+    [[ "$(sed -n 's/^TeamIdentifier=//p' <<<"$info")" == "$CLAKTORY_TEAM_ID" ]] || { echo "${code#"$DIR"/} isn't signed by team CLAKTORY_TEAM_ID" >&2; exit 1; }
+    [[ "$info" == *$'\n'Timestamp=* ]] || { echo "${code#"$DIR"/} has no secure timestamp" >&2; exit 1; }
+    [[ "$info" =~ flags=[^$'\n']*runtime ]] || { echo "${code#"$DIR"/} isn't signed with the hardened runtime" >&2; exit 1; }
+  done
+else
+  IDENTITY="$(developer_id_identity)"
+fi
+if ! $NOTARIZE_ONLY && ! $DRY_RUN && ! { [[ -n "$IDENTITY" ]] && $KEY; }; then
   if [[ -z "$IDENTITY" ]]; then
     echo "signed ad hoc: no Developer ID identity in the keychain"
   else
@@ -99,6 +123,7 @@ if ! $DRY_RUN && ! { [[ -n "$IDENTITY" ]] && $KEY; }; then
   exit 0
 fi
 [[ -n "$IDENTITY" ]] || { echo "no Developer ID identity in the keychain to sign with" >&2; exit 1; }
+if ! $NOTARIZE_ONLY; then
 
 # The hardened runtime, which notarization requires, with a secure timestamp.
 sign() {
@@ -206,6 +231,7 @@ if [[ -n "$PROFILE" ]]; then
 fi
 sign --entitlements "$ENTITLEMENTS" "$APP"
 [[ -z "${PROFILE_WORK:-}" ]] || rm -rf "$PROFILE_WORK"
+fi
 
 codesign --verify --strict --deep "$APP"
 codesign --verify --strict "$DIR/factoryd"
@@ -228,7 +254,7 @@ done < <(
     find "$APP/Contents" \( -name '*.app' -o -name '*.framework' -o -name '*.dylib' -o -type f -perm -u+x \) -print0 2>/dev/null; }
 )
 echo "no signed code in it allows injection (library validation, dyld variables, get-task-allow)"
-echo "signed with $IDENTITY"
+if $NOTARIZE_ONLY; then echo "signed with $IDENTITY (by the build service)"; else echo "signed with $IDENTITY"; fi
 
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT

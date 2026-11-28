@@ -42,6 +42,69 @@ const MOST_ROUTED_GROUPS: usize = 20_000;
 
 const NOT_HOME: &str = "This Claktory isn't your home for direct messages.";
 const NOT_ON: &str = "This Claktory doesn't take direct messages yet.";
+const NOT_LISTED: &str = "This device isn't on your device list for direct messages.";
+const MEMBERS_UNREAD: &str = "This Claktory couldn't check who's in this chat just now. Try again in a moment.";
+const LIST_UNREAD: &str = "This Claktory hasn't read your device list yet. Try again in a moment.";
+const NOT_SIGNED_IN: &str = "This device isn't signed in to your account.";
+const NOT_ITS_LEAF: &str = "That's another device's, not this one's.";
+
+/// Whether the person's current signed list names `leaf` as one of their
+/// devices (Fugo, E11-8 (b)): the home serves and takes from no other,
+/// whatever MLS groups still hold it. Err with the refusal otherwise.
+fn listed(factory: &Factory, leaf: &str) -> Result<(), Box<Body>> {
+    match home::listed_device(factory, leaf) {
+        Ok(Some(true)) => Ok(()),
+        Ok(Some(false)) => Err(Box::new(error(ErrorCode::InvalidRequest, NOT_LISTED))),
+        // Before the list watcher read any list (just after an update, the
+        // vault locked): nothing yet, never everything.
+        Ok(None) => Err(Box::new(error(ErrorCode::Internal, LIST_UNREAD))),
+        Err(refusal) => {
+            let (code, why) = refused(refusal);
+            Err(Box::new(error(code, why)))
+        }
+    }
+}
+
+/// Whether `group_id`'s tree still holds a device leaf its account's
+/// current signed list doesn't name (a device locked out, not taken out
+/// yet), by the lists this Claktory's leaf keeps: a send into it waits.
+/// An account it keeps no list of isn't judged. Err when the
+/// tree or the lists can't be read: the send fails closed, to try
+/// again.
+fn holds_removed_device(factory: &Factory, group_id: &[u8]) -> Result<bool, ()> {
+    use claktory_dm_crypto::certificate::LeafKind;
+    // No state of the group here: nothing to judge (the intake says so).
+    let Some(leaves) = home::tree_leaves(factory, group_id).map_err(|_| ())? else { return Ok(false) };
+    let mut devices: Vec<_> = leaves.into_iter().filter(|leaf| leaf.kind == LeafKind::Device).collect();
+    // The person's own, against the list the home keeps, which it reads with
+    // the vault locked too: their own groups go on while it is.
+    let config = factory.lock().config.account.clone();
+    if let Some(owner) = crate::account::owner(factory, &config) {
+        for leaf in devices.iter().filter(|leaf| leaf.account_id == owner.account_id) {
+            match home::listed_device(factory, &leaf.leaf_id).map_err(|_| ())? {
+                Some(true) => {}
+                Some(false) => return Ok(true),
+                None => return Err(()),
+            }
+        }
+        devices.retain(|leaf| leaf.account_id != owner.account_id);
+    }
+    if devices.is_empty() {
+        return Ok(false);
+    }
+    // A friend's, against their list as this Claktory's leaf pinned it.
+    let mut accounts: Vec<&str> = devices.iter().map(|leaf| leaf.account_id.as_str()).collect();
+    accounts.sort_unstable();
+    accounts.dedup();
+    let lists = dms::leaf::step(factory, |step| {
+        accounts.iter().map(|account| Ok((account.to_string(), step.list_of(account)?))).collect::<Result<HashMap<_, _>, _>>()
+    })
+    .map_err(|_| ())?;
+    Ok(devices.iter().any(|leaf| {
+        let Some(Some(list)) = lists.get(&leaf.account_id) else { return false };
+        !list.list.leaves.iter().any(|listed| listed.kind == LeafKind::Device && listed.leaf_id == leaf.leaf_id)
+    }))
+}
 
 /// What the device side keeps while Factory runs.
 #[derive(Default)]
@@ -50,6 +113,47 @@ pub(crate) struct State {
     sends: Mutex<HashMap<String, VecDeque<i64>>>,
     /// The home's state as it last told every connection (`home_changed`).
     said: Mutex<Option<v1::DmHome>>,
+    /// When each device (by tunnel key) was last asked to connect again
+    /// with its account (`reconnect_signed_in`).
+    reconnects: Mutex<HashMap<String, i64>>,
+}
+
+/// A device asked to connect again with its account isn't asked again for
+/// this long, so one that comes back without its assertion still keeps its
+/// connection.
+const RECONNECT_EVERY_MS: i64 = 10 * 60_000;
+
+/// Whether to close a device's connection once `body` is answered, so it
+/// connects again showing the account it signed in to since it connected:
+/// a request under a leaf (its account key) on a connection that has none.
+/// Apps before 0.2.0 show their assertion only when they connect, so this is
+/// the one way their direct messages start without the person reconnecting.
+/// Once per device in `RECONNECT_EVERY_MS`; never for this computer's app or
+/// an agent's command (`endpoint_id` empty).
+pub(crate) fn reconnect_signed_in(
+    factory: &Factory,
+    endpoint_id: &str,
+    account_key: Option<&str>,
+    body: Option<&v1::client_message::Body>,
+) -> bool {
+    use v1::client_message::Body as Request;
+    let leaf = match body {
+        Some(Request::DmSend(request)) => request.leaf_id.as_str(),
+        Some(Request::DmFollow(request)) => request.leaf_id.as_str(),
+        Some(Request::DmAck(request)) => request.leaf_id.as_str(),
+        _ => return false,
+    };
+    if account_key.is_some() || endpoint_id.is_empty() || check_leaf(leaf).is_err() {
+        return false;
+    }
+    let now = now_ms();
+    let mut reconnects = lock(&factory.dm_device.reconnects);
+    reconnects.retain(|_, asked| now - *asked < RECONNECT_EVERY_MS);
+    if reconnects.contains_key(endpoint_id) {
+        return false;
+    }
+    reconnects.insert(endpoint_id.to_owned(), now);
+    true
 }
 
 /// A connection's follow: what it pushes, for it alone.
@@ -93,6 +197,33 @@ impl Drop for Port {
 
 fn error(code: ErrorCode, message: impl Into<String>) -> Body {
     Body::Error(v1::Error { code: code.into(), message: message.into(), ..Default::default() })
+}
+
+/// DmSend, DmFollow and DmAck go only under the connection's own leaf: a
+/// device's DM leaf is its account key, so `leaf_id` must be the key its
+/// app was let in with (`account_key`, from the assertion it showed). One
+/// with none (an app not signed in to the account, a tool) uses no leaf;
+/// one naming another device's is refused and logged, since no app of
+/// ours does that.
+pub(crate) fn bound(account_key: Option<&str>, leaf_id: &str) -> Result<(), RequestError> {
+    match account_key {
+        None => Err(RequestError::Account(ErrorCode::InvalidRequest, NOT_SIGNED_IN.to_owned())),
+        Some(key) if key == leaf_id => Ok(()),
+        Some(_) => {
+            tracing::warn!(leaf_id, "a device asked for direct messages under another device's leaf");
+            Err(RequestError::Account(ErrorCode::InvalidRequest, NOT_ITS_LEAF.to_owned()))
+        }
+    }
+}
+
+/// Whether a connection may ask the home for routes: only one signed in with
+/// an account key, as the leaf-bound requests; None is refused as
+/// NOT_SIGNED_IN.
+pub(crate) fn signed_in(account_key: Option<&str>) -> Result<(), RequestError> {
+    match account_key {
+        None => Err(RequestError::Account(ErrorCode::InvalidRequest, NOT_SIGNED_IN.to_owned())),
+        Some(_) => Ok(()),
+    }
 }
 
 /// A leaf id as the devices make them: 1 to 128 visible characters.
@@ -168,6 +299,23 @@ pub(crate) fn send(factory: &Factory, request: v1::DmSend) -> Body {
         receipt.retry_after_ms = wait.max(1000);
         return answer(receipt, v1::DmSendResult::RateLimited);
     }
+    match home::listed_device(factory, &leaf_id) {
+        Ok(Some(true)) => {}
+        Ok(Some(false)) => return answer(receipt, v1::DmSendResult::NotListed),
+        Ok(None) => return error(ErrorCode::Internal, LIST_UNREAD),
+        Err(refusal) => {
+            let (code, why) = refused(refusal);
+            return error(code, why);
+        }
+    }
+    // A message, not a commit (a commit is what takes the device out).
+    if !client_message_id.is_empty() {
+        match holds_removed_device(factory, &group_id) {
+            Ok(false) => {}
+            Ok(true) => return answer(receipt, v1::DmSendResult::RemovedDeviceInGroup),
+            Err(()) => return error(ErrorCode::Internal, MEMBERS_UNREAD),
+        }
+    }
     let intake = home::Intake { group_id: group_id.clone(), envelope, source: home::Source::Device { leaf_id, client_message_id } };
     let result = match home::take(factory, intake) {
         Ok(home::Taken::Stored { seq, accepted_ms, duplicate }) => {
@@ -210,6 +358,9 @@ pub(crate) fn follow(factory: &Arc<Factory>, request: v1::DmFollow, port: &Port)
     let leaf = request.leaf_id;
     if let Err(why) = check_leaf(&leaf) {
         return error(ErrorCode::InvalidRequest, why);
+    }
+    if let Err(refused) = listed(factory, &leaf) {
+        return *refused;
     }
     // Before reading, so nothing that arrives meanwhile is missed.
     let arrivals = home::arrivals(factory);
@@ -300,6 +451,8 @@ async fn run(
                 look = following.read.get(&group_id).is_none_or(|read| seq > *read);
                 continue;
             }
+            // Off the person's list now: the follow ends (E11-8 (b)).
+            Ok(home::Arrival::Unlisted { leaf_id }) if leaf_id == leaf => return,
             Ok(home::Arrival::Delivered { leaf_id, client_message_id, group_id, endpoint })
                 if leaf_id == leaf && !client_message_id.is_empty() =>
             {
@@ -350,6 +503,11 @@ fn account_at(factory: &Factory, endpoint: &str) -> String {
 /// Pushes everything after where the device is, a page at a time; the last
 /// page says `has_more: false`. Err when the connection's gone.
 async fn catch_up(factory: &Arc<Factory>, leaf: &str, following: &mut Following, out: &mpsc::Sender<Body>) -> Result<(), ()> {
+    // Read again before anything is pushed, so a leaf the list dropped gets
+    // nothing more even if the word of it was missed (E11-8 (b)).
+    if listed(factory, leaf).is_err() {
+        return Err(());
+    }
     let views = match home::groups(&**factory, leaf) {
         Ok(views) => views,
         Err(refusal) => {
@@ -463,7 +621,8 @@ pub(crate) fn ack(factory: &Factory, request: v1::DmAck) -> Result<(), RequestEr
 }
 
 /// DmRoutes: the friends' homes the device verified, for this home's
-/// table and link; answered with how the home is doing.
+/// table and link; answered with how the home is doing. A route with no
+/// groups is a friend's home with no conversation routed to it yet.
 pub(crate) fn routes(factory: &Arc<Factory>, request: v1::DmRoutes) -> Body {
     if !dms::preview() {
         return error(ErrorCode::InvalidRequest, NOT_ON);
@@ -574,6 +733,14 @@ pub(crate) fn home_state(factory: &Factory) -> v1::DmHome {
 #[doc(hidden)]
 pub fn set_home_for_test(factory: &Factory, is_home: bool) {
     home::set_is_home(factory, is_home);
+}
+
+/// Tests only: the device leaves the person's current signed list names,
+/// as the list watcher keeps them.
+#[doc(hidden)]
+pub fn set_listed_for_test(factory: &Factory, devices: &[&str]) {
+    let listed = home::Listed { devices: devices.iter().map(|device| (*device).to_owned()).collect(), claktories: Vec::new() };
+    home::set_listed(factory, &listed).expect("kept");
 }
 
 /// Tests only: a group's state from its GroupInfo, as the home takes it

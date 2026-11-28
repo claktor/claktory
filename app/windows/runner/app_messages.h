@@ -16,4 +16,7 @@ constexpr UINT kToastActivatedMessage = WM_APP + 2;
 // The window was cloaked or uncloaked (presence.h).
 constexpr UINT kPresenceChangedMessage = WM_APP + 3;
 
+// A run of factoryd.exe ended; wparam names it (setup_channel.h).
+constexpr UINT kSetupDoneMessage = WM_APP + 4;
+
 #endif  // RUNNER_APP_MESSAGES_H_

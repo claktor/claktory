@@ -1,4 +1,4 @@
-//! A conversation's older segments, kept on disk (#377). Every segment but
+//! A conversation's older segments, kept on disk. Every segment but
 //! the newest is only shown, so once read its entries are written to
 //! `transcript-entries.bin` (each section's, one after the other) with
 //! what restoring the next segment needs in `transcript-index.json`. A
@@ -271,7 +271,7 @@ impl Older {
 
     /// A page of entries (`Transcript::page`) that starts on disk: `held`
     /// are the entries from `end()` to `before` held in memory.
-    pub fn page(&self, held: Vec<Entry>, before: u64, limit: u32, from: Option<u64>) -> std::io::Result<(Vec<Entry>, bool)> {
+    pub(super) fn page(&self, held: Vec<Entry>, before: u64, cut: super::Cut, from: Option<u64>) -> std::io::Result<(Vec<Entry>, bool)> {
         let mut entries = held;
         let mut offset = self.end().min(before);
         for at in self.before(offset) {
@@ -280,7 +280,7 @@ impl Older {
             offset = self.sections[at].first;
             section.append(&mut entries);
             entries = section;
-            if let Some(start) = super::page_start(&entries, offset, before, limit, from) {
+            if let Some(start) = super::page_start(&entries, offset, before, cut, from) {
                 let start = usize::try_from(start - offset).unwrap_or(usize::MAX).min(entries.len());
                 let more = offset + start as u64 > 0;
                 entries.drain(..start);

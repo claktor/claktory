@@ -57,6 +57,8 @@
 	<string>Claktory uses the camera to scan the code that connects this iPhone to your Claktory, and to take photos you send to your agents.</string>
 	<key>NSCameraUsageDescription~ipad</key>
 	<string>Claktory uses the camera to scan the code that connects this iPad to your Claktory, and to take photos you send to your agents.</string>
+	<key>NSFaceIDUsageDescription</key>
+	<string>Claktory uses Face ID to make sure it's you before this device approves a change to your account.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Connects directly to your Claktory when it's on the same network, which is faster.</string>
 	<key>NSMicrophoneUsageDescription</key>

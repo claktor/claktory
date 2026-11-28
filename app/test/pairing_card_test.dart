@@ -33,8 +33,14 @@ DevicePairing _pairing(
 
 /// Shows agent a1's conversation with the pairing card in it, the backend
 /// answering ShowPairingCode with [_code].
-Future<Harness> _show(WidgetTester tester, DevicePairing pairing) async {
-  final harness = Harness(workspace(agents: [builder(working: false)]));
+Future<Harness> _show(
+  WidgetTester tester,
+  DevicePairing pairing, {
+  String claktory = '',
+}) async {
+  final snapshot = workspace(agents: [builder(working: false)]);
+  snapshot.ensureSettings().name = claktory;
+  final harness = Harness(snapshot);
   harness.backend.shownCodes['p1'] = PairingCode(code: _code, deviceId: 'd9');
   harness.backend.transcript.load(
     Transcript(
@@ -80,6 +86,57 @@ void main() {
     expect(countdown(const Duration(milliseconds: 61500)), '1:02');
     expect(countdown(const Duration(seconds: 5)), '0:05');
     expect(countdown(const Duration(seconds: -3)), '0:00');
+  });
+
+  for (final (claktory, machine) in [
+    ('nixos', 'nixos'),
+    ('', 'this computer'),
+  ]) {
+    testWidgets('one a command on $machine asked for says so, and that the '
+        'person didn\'t', (tester) async {
+      final harness = await _show(
+        tester,
+        _pairing(DevicePairingState.DEVICE_PAIRING_STATE_WAITING)
+          ..fromCommandLine = true,
+        claktory: claktory,
+      );
+      expect(
+        find.text('A command on $machine adds a device: Laptop'),
+        findsOneWidget,
+      );
+      expect(find.text('Builder adds a device: Laptop'), findsNothing);
+      const warning =
+          "asked for this, not you. Use this code only on a device you're "
+          'adding yourself.';
+      expect(
+        find.text('An agent or a script on $machine $warning'),
+        findsOneWidget,
+      );
+
+      await _becomes(
+        tester,
+        harness,
+        _pairing(
+          DevicePairingState.DEVICE_PAIRING_STATE_ADDED,
+          endedMs: _now.millisecondsSinceEpoch,
+        )..fromCommandLine = true,
+      );
+      expect(
+        find.text('A command on $machine adds a device: Laptop'),
+        findsOneWidget,
+      );
+      expect(find.textContaining(warning), findsNothing);
+    });
+  }
+
+  testWidgets('one its agent asked for has no such warning', (tester) async {
+    await _show(
+      tester,
+      _pairing(DevicePairingState.DEVICE_PAIRING_STATE_WAITING),
+      claktory: 'nixos',
+    );
+    expect(find.text('Builder adds a device: Laptop'), findsOneWidget);
+    expect(find.textContaining('asked for this, not you'), findsNothing);
   });
 
   testWidgets('a waiting card shows the code it asks for, counts down, and '

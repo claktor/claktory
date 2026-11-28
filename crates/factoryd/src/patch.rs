@@ -151,6 +151,10 @@ pub(crate) struct Workspaces {
     deltas: Deltas,
     /// What went out, by kind.
     pub(crate) tally: Tally,
+    /// Each Workspace without the codes and digits, for an agent's command
+    /// or the Windows app, by its authority
+    /// (`authority::strip_workspace_for`).
+    strip: Option<crate::authority::Authority>,
 }
 
 /// Workspaces held to go together.
@@ -174,7 +178,15 @@ impl Workspaces {
             pace: None,
             deltas: Deltas::default(),
             tally: Tally::default(),
+            strip: None,
         }
+    }
+
+    /// Sends each Workspace without the codes and digits a connection with
+    /// `authority` mustn't see.
+    pub(crate) fn stripped(mut self, authority: crate::authority::Authority) -> Self {
+        self.strip = Some(authority);
+        self
     }
 
     /// Sends a Workspace at most once `every`, and what a model writes at
@@ -195,6 +207,10 @@ impl Workspaces {
     /// Workspace held before it, which shows what it did (the agent
     /// working, the queue taken), rather than a while after it.
     fn frames_at(&mut self, event: Bytes, now: std::time::Instant) -> Vec<Bytes> {
+        let event = match self.strip {
+            Some(authority) => stripped(event, authority),
+            None => event,
+        };
         let [held, event] = self.deltas.offer(event, now);
         let workspace = event.as_deref().filter(|event| persons_entry(event)).and_then(|_| self.release_at(now));
         let event = event.and_then(|event| self.outgoing_at(event, now));
@@ -394,6 +410,19 @@ impl Deltas {
         self.sent_at = Some(now);
         Some(held.encode_to_vec().into())
     }
+}
+
+/// `frame`, a Workspace without the codes and digits; anything else as it
+/// is. One that doesn't decode goes as an empty message, never whole.
+fn stripped(frame: Bytes, authority: crate::authority::Authority) -> Bytes {
+    if body_number(&frame) != Some(WORKSPACE) {
+        return frame;
+    }
+    let Ok(mut message) = ServerMessage::decode(frame) else { return Bytes::new() };
+    if let Some(Body::Workspace(workspace)) = &mut message.body {
+        crate::authority::strip_workspace_for(workspace, authority);
+    }
+    message.encode_to_vec().into()
 }
 
 /// Appends `next`'s text to `held`'s when it's more of the same entry, with

@@ -144,7 +144,7 @@ fn document() -> serde_json::Map<String, serde_json::Value> {
 }
 
 /// What's known of sign-ins locked away holds no key or token, nor anything
-/// made from one (an API key's identity is a hash of it): Fugo's condition.
+/// made from one (an API key's identity is a hash of it).
 #[tokio::test]
 async fn an_outline_keeps_the_accounts_and_none_of_their_secrets() {
     let outline = factory_agent::credentials::outline(&document());

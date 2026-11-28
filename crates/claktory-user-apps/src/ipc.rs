@@ -138,6 +138,28 @@ pub enum Request {
     /// an earlier one go, so nothing of its reaches the person's
     /// conversations meanwhile. 204 when done.
     ClaktoryRemoved { account_id: String, claktory_id: String, epoch: u64, time: i64 },
+    /// Whether a device of the account is on its current signed DM device
+    /// list, and since when and by which leaf the account's current DM
+    /// identity key was set: a device approving a computer must be, once
+    /// the account's devices set that identity up before the request. 200
+    /// with [`DeviceListed`].
+    DeviceListed { account_id: String, account_key: String },
+}
+
+/// The answer to [`Request::DeviceListed`].
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct DeviceListed {
+    /// Whether the account has a DM identity at all.
+    pub identity: bool,
+    /// When its current identity key was set (unix ms); None when that
+    /// isn't known (set before the worker kept it).
+    #[serde(default)]
+    pub since: Option<i64>,
+    /// The leaf (a device's account key) that set it; None when not known.
+    #[serde(default)]
+    pub set_by: Option<String>,
+    /// Whether `account_key` is a device leaf on its current signed list.
+    pub listed: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

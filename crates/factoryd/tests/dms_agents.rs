@@ -21,7 +21,7 @@ use std::os::unix::fs::MetadataExt as _;
 use std::path::Path;
 use std::sync::Arc;
 
-use claktory_account::server::{self, Config, Secrets, Service, UserApps, mail};
+use claktory_account::server::{self, Config, Service, UserApps, mail};
 use claktory_user_apps::worker::{self, Worker};
 use common::{Client, MODEL, View, apply_request, create_agent, last_workspace, send_message, start, temp_dir};
 use factory_protocol::v1::{self, AgentStatus, client_message::Body as Request, entry::Kind};
@@ -41,7 +41,7 @@ async fn service(dir: &Path) -> (String, Arc<mail::Memory>) {
     let mail = Arc::new(mail::Memory::default());
     let config = Config { user_apps: Some(UserApps { socket, uid }), ..Config::default() };
     let clock: server::Clock = Arc::new(|| jiff::Timestamp::now().as_second());
-    let service = Service::new(&dir.join("account.db"), Secrets::generate(), config, mail.clone(), clock).expect("the service");
+    let service = Service::new(&dir.join("account.db"), dm_device::service_secrets(), config, mail.clone(), clock).expect("the service");
     tokio::spawn(server::serve(listener, service));
     (url, mail)
 }

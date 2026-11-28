@@ -113,6 +113,11 @@ toml = "1.2.1"
 # Linux build.
 x11rb = { version = "0.14", features = ["shm", "damage", "xtest", "randr", "xfixes"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# The Mac app's socket (authority.rs, #546 A): its peer's code signature, from
+# the socket's audit token, as the browser helper checks it.
+claktory-browser-host = { path = "../claktory-browser-host" }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 # The browser runner's fence around Chrome (browser_runner/landlock.rs):
 # folders, TCP ports and, from ABI 6, scopes.
@@ -158,8 +163,19 @@ qa-provider = ["factory-agent/qa-provider"]
 # QA only (E11 row 6): a Claktory that claims another's account when told
 # to (src/qa_lies.rs); a release build refuses it (scripts/check-qa-lies.sh).
 qa-lies = []
+# Tests only (#546 A): a person's token for this process's Claktories
+# (`authority::person_token_for_test`), and test-only openings such as
+# browser control's any-origin switch. The tests turn it on (dev-dependencies
+# below); a release build refuses it.
+test-hooks = []
+# QA only (#546 A): claktory-qa's sandboxes act as the person, with the token
+# factoryd writes to `<home>/qa-person-token`; scripts/qa.sh builds with it,
+# a release build refuses it (scripts/check-qa-lies.sh).
+qa-person = []
 
 [dev-dependencies]
+# Its own test hooks, for its tests alone (`cargo build` never has them).
+factoryd = { path = ".", features = ["test-hooks"] }
 # A local account service to sign in at (tests/all/account.rs).
 claktory-account = { path = "../claktory-account" }
 # The push relay, with FCM, for Android pushes end to end (tests/all/push_fcm.rs).

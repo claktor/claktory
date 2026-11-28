@@ -109,7 +109,7 @@ fn a_new_key_reaches_the_kept_devices_and_friends_hold_its_moves_until_they_have
 
     // (a) A rotation message while the Mac is still in the self group: the
     // tablet ignores it.
-    let early = phone.send(own.id.clone(), rotation("r0", &[9; 32], &dm_public_key(dm_new_secret().unwrap()).unwrap(), &[MAC]), 4).unwrap();
+    let early = phone.send(own.id.clone(), rotation("r0", &[9; 32], &dm_public_key(dm_new_secret().unwrap()).unwrap(), &[MAC]), 4, vec![]).unwrap();
     own.deliver(&early, &[&phone, &tablet, &mac]);
     assert!(tablet.pending_rotation().unwrap().is_none());
 
@@ -147,7 +147,7 @@ fn a_new_key_reaches_the_kept_devices_and_friends_hold_its_moves_until_they_have
     assert!(phone.prepare_rotation(dm_new_secret().unwrap(), vec![TABLET.into()], vec![MAC.into()], 7).is_err());
 
     // The key goes in the self group; the tablet keeps it to act on.
-    let said = phone.send(own.id.clone(), rotation("r1", &rotated.key, &rotated.identity_public, &[MAC]), 8).unwrap();
+    let said = phone.send(own.id.clone(), rotation("r1", &rotated.key, &rotated.identity_public, &[MAC]), 8, vec![]).unwrap();
     own.deliver(&said, &[&phone, &tablet]);
     phone.rotation_said().unwrap();
     assert!(phone.rotation().unwrap().unwrap().said);
@@ -155,7 +155,7 @@ fn a_new_key_reaches_the_kept_devices_and_friends_hold_its_moves_until_they_have
     assert_eq!((pending.from_leaf.as_str(), pending.from_name.as_str()), ("phone", "iPhone"));
     assert_eq!(pending.identity_public, rotated.identity_public);
     // One naming the key the person has now is no rotation: ignored.
-    let current = phone.send(own.id.clone(), rotation("r2", &[3; 32], &matt.identity_public, &[MAC]), 9).unwrap();
+    let current = phone.send(own.id.clone(), rotation("r2", &[3; 32], &matt.identity_public, &[MAC]), 9, vec![]).unwrap();
     own.deliver(&current, &[&phone, &tablet]);
     assert_eq!(tablet.pending_rotation().unwrap().unwrap().identity_public, rotated.identity_public);
 
@@ -212,7 +212,7 @@ fn a_new_key_reaches_the_kept_devices_and_friends_hold_its_moves_until_they_have
     assert!(pin.changed_unseen && !pin.can_send);
     // (b) What's said in a conversation is never a rotation for the tablet.
     ana.seen("matt".into()).unwrap();
-    let sly = ana.send(talk.id.clone(), rotation("x", &[1; 32], &dm_public_key(dm_new_secret().unwrap()).unwrap(), &[]), 10).unwrap();
+    let sly = ana.send(talk.id.clone(), rotation("x", &[1; 32], &dm_public_key(dm_new_secret().unwrap()).unwrap(), &[]), 10, vec![]).unwrap();
     talk.deliver(&sly, &[&ana, &tablet]);
     assert!(tablet.pending_rotation().unwrap().is_none());
     std::fs::remove_dir_all(dir).unwrap();
@@ -312,11 +312,11 @@ fn a_removed_device_is_committed_out_of_every_group_and_reads_nothing_after() {
         by_agent: None,
         extra_json: String::new(),
     };
-    let said = phone.send(own.id.clone(), text("s1"), 7).unwrap();
+    let said = phone.send(own.id.clone(), text("s1"), 7, vec![]).unwrap();
     let heard = own.deliver(&said, &[&tablet, &mac]);
     assert_eq!(heard[0].outcome, DmOutcome::Message);
     assert_ne!(heard[1].outcome, DmOutcome::Message, "{:?}", heard[1]);
-    let said = ana.send(talk.id.clone(), text("t1"), 8).unwrap();
+    let said = ana.send(talk.id.clone(), text("t1"), 8, vec![]).unwrap();
     let heard = talk.deliver(&said, &[&phone, &mac]);
     assert_eq!(heard[0].outcome, DmOutcome::Message);
     assert_ne!(heard[1].outcome, DmOutcome::Message, "{:?}", heard[1]);
@@ -466,14 +466,14 @@ fn a_start_over_rejoins_then_takes_the_dead_leaves_out() {
     mac.process(id.clone(), 1, joined.commit, 3).unwrap();
     assert_eq!(mac.replaced_leaves(id.clone()).unwrap(), ["phone"]);
     assert_eq!(mac.waiting_for(id.clone()).unwrap().as_deref(), Some("matt"));
-    let removal = mac.remove_dead_leaves(id.clone()).unwrap().unwrap();
+    let removal = mac.remove_dead_leaves(id.clone(), vec![]).unwrap().unwrap();
     mac.process(id.clone(), 2, removal.commit, 4).unwrap();
     // The lost phone, listed apart until the person removes it.
     let replaced = mac.replaced_devices().unwrap();
     assert_eq!(replaced.iter().map(|each| (each.leaf_id.as_str(), each.name.as_str())).collect::<Vec<_>>(), [("phone", "iPhone")]);
     assert!(mac.replaced_leaves(id.clone()).unwrap().is_empty());
     assert_eq!(mac.waiting_for(id.clone()).unwrap(), None);
-    assert!(mac.remove_dead_leaves(id.clone()).unwrap().is_none());
+    assert!(mac.remove_dead_leaves(id.clone(), vec![]).unwrap().is_none());
     assert_eq!(mac.leaf_ids(id).unwrap(), [MAC]);
     mac.forget_replaced("phone".into()).unwrap();
     assert!(mac.replaced_devices().unwrap().is_empty());
@@ -499,7 +499,7 @@ fn a_lone_device_starting_over_never_lists_itself_as_replaced() {
     after.process(id.clone(), 1, joined.commit, 3).unwrap();
     assert!(after.replaced_leaves(id.clone()).unwrap().is_empty());
     assert_eq!(after.waiting_for(id.clone()).unwrap().as_deref(), Some("matt"));
-    let removal = after.remove_dead_leaves(id.clone()).unwrap().unwrap();
+    let removal = after.remove_dead_leaves(id.clone(), vec![]).unwrap().unwrap();
     after.process(id.clone(), 2, removal.commit, 4).unwrap();
     assert_eq!(after.waiting_for(id.clone()).unwrap(), None);
     assert_eq!(after.leaf_ids(id).unwrap(), [MAC]);
@@ -572,7 +572,7 @@ fn a_start_over_retires_every_key_the_account_replaced() {
     let joined = mac.rejoin_group(id.clone(), mine, info, 0).unwrap();
     mac.process(id.clone(), 1, joined.commit, 3).unwrap();
     assert_eq!(mac.replaced_leaves(id.clone()).unwrap(), ["phone"]);
-    let removal = mac.remove_dead_leaves(id.clone()).unwrap().expect("the phone taken out");
+    let removal = mac.remove_dead_leaves(id.clone(), vec![]).unwrap().expect("the phone taken out");
     mac.process(id.clone(), 2, removal.commit, 4).unwrap();
     assert_eq!(mac.leaf_ids(id).unwrap(), [MAC]);
     std::fs::remove_dir_all(dir).unwrap();

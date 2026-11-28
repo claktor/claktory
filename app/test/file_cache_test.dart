@@ -1,7 +1,7 @@
 // Files kept on a device connected to a Claktory on another machine:
-// opened again, a file shows from the copy kept here after a
-// one-byte check that it's still that version, with nothing brought over
-// the link again; a changed one is read again; offline, the copy shows,
+// opened again, a file shows from the copy kept here, asked for unless
+// it's still that version, so nothing is brought over the link again; a
+// changed one comes with the answer; offline, the copy shows,
 // saying it may be out of date; past the size set for this device, the
 // copies used longest ago go; Settings sets the size and clears them.
 import 'dart:async';
@@ -92,8 +92,10 @@ void main() {
     _folder.deleteSync(recursive: true);
   });
 
-  testWidgets('opened again, a picture shows from the copy kept here after '
-      'a one-byte check, with nothing else read', (tester) async {
+  testWidgets('opened again, a picture shows from the copy kept here, '
+      'asked for unless it is still that version, with nothing read again', (
+    tester,
+  ) async {
     final bytes = await png(tester, 80, 40);
     final harness = Harness(snapshot(layout: beside('image', _shot)));
     harness.backend.files[_shot] = _image(bytes, 'v1');
@@ -108,9 +110,26 @@ void main() {
     expect(find.byType(RawImage), findsOneWidget);
     final again = _reads(harness, before).toList();
     expect(again, hasLength(1));
-    expect(again.single.maxBytes.toInt(), 1);
-    expect(again.single.expectedSha256, 'v1');
+    expect(again.single.unlessSha256, 'v1');
     expect(find.textContaining('may be out of date'), findsNothing);
+  });
+
+  testWidgets('a Claktory from before reads the picture as asked: still the '
+      'kept version by its hash, it stays, with one read', (tester) async {
+    final bytes = await png(tester, 80, 40);
+    final harness = Harness(snapshot(layout: beside('image', _shot)));
+    harness.backend
+      ..files[_shot] = _image(bytes, 'v1')
+      ..knowsUnless = false;
+    await harness.show(tester);
+    await _working(tester);
+
+    final before = harness.backend.sent.length;
+    await _reopen(tester, harness);
+    expect(find.byType(RawImage), findsOneWidget);
+    expect(_reads(harness, before), hasLength(1));
+    expect(find.textContaining('may be out of date'), findsNothing);
+    expect(_keptFiles(), hasLength(1));
   });
 
   testWidgets('a picture changed under the same name is read again and '
@@ -126,10 +145,9 @@ void main() {
     final before = harness.backend.sent.length;
     await _reopen(tester, harness);
     final again = _reads(harness, before).toList();
-    expect(again.map((r) => (r.maxBytes.toInt(), r.expectedSha256)), [
-      (1, 'v1'),
-      (0, ''),
-    ]);
+    expect(again.map((r) => (r.maxBytes.toInt(), r.unlessSha256)), [
+      (0, 'v1'),
+    ], reason: 'one read, which brings the new version');
     expect(find.text('60 × 60 · ${second.length} bytes'), findsOneWidget);
     // Only the new version is kept.
     final kept = _keptFiles();
@@ -155,9 +173,7 @@ void main() {
     harness.backend.connected.value = true;
     await _working(tester);
     expect(find.textContaining('may be out of date'), findsNothing);
-    expect(_reads(harness, before).map((r) => r.maxBytes.toInt()).toList(), [
-      1,
-    ]);
+    expect(_reads(harness, before).map((r) => r.unlessSha256).toList(), ['v1']);
   });
 
   testWidgets('a phone keeps the preview made for its screen, and the '

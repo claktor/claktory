@@ -117,9 +117,13 @@ impl Vault {
         inner.db.as_ref().is_some_and(|db| Self::account_covered(db).unwrap_or(false))
     }
 
-    /// Seals the vault to the account key `public` of `account_id`, in
-    /// place of any account key before. Whether anything changed: already
-    /// sealed to it, nothing.
+    /// Seals the vault to the account key `public` of `account_id`, in place
+    /// of any account key before, and drops this Claktory's own recovery
+    /// key, kept, confirmed or not: the person made a new key and saved it,
+    /// so a key saved before stops opening the vault here (copies made
+    /// earlier still open with it). In one transaction, so the own key goes
+    /// only once the account's protector is saved. Whether anything changed:
+    /// already sealed to it, nothing.
     pub(crate) fn seal_to_account_key(&self, account_id: &str, public: &[u8; 32]) -> Result<bool, VaultError> {
         let wanted = Sealed { account_id: account_id.to_owned(), public_key: claktory_account::protocol::b64(public) };
         self.with_unlocked_transaction(|db, vault_id, vmk| {
@@ -127,6 +131,8 @@ impl Vault {
                 return Ok(false);
             }
             Self::save_account_protector(db, vault_id, vmk, account_id, public)?;
+            db.execute("DELETE FROM protectors WHERE kind = 'recovery'", [])?;
+            db.execute("DELETE FROM kept WHERE name IN ('recovery', 'recovery-confirmed')", [])?;
             Ok(true)
         })
     }
@@ -220,9 +226,9 @@ mod tests {
         let generation = opens(&vault, &text).expect("the account's key opens it");
         assert_eq!(Some(generation.clone()), read(&vault, |inner| super::generation(Vault::db(inner)?)));
         assert!(opens(&vault, &crypto::new_recovery().0).is_none(), "another key doesn't");
-        // Its own key, never confirmed, stays a way in but isn't asked about
-        // or shown any more: no Claktory keeps the account's either.
-        assert!(opens(&vault, &own).is_some());
+        // Its own key no longer opens it, and isn't asked about or shown:
+        // no Claktory keeps the account's either.
+        assert!(opens(&vault, &own).is_none(), "the key saved before no longer opens it");
         assert!(!read(&vault, Vault::recovery_unconfirmed) && !read(&vault, Vault::recovery_showable));
         let refused = vault.recovery_key("Mac").expect_err("nothing to show");
         assert!(refused.to_string().contains("uses your account's recovery key"), "{refused}");
@@ -237,20 +243,30 @@ mod tests {
         assert!(opens(&vault, &text).is_none(), "the old key no longer opens this vault");
     }
 
+    /// Sealed to the account's key, a key of its own the person confirmed
+    /// (saved) goes too, and isn't made again at the next sign-in; a copy
+    /// of the vault made before still opens with it.
     #[test]
-    fn a_key_of_its_own_confirmed_before_stays_shown_beside_the_accounts() {
+    fn a_key_of_its_own_stops_opening_the_vault_once_the_accounts_covers_it() {
         let vault = vault();
         let own = vault.recovery_key("Mac").expect("its own");
         let check = vault.check_recovery_key("Mac").expect("check");
         let group = own.split('-').nth(check.group as usize - 1).expect("group").to_owned();
         vault.confirm_recovery_key("Mac", &check.check_id, &group).expect("confirmed");
-        let (_, public) = pair(&[3; 20]);
-        vault.seal_to_account_key("acct1", &public).expect("sealed");
-        assert!(read(&vault, Vault::recovery_showable) && !read(&vault, Vault::recovery_unconfirmed));
-        assert_eq!(vault.recovery_key("Mac").expect("still shown"), own);
-        assert!(opens(&vault, &own).is_some());
+        let (before_id, before) = vault.protectors().expect("protectors");
+        let (text, bytes) = crypto::new_recovery();
+        let (_, public) = pair(&bytes);
+        assert!(vault.seal_to_account_key("acct1", &public).expect("sealed"));
+        assert!(opens(&vault, &own).is_none(), "the key saved before no longer opens it");
+        assert!(opens(&vault, &text).is_some(), "the new one does");
+        assert!(Vault::check_which(&before_id, &before, &own).is_some(), "a copy made before still opens with it");
+        assert!(!read(&vault, Vault::recovery_showable) && !read(&vault, Vault::recovery_unconfirmed));
+        assert!(vault.recovery_key("Mac").is_err(), "nothing of its own to show");
+        vault.protect_with_account("acct1", "{}", &[8u8; 64]).expect("signed in again");
+        assert!(opens(&vault, &own).is_none() && !read(&vault, Vault::recovery_showable), "no key of its own made again");
         let (_, protectors) = vault.protectors().expect("protectors");
         assert!(protectors.iter().any(|protector| protector.kind == KIND), "tried on a typed key");
+        assert!(!protectors.iter().any(|protector| protector.kind == "recovery"));
     }
 
     #[test]

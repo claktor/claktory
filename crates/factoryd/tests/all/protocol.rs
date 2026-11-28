@@ -90,33 +90,46 @@ async fn message_from_a_newer_client_is_answered_not_fatal() {
 
 /// The loopback port lets in only this machine's app, by the token in its
 /// local pairing code, which only this user can read: any other user's
-/// program, with no token or another, is turned away, and its Hello is
-/// answered so a CLI can say why.
+/// program, with another token, is turned away, and its Hello is answered
+/// so a CLI can say why.
 #[tokio::test]
 async fn the_loopback_port_wants_this_users_token() {
     let dir = temp_dir();
     let (addr, factory) = start(&dir).await;
-    for token in [String::new(), "not-the-token".to_owned()] {
-        let mut client = Client::open(addr).await;
-        client.send(hello(4, PROTOCOL_VERSION, token)).await;
-        let reply = client.receive().await;
-        assert_eq!(reply.reply_to, 4);
-        assert_eq!(error_code(&reply), ErrorCode::Unauthorized);
-        assert!(client.closed().await);
-    }
-    // Not even once this machine's app has used the tunnel and gone.
-    Client::connect(addr).await;
+    let mut client = Client::open(addr).await;
+    client.send(hello(4, PROTOCOL_VERSION, "not-the-token".to_owned())).await;
+    let reply = client.receive().await;
+    assert_eq!(reply.reply_to, 4);
+    assert_eq!(error_code(&reply), ErrorCode::Unauthorized);
+    assert!(client.closed().await);
+    // With none at all (an app from before the app's socket), Claktory's version and
+    // nothing else: no device, and every request refused.
     let mut client = Client::open(addr).await;
     client.send(hello(5, PROTOCOL_VERSION, String::new())).await;
-    assert_eq!(error_code(&client.receive().await), ErrorCode::Unauthorized);
+    match client.receive().await.body {
+        Some(Body::Welcome(welcome)) => {
+            assert_eq!((welcome.device_id.as_str(), welcome.name.as_str(), welcome.color.as_str()), ("", "", ""))
+        }
+        other => panic!("expected welcome, got {other:?}"),
+    }
+    match client.receive().await.body {
+        Some(Body::Workspace(workspace)) => {
+            assert!(workspace.agents.is_empty() && workspace.settings.is_none() && !workspace.version.is_empty())
+        }
+        other => panic!("expected the version, got {other:?}"),
+    }
+    let refused = client.request(client_message::Body::ListFolders(Default::default())).await;
+    assert!(matches!(&refused.body, Body::Error(error) if error.code() == ErrorCode::Unauthorized), "{:?}", refused.body);
     drop(factory);
 
-    // Only this user can open the home, its remote folder and the code.
+    // Only this user can open the home, its remote folder and the tool
+    // token; no pairing code of this machine's is written any more.
     let root = home(&dir).root().to_owned();
     let mode = crate::common::mode;
     assert_eq!(mode(&root), 0o700);
     assert_eq!(mode(&root.join("remote")), 0o700);
-    assert_eq!(mode(&root.join("remote/local-pairing")), 0o600);
+    assert_eq!(mode(&root.join("tool-token")), 0o600);
+    assert!(!root.join("remote/local-pairing").exists());
 }
 
 /// A home made before, open to every user, is made private when Factory

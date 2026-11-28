@@ -77,7 +77,8 @@ void main() {
         findsOneWidget,
       );
       expect(find.text('Loading video…'), findsOneWidget);
-      expect(_filled(tester), 0);
+      // How much is to come isn't known: a stretch goes along the bar.
+      expect(find.byKey(const ValueKey('loading-going')), findsOneWidget);
 
       // The first piece: how much of how much, the bar a third along.
       gates.last.complete();

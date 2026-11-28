@@ -89,7 +89,7 @@ CREATE TABLE variables (
     file INTEGER NOT NULL,
     -- The value's last 4 characters, or '' when it's under 12.
     hint TEXT NOT NULL,
-    -- Under 8 bytes: too short to hide in agents' output.
+    -- Too short to hide in agents' output (`too_short`).
     short INTEGER NOT NULL,
     -- Sealed with the secret's key.
     sealed_value BLOB NOT NULL,
@@ -249,8 +249,16 @@ CREATE TABLE browser_accounts (
 /// it and its resolving the secrets (`Vault::arm`).
 const ARMED_MS: i64 = 60_000;
 
-/// A value is too short to hide in output below this many bytes.
-const SHORT: usize = 8;
+/// Whether a value is too short to hide in agents' output: under
+/// `MIN_TOKEN` bytes once trimmed, as the redactor reads it.
+pub(super) fn too_short(value: &str) -> bool {
+    value.trim_ascii().len() < factory_agent::secrets::MIN_TOKEN
+}
+
+/// The warning for a variable whose value is `too_short`.
+pub(super) fn too_short_warning(variable: &str) -> String {
+    format!("{variable} is too short to hide, so agents may see it if a command prints it.")
+}
 /// A value shows its last 4 characters from this many on.
 const HINTED: usize = 12;
 /// The largest value: a credentials file at most.
@@ -1026,7 +1034,7 @@ impl Vault {
         if locked_mode {
             let held: i64 =
                 Self::db(&inner)?
-                    .query_row("SELECT COUNT(*) FROM protectors WHERE kind IN ('passphrase', 'recovery')", [], |row| row.get(0))?;
+                    .query_row("SELECT COUNT(*) FROM protectors WHERE kind IN ('passphrase', 'recovery', 'account-recovery')", [], |row| row.get(0))?;
             if held == 0 {
                 return Err(VaultError::Invalid(
                     "Locked mode needs a passphrase or recovery key to open the vault with, and it has neither.".to_owned(),
@@ -1081,7 +1089,7 @@ impl Vault {
             let hint = if hidden { String::new() } else { hint(&value.value) };
             db.execute(
                 "INSERT INTO variables (secret, position, name, file, hint, short, sealed_value, binary) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![id, position, value.variable, value.file, hint, value.value.len() < SHORT, sealed, value.binary],
+                params![id, position, value.variable, value.file, hint, too_short(&value.value), sealed, value.binary],
             )?;
         }
         Ok(sealed_dek)
@@ -1483,9 +1491,10 @@ impl Vault {
                 }
             }
             // Typed only into its sites, a value never reaches an agent's output.
+            // A login's username isn't hidden at all (`connections::public_of`).
             if secret.sites.is_empty() || secret.grants.iter().any(|grant| !grant.fill_only) {
-                for name in shorts {
-                    secret.warnings.push(format!("{name} is too short to hide in agents' output."));
+                for name in shorts.iter().filter(|name| secret.sites.is_empty() || *name != logins::USERNAME) {
+                    secret.warnings.push(too_short_warning(name));
                 }
             }
             Self::connection_view(db, &mut secret)?;
@@ -1602,6 +1611,40 @@ impl Vault {
             ));
         }
         Ok(Self::values_of(db, &inner.vault_id, vmk, id)?.into_iter().next().map(|value| value.value))
+    }
+
+    /// The value of the first of `variables` a secret sets (the first such
+    /// secret by name), for Claktory's own use of a service the person keys
+    /// by adding a secret with that variable, such as web search's Brave
+    /// Search API key. None while the vault is locked, when no secret sets
+    /// one, or the one that does asks each time (nothing could ask the
+    /// person for it). Never an agent's: what it's used for doesn't hand it
+    /// to anyone.
+    pub(crate) fn own_value(&self, variables: &[&str]) -> Option<Zeroizing<String>> {
+        let inner = self.lock();
+        let (Ok(vmk), Ok(db)) = (Self::open_vmk(&inner), Self::db(&inner)) else { return None };
+        let read = || -> Result<Option<Zeroizing<String>>, VaultError> {
+            for variable in variables {
+                let ids: Vec<String> = db
+                    .prepare(
+                        "SELECT secrets.id FROM variables JOIN secrets ON secrets.id = variables.secret
+                         WHERE variables.name = ?1 AND variables.file = 0 AND secrets.ask = 0 ORDER BY secrets.name COLLATE NOCASE",
+                    )?
+                    .query_map([variable], |row| row.get(0))?
+                    .collect::<Result<_, _>>()?;
+                for id in ids {
+                    let values = Self::values_of(db, &inner.vault_id, vmk, &id)?;
+                    if let Some(value) = values.into_iter().find(|value| value.variable == *variable && !value.value.trim().is_empty()) {
+                        return Ok(Some(Zeroizing::new(value.value.trim().to_owned())));
+                    }
+                }
+            }
+            Ok(None)
+        };
+        read().unwrap_or_else(|error| {
+            tracing::error!(%error, "could not read a service key from the vault");
+            None
+        })
     }
 
     /// Every variable of the secrets `names` (by name, any case), for one of
@@ -1766,14 +1809,23 @@ impl Vault {
         let (Ok(vmk), Ok(db)) = (Self::open_vmk(&inner), Self::db(&inner)) else { return Vec::new() };
         let read = || -> Result<Vec<factory_agent::SecretVariable>, VaultError> {
             let secrets = db
-                .prepare("SELECT id, name, kind, meta FROM secrets")?
-                .query_map([], crate::store::row4::<String, String, String, String>)?
+                .prepare("SELECT id, name, kind, meta, sites != '' FROM secrets")?
+                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, bool>(4)?)))?
                 .collect::<Result<Vec<_>, _>>()?;
             let mut variables = Vec::new();
-            for (id, name, kind, meta) in secrets {
-                // What a connection's recipe says isn't secret (a region) stays readable.
-                let public = connections::public_of(&kind, &meta);
-                for value in Self::values_of(db, &inner.vault_id, vmk, &id)?.into_iter().filter(|value| !public.contains(&value.variable)) {
+            for (id, name, kind, meta, sites) in secrets {
+                // What isn't secret (a region, a login's username) stays readable.
+                let public = connections::public_of(&kind, &meta, sites);
+                let values = Self::values_of(db, &inner.vault_id, vmk, &id)?;
+                // Values kept before `too_short` took its measure are
+                // measured again, now they can be read.
+                for value in &values {
+                    db.execute(
+                        "UPDATE variables SET short = ?3 WHERE secret = ?1 AND name = ?2 AND short != ?3",
+                        params![id, value.variable, too_short(&value.value)],
+                    )?;
+                }
+                for value in values.into_iter().filter(|value| !public.contains(&value.variable)) {
                     variables.push(factory_agent::SecretVariable {
                         secret: name.clone(),
                         variable: value.variable,
@@ -1884,6 +1936,27 @@ mod tests {
         assert!(!vault.mend_auto_key().expect("mend"), "locked mode keeps no key on disk");
         assert!(!key.exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn claktory_s_own_key_is_the_first_secret_setting_its_variable_and_none_while_locked() {
+        let dir = temp();
+        let vault = vault(&dir);
+        vault.create(Some("correct horse battery"), false).expect("create");
+        let variables = ["BRAVE_SEARCH_API_KEY", "BRAVE_API_KEY"];
+        assert!(vault.own_value(&variables).is_none(), "none added");
+        vault.create_secret("Other", "", &[value("BRAVE_API_KEY", "second-choice")], "").expect("secret");
+        assert_eq!(vault.own_value(&variables).expect("found").as_str(), "second-choice", "either variable");
+        let id = vault.create_secret("Brave Search", "", &[value("BRAVE_SEARCH_API_KEY", " BSA-key \n")], "").expect("secret");
+        assert_eq!(vault.own_value(&variables).expect("found").as_str(), "BSA-key", "the first variable first, trimmed");
+        // One that asks each time can't be used for it: nothing could ask.
+        vault.set_ask_each_time(&id, true).expect("on");
+        assert_eq!(vault.own_value(&variables).expect("found").as_str(), "second-choice");
+        // Locked: none.
+        vault.set_locked_mode(true).expect("locked mode");
+        let reopened = Vault::open(dir.join("vault"));
+        assert!(!reopened.is_open());
+        assert!(reopened.own_value(&variables).is_none());
     }
 
     #[test]
@@ -2099,7 +2172,7 @@ mod tests {
             assert!(matches!(vault.create_secret(name, "", &values, ""), Err(VaultError::Invalid(_))), "{name} {values:?}");
         }
         let id =
-            vault.create_secret("Resend", "Mail.", &[value("RESEND_API_KEY", "re_123456789abcdef"), value("PIN", "1234")], "").expect("ok");
+            vault.create_secret("Resend", "Mail.", &[value("RESEND_API_KEY", "re_123456789abcdef"), value("PIN", "123")], "").expect("ok");
         assert!(matches!(vault.create_secret("resend", "", &[value("X", "y")], ""), Err(VaultError::Invalid(_))), "names are unique");
         let state = vault.state(|_, _| false);
         let secret = &state.secrets[0];
@@ -2107,7 +2180,7 @@ mod tests {
             secret.variables.iter().map(|variable| (variable.name.as_str(), variable.hint.as_str())).collect::<Vec<_>>(),
             [("RESEND_API_KEY", "cdef"), ("PIN", "")]
         );
-        assert_eq!(secret.warnings, ["PIN is too short to hide in agents' output."]);
+        assert_eq!(secret.warnings, ["PIN is too short to hide, so agents may see it if a command prints it."]);
         assert_eq!(
             vault.update_secret(&id, "Resend mail", "Mail, again.", Some(&[value("RESEND_API_KEY", "re_new_value_here")])).expect("update"),
             "Resend"

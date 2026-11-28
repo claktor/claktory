@@ -6,8 +6,10 @@
 /// No files, processes or sockets.
 ///
 /// Versions: 1.1 adds `push-view`, the `views` interface and data
-/// (`data-sources`, `data-query`). An app built
-/// for 1.0 (world `app`, manifest world "claktory:app@1") runs unchanged.
+/// (`data-sources`, `data-query`), and since Claktory 0.1.28 `caller-info`
+/// and `emit-to`, which older Claktories don't have: an app that imports
+/// them doesn't start there. An app built for 1.0 (world `app`, manifest
+/// world "claktory:app@1") runs unchanged.
 ///
 /// Besides `host`, the host provides WASI 0.2's `wasi:http/outgoing-handler`
 /// and `wasi:http/types` (requests to hosts the manifest doesn't name fail
@@ -46,6 +48,18 @@ interface types {
     granted: bool,
   }
 
+  /// Since Claktory 0.1.28. The agent calling a tool: its id, its
+  /// project's id (none in the workspace), whether it's an admin agent
+  /// (which sees every project), and whether it has read outside content
+  /// (a web page, or a pipe from another Claktory) since its conversation
+  /// started afresh, so what it asks may be someone else's words.
+  record caller {
+    id: string,
+    project: option<string>,
+    admin: bool,
+    tainted: bool,
+  }
+
   /// Since 1.1. Why `data-query` didn't answer.
   variant data-error {
     /// The person hasn't granted the source, or took it back. Show it
@@ -69,7 +83,7 @@ interface types {
 }
 
 interface host {
-  use types.{event, log-level, data-source, data-error};
+  use types.{event, log-level, data-source, data-error, caller};
 
   /// One of the app's own secrets, as its manifest names them
   /// ("bot_token"); none until the person has given it.
@@ -84,6 +98,15 @@ interface host {
 
   /// Tells the subscribed agents.
   emit: func(e: event);
+
+  /// Since Claktory 0.1.28. As `emit`, to `agent` (its id) alone: it hears
+  /// it only if it's subscribed to the kind and granted the scope;
+  /// otherwise it's dropped, and nothing says so.
+  emit-to: func(agent: string, e: event);
+
+  /// Since Claktory 0.1.28. During `call`, the agent calling; none in
+  /// `start`, `upgrade`, `on-timer` and the views' functions.
+  caller-info: func() -> option<caller>;
 
   /// Calls `on-timer(name)` once, `after-ms` from now; setting a name again
   /// replaces it. Up to 64 timers at once. Timers don't outlive the
@@ -103,16 +126,22 @@ interface host {
   /// `deleteSurface` to close it. Claktory checks every message against
   /// its catalog ("https://claktory.com/a2ui/catalog/v1") before anyone
   /// sees it; Err says why not. An invalid message also fails the view
-  /// (the person sees why), and `view-closed` follows. Chart, Stat, Row
-  /// and Map leave out a property this Claktory doesn't know (one not
-  /// starting with @) instead of refusing the message; devices never see
-  /// it. Every other component refuses one. Map (since Claktory 0.1.22)
+  /// (the person sees why), and `view-closed` follows. Chart, Stat, Row,
+  /// Table, Map and Calendar leave out a property this Claktory doesn't
+  /// know (one not starting with @) instead of refusing the message;
+  /// devices never see it. Every other component refuses one. Map (since Claktory 0.1.22)
   /// draws a query's answer on a world map Claktory bundles, nothing
   /// fetched: a dot per country (its ISO 3166-1 alpha-2 or alpha-3
   /// code, or its English name, as GeoIP databases spell it too) sized
   /// and colored by its value, the rows it can't place listed in
   /// words under it; Chart's kind `heatmap` (also since 0.1.22) shades a
   /// grid of x's values by `seriesBy`'s, such as hours by weekday.
+  /// Calendar (since Claktory 0.1.28) shows rows as a day, a week or an
+  /// agenda; each row's `open` cell ("agent:<id>", "item:<agent>:<n>",
+  /// "monitor:<agent>:m<n>", "task:<agent>:<task id>" or null) is checked
+  /// at every push, rows bound or not: any other value refuses the
+  /// message, as do rows naming a column twice, and one naming an agent
+  /// that isn't there is set to null.
   push-view: func(surface: string, message: string) -> result<_, string>;
 
   /// Since 1.1. The data sources the manifest asks for, as the person

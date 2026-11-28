@@ -8,7 +8,6 @@ import 'controls.dart' show showModal;
 import 'forms.dart' show AgentSettingsForm;
 import 'links.dart' show LinkOpener;
 import 'pipes.dart' show showPipeSettings;
-import 'setup_link.dart' show SetupLinkOpener;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 
@@ -251,9 +250,8 @@ class _ScreenOpenerState extends State<ScreenOpener> {
   @override
   Widget build(BuildContext context) => _OpenedConversations(
     pulse: _conversations,
-    // Links that open the app (claktory://add?code=…) open here too, and
-    // so does a setup on this Mac connecting it (setup_link.dart).
-    child: LinkOpener(child: SetupLinkOpener(child: widget.child)),
+    // Links that open the app (claktory://add?code=…) open here too.
+    child: LinkOpener(child: widget.child),
   );
 }
 

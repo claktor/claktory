@@ -1,4 +1,4 @@
-// #343 U6: Needs you's item for the agents and chats waiting on a
+// Needs you's item for the agents and chats waiting on a
 // provider's usage limit or credit, one per provider, with the ways
 // forward the waiters have: Continue on another provider for all of them
 // (the count asked, expected_others sent), a usage reset, Try now, Sign
@@ -79,7 +79,7 @@ Future<Harness> _open(
   await settle(tester);
   expect(find.text('Claude usage limit reached'), findsOneWidget);
   await _tap(tester, 'Claude usage limit reached');
-  // On an iPhone it opens alone, over the list (#599): in once it's slid.
+  // On an iPhone it opens alone, over the list: in once it's slid.
   await settle(tester);
   expect(find.byType(ProviderWaitCard), findsOneWidget);
   return harness;

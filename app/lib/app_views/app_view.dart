@@ -5,6 +5,7 @@ import '../controls.dart';
 import '../identity.dart';
 import '../mobile/metrics.dart';
 import '../selection.dart' show SelectableArea;
+import '../visible_codes.dart';
 import 'catalog.dart';
 import 'controller.dart';
 import 'surface.dart';
@@ -22,6 +23,7 @@ class AppView extends StatefulWidget {
     required this.appName,
     this.view = '',
     this.params = '',
+    this.chromeNamesApp = false,
   });
 
   final AppViewTransport transport;
@@ -31,6 +33,11 @@ class AppView extends StatefulWidget {
   final String appName;
   final String view;
   final String params;
+
+  /// Claktory's own header around the view names the app ("Calendar app",
+  /// as appViewTitle words it): the view then goes without its "From"
+  /// line and card. Set here, or by a [ChromeNamesApp] above it.
+  final bool chromeNamesApp;
 
   @override
   State<AppView> createState() => _AppViewState();
@@ -153,6 +160,7 @@ class _AppViewState extends State<AppView> with WidgetsBindingObserver {
             opacity: 0.5,
             child: _Framed(
               appName: _name(surface),
+              named: _named,
               child: AppSurfaceView(
                 surface: surface,
                 onAction: act,
@@ -173,6 +181,7 @@ class _AppViewState extends State<AppView> with WidgetsBindingObserver {
                 ),
           child: _Framed(
             appName: _name(surface),
+            named: _named,
             child: AppSurfaceView(
               surface: surface,
               onAction: act,
@@ -186,22 +195,43 @@ class _AppViewState extends State<AppView> with WidgetsBindingObserver {
   /// The app's name, or "This app" without one: never a title the app
   /// chose, which could pass for Claktory.
   String _name(AppSurfaceModel surface) =>
-      widget.appName.isNotEmpty ? widget.appName : 'This app';
+      visibleCodes(widget.appName.isNotEmpty ? widget.appName : 'This app');
+
+  bool get _named => widget.chromeNamesApp || ChromeNamesApp.of(context);
+}
+
+/// Where Claktory's own header names the app around the views under it
+/// (an expanded pane, a phone's page): it stays put, outside the app's
+/// surface, so the views go without their "From" line and card.
+class ChromeNamesApp extends InheritedWidget {
+  const ChromeNamesApp({super.key, required super.child});
+
+  static bool of(BuildContext context) =>
+      context.dependOnInheritedWidgetOfExactType<ChromeNamesApp>() != null;
+
+  @override
+  bool updateShouldNotify(ChromeNamesApp oldWidget) => false;
 }
 
 /// What an app draws, always framed as the app's: "From Charts" over it,
 /// inside a hairline, so nothing in it passes for Claktory's own cards. On
 /// a phone the caption alone frames it: its panels sit on the page, 16pt
 /// from the edge, as a dashboard's do in Grafana, not inset
-/// again in a card.
+/// again in a card. Under a header that names the app ([named]), neither.
 class _Framed extends StatelessWidget {
-  const _Framed({required this.appName, required this.child});
+  const _Framed({
+    required this.appName,
+    required this.named,
+    required this.child,
+  });
 
   final String appName;
+  final bool named;
   final Widget child;
 
   @override
   Widget build(BuildContext context) {
+    if (named) return child;
     final palette = Palette.of(context);
     final type = TypeScale.of(context);
     return Column(

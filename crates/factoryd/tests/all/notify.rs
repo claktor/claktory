@@ -1,4 +1,4 @@
-//! Notifications (#273): new Needs-you items, agents' alerts and replies to
+//! Notifications: new Needs-you items, agents' alerts and replies to
 //! the person's phone reach every connected app as Notify, unless the person
 //! is using Claktory; devices registered for pushes get them sealed through
 //! the push relay. An agent that has read a web page never puts its words in one.
@@ -64,11 +64,11 @@ fn alert(title: &str) -> serde_json::Value {
     serde_json::json!({"title": title, "text": "500s since 10:02."})
 }
 
-fn set_active(active: bool) -> client_message::Body {
+pub(crate) fn set_active(active: bool) -> client_message::Body {
     client_message::Body::SetActive(v1::SetActive { active, ..Default::default() })
 }
 
-fn settings(change: impl FnOnce(&mut v1::NotificationSettings)) -> client_message::Body {
+pub(crate) fn settings(change: impl FnOnce(&mut v1::NotificationSettings)) -> client_message::Body {
     let mut settings = v1::NotificationSettings {
         needs_you: true,
         alerts: true,
@@ -303,7 +303,7 @@ async fn an_agent_notifies_six_times_an_hour() {
 async fn an_agent_that_read_a_web_page_never_puts_its_words_in_a_notification() {
     let (_dir, factory, mut client, mut view, pipe) = crate::pipes::setup(false).await;
     let mut notes = Vec::new();
-    // Reading a pipe marks no one (#346); a web page does.
+    // Reading a pipe marks no one; a web page does.
     factoryd::pipes::receive_for_test(&factory, &pipe, incoming("m1", MARKER)).expect("received");
     call(&mut client, &mut view, &mut notes, "bo", "pipe_read", serde_json::json!({})).await;
     assert!(view.agent("bo").tainted_by_pipes.is_empty());
@@ -358,13 +358,13 @@ async fn an_agent_that_read_a_web_page_never_puts_its_words_in_a_notification() 
 
 /// A push relay on this computer: what it was sent, and the status it
 /// answers with.
-struct Relay {
-    url: String,
-    pushes: Arc<Mutex<Vec<serde_json::Value>>>,
+pub(crate) struct Relay {
+    pub(crate) url: String,
+    pub(crate) pushes: Arc<Mutex<Vec<serde_json::Value>>>,
     status: Arc<Mutex<u16>>,
 }
 
-async fn relay() -> Relay {
+pub(crate) async fn relay() -> Relay {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let url = format!("http://127.0.0.1:{}", listener.local_addr().expect("addr").port());
     let pushes = Arc::new(Mutex::new(Vec::new()));
@@ -405,7 +405,7 @@ async fn relay() -> Relay {
 }
 
 impl Relay {
-    async fn next(&self, count: usize) -> serde_json::Value {
+    pub(crate) async fn next(&self, count: usize) -> serde_json::Value {
         for _ in 0..500 {
             if let Some(push) = self.pushes.lock().expect("lock").get(count - 1) {
                 return push.clone();
@@ -417,7 +417,7 @@ impl Relay {
 }
 
 /// The plaintext of a push sealed under `key`.
-fn open(key: &[u8], push: &serde_json::Value) -> (usize, serde_json::Value) {
+pub(crate) fn open(key: &[u8], push: &serde_json::Value) -> (usize, serde_json::Value) {
     use aws_lc_rs::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
     let bytes = STANDARD.decode(push["ciphertext"].as_str().expect("ciphertext")).expect("base64");
     let (nonce, sealed) = bytes.split_at(12);
@@ -576,7 +576,7 @@ async fn the_notifications_offer_dismissed_on_a_device_is_cleared_once_they_are_
     view.follow(&mut client, |view| !dismissed(view)).await;
 }
 
-/// Friend bug #36: when the disk turns read-only, the person hears it on
+/// When the disk turns read-only, the person hears it on
 /// every device, from what was saved while it worked: a push to each
 /// registered device, with a counter saved ahead (none used twice, after a
 /// restart or by an older version), and the connected apps.
@@ -647,13 +647,13 @@ fn read_alerts(ids: &[&str]) -> client_message::Body {
     client_message::Body::ReadAlerts(v1::ReadAlerts { ids: ids.iter().map(|id| (*id).to_owned()).collect() })
 }
 
-/// Bruno 44235: every alert waits in Needs you until the person reads it,
+/// Every alert waits in Needs you until the person reads it,
 /// then is in History with when and on which device.
 #[tokio::test]
 async fn an_alert_waits_in_needs_you_until_the_person_reads_it() {
     let (dir, factory, mut client, mut view) = setup(v1::DeviceKind::Desktop).await;
     let mut notes = Vec::new();
-    // Builder leads Helper, so its urgent alerts go as urgent (Bruno 52699).
+    // Builder leads Helper, so its urgent alerts go as urgent.
     apply_request(&mut client, &mut view, create_agent("site", "Helper", "")).await;
     let lead = v1::UpdateAgent { agent_id: "helper".into(), lead_id: Some("builder".into()), ..Default::default() };
     apply_request(&mut client, &mut view, client_message::Body::UpdateAgent(lead)).await;
@@ -755,7 +755,7 @@ async fn an_alerts_text_is_a_sentence_at_most() {
 }
 
 /// A member quarantined for a pipe sends no alert at all, so nothing it
-/// read reaches a notification, Needs you or History (Fugo 45952).
+/// read reaches a notification, Needs you or History.
 #[tokio::test]
 async fn a_quarantined_member_sends_no_alert() {
     let (_dir, _factory, mut client, mut view, pipe) = crate::pipes::setup(false).await;

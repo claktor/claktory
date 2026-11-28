@@ -5,16 +5,24 @@
 //! check-in; each Claktory seals its own vault to it (`vault::
 //! account_recovery`).
 //!
+//! A key is made on one of the person's devices (`make`, `publish`): the
+//! device makes the pair and sends its public half with its own account
+//! key, the one its connection was let in with; this Claktory gives it the
+//! statement to sign, then signs it too, sets it at claktory.com and seals
+//! its vault to it.
+//!
 //! At sign-in and each check-in this Claktory compares claktory.com's key
 //! with the one its vault is sealed to. The same: nothing to do. Another,
-//! the account's first included: this version knows no device's account
-//! key, so it never seals by itself. A key whose statements check (each
-//! signed by its Claktory's backend key and approved by a device, back to
-//! the key the vault is sealed to, or to the account's first) waits for the
-//! person to choose Use the key here (UseRecoveryKey) on this computer's
-//! app or a device paired here and confirmed as theirs; Claktory's own
-//! alert says so. One that doesn't check gets an alert saying it couldn't
-//! be checked, and nothing to choose. Each seal is a record in History.
+//! the account's first included: a key whose statements check (each signed
+//! by its Claktory's backend key and approved by a device, back to the key
+//! the vault is sealed to, or to the account's first) is sealed to by
+//! itself when every device that approved a step is one paired here and
+//! not removed (recovery-and-sign-in.md part 1, point 3); otherwise it
+//! waits for the person to choose Use the key here (UseRecoveryKey) on
+//! this computer's app or a device paired here and confirmed as theirs,
+//! and Claktory's own alert says so. One that doesn't check gets an alert
+//! saying it couldn't be checked, and nothing to choose. Each seal is a
+//! record in History.
 
 use std::sync::Arc;
 
@@ -145,19 +153,25 @@ fn statement_of(account_id: &str, key: &RecoveryKey) -> Option<RecoveryKeyStatem
 /// replaces. The service's word on which backend key a Claktory has is only
 /// its own, so this proves no more than that a device approved each step:
 /// on its own it's never a reason to seal, only to let the person choose.
+#[cfg(test)]
 fn checked(account_id: &str, key: &RecoveryKey, sealed: &str) -> bool {
+    chain(account_id, key, sealed).is_some()
+}
+
+/// `checked`'s statements, newest first, when they check.
+fn chain(account_id: &str, key: &RecoveryKey, sealed: &str) -> Option<Vec<RecoveryKeyStatement>> {
     let mut link = key;
+    let mut links = Vec::new();
     for _ in 0..=key.history.len() {
-        let Some(statement) = statement_of(account_id, link) else { return false };
-        if statement.replaces == sealed {
-            return true;
+        let statement = statement_of(account_id, link)?;
+        let replaces = statement.replaces.clone();
+        links.push(statement);
+        if replaces == sealed {
+            return Some(links);
         }
-        let Some(before) = key.history.iter().find(|before| !statement.replaces.is_empty() && before.public_key == statement.replaces) else {
-            return false;
-        };
-        link = before;
+        link = key.history.iter().find(|before| !replaces.is_empty() && before.public_key == replaces)?;
     }
-    false
+    None
 }
 
 /// Compares the account's key, as claktory.com gave it at sign-in or a
@@ -182,6 +196,7 @@ pub(super) async fn compare(factory: &Arc<Factory>, given: Option<RecoveryKey>) 
     let sealed = factory.vault.account_key().filter(|sealed| sealed.account_id == account_id).map(|sealed| sealed.public_key);
     {
         let mut inner = account.lock();
+        inner.saved.recovery_account_key = given.as_ref().map(|key| key.public_key.clone()).unwrap_or_default();
         match (&given, &sealed) {
             (Some(key), Some(sealed)) if key.public_key == *sealed => {
                 inner.saved.recovery_made_by = key.claktory_id.clone();
@@ -200,11 +215,180 @@ pub(super) async fn compare(factory: &Arc<Factory>, given: Option<RecoveryKey>) 
         }
     }
     if let Some(key) = given.filter(|key| sealed.as_deref() != Some(key.public_key.as_str())) {
-        let checked = checked(&account_id, &key, sealed.as_deref().unwrap_or_default());
-        wait(factory, &account_id, &key, checked);
+        let chain = chain(&account_id, &key, sealed.as_deref().unwrap_or_default());
+        // Every step approved on a device paired here: sealed to by itself.
+        let ours = chain.as_ref().is_some_and(|links| {
+            links.iter().all(|link| crate::remote::approver(&factory.home, &link.device_key, &account_id).is_some())
+        });
+        if !(ours && seal_by_itself(factory, &account_id, &key)) {
+            wait(factory, &account_id, &key, chain.is_some());
+        }
     }
     // The Workspace goes out after: the check-in's, or the sign-in's.
     account.save();
+}
+
+/// Seals the vault to the account's new key `key`, approved at every step
+/// on a device paired here: no alert, a record in History. False when it
+/// couldn't (the vault locked, say): it waits for the person instead.
+fn seal_by_itself(factory: &Factory, account_id: &str, key: &RecoveryKey) -> bool {
+    let Some(public) = account_recovery::public_of(&key.public_key) else { return false };
+    if let Err(error) = factory.vault.seal_to_account_key(account_id, &public) {
+        tracing::warn!(%error, "couldn't seal the vault to the account's new recovery key");
+        return false;
+    }
+    {
+        let mut inner = factory.account.lock();
+        inner.saved.recovery_made_by = key.claktory_id.clone();
+        inner.saved.recovery_made_name = name(&key.claktory_name);
+        inner.saved.recovery_made_ms = key.set_at.saturating_mul(1000);
+        inner.saved.recovery_waiting = None;
+    }
+    let config = factory.lock().config.clone();
+    let ours = factory.account.lock().saved.claktory_id.clone();
+    let made_on = name_of(&config, &ours, &key.claktory_id, &key.claktory_name);
+    let made_on = if made_on.is_empty() { NO_LONGER.to_owned() } else { made_on };
+    tracing::info!("sealed the vault to the account's new recovery key, approved on a device paired here");
+    record(factory, &format!("Your account's new recovery key, made on {made_on}, now opens your secrets here too"), now_ms());
+    factory.vault_changed();
+    true
+}
+
+/// A recovery key a device is making for the account (`make`): the
+/// statement it was given to sign, and when.
+#[derive(Clone, Debug)]
+pub(super) struct Making {
+    statement: RecoveryKeyStatement,
+    asked: std::time::Instant,
+}
+
+/// How long a device has to sign a new key's statement.
+const SIGN_WITHIN: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// NewRecoveryKey with a public half: a device of the person's made a key
+/// pair for the account and asks for the statement to sign. Its
+/// `device_key` must be the account key its connection was let in with
+/// (`account_key`; `remote`, a device on another machine), of a device
+/// paired here, confirmed for the account and not removed (`remote::
+/// approver`). The statement replaces the account's key as claktory.com
+/// last gave it.
+pub(crate) fn make(factory: &Factory, account_key: Option<&str>, remote: bool, request: &v1::NewRecoveryKey) -> Result<v1::RecoveryKeyToSign, RequestError> {
+    super::enabled(factory)?;
+    let (account_id, claktory_id, replaces, offset) = {
+        let inner = factory.account.lock();
+        if !inner.saved.signed_in() || inner.saved.revoked {
+            return Err(refused(ErrorCode::SignInRequired, "This Claktory isn't signed in to your account."));
+        }
+        let saved = &inner.saved;
+        (saved.account_id.clone(), saved.claktory_id.clone(), saved.recovery_account_key.clone(), inner.clock_offset)
+    };
+    let Some(account_key) = account_key.filter(|key| !key.is_empty()) else {
+        return Err(refused(ErrorCode::SignInRequired, super::cannot_approve(factory, None, remote)));
+    };
+    if request.device_key != account_key {
+        return Err(refused(ErrorCode::InvalidRequest, "That isn't the account key this device connected with."));
+    }
+    if crate::remote::approver(&factory.home, account_key, &account_id).is_none() {
+        return Err(refused(
+            ErrorCode::Unauthorized,
+            "To make a recovery key for your account, sign in to your Claktory account on this device first.",
+        ));
+    }
+    if account_recovery::public_of(&request.public_key).is_none() {
+        return Err(refused(ErrorCode::InvalidRequest, "That isn't a recovery key Claktory can use."));
+    }
+    if !factory.vault.exists() {
+        return Err(refused(ErrorCode::InvalidRequest, "This Claktory has no secrets to protect yet."));
+    }
+    let statement = RecoveryKeyStatement {
+        v: 1,
+        account_id,
+        claktory_id,
+        public_key: request.public_key.clone(),
+        replaces,
+        device_key: account_key.to_owned(),
+        iat: super::now_s() + offset,
+    };
+    let payload = serde_json::to_vec(&statement).map_err(|error| refused(ErrorCode::Internal, error.to_string()))?;
+    factory.account.lock().recovery_making = Some(Making { statement, asked: std::time::Instant::now() });
+    Ok(v1::RecoveryKeyToSign { payload: api::b64(payload) })
+}
+
+/// PublishRecoveryKey: the device's signature on `make`'s statement.
+/// Checked with its account key, the statement is signed with this
+/// Claktory's backend key, set at claktory.com, and the vault sealed to it
+/// in place of the account's last key.
+pub(crate) async fn publish(factory: &Arc<Factory>, account_key: Option<&str>, request: &v1::PublishRecoveryKey) -> Result<(), RequestError> {
+    super::enabled(factory)?;
+    let account = &factory.account;
+    let _busy = account.busy.lock().await;
+    let making = account.lock().recovery_making.clone();
+    let Some(making) = making.filter(|making| {
+        account_key == Some(making.statement.device_key.as_str()) && making.statement.device_key == request.device_key
+    }) else {
+        return Err(refused(ErrorCode::InvalidRequest, "No recovery key is being made on this device. Make it again."));
+    };
+    if making.asked.elapsed() > SIGN_WITHIN {
+        account.lock().recovery_making = None;
+        return Err(refused(ErrorCode::InvalidRequest, "Making the key took too long. Make it again."));
+    }
+    let still = {
+        let inner = account.lock();
+        inner.saved.signed_in() && !inner.saved.revoked && inner.saved.account_id == making.statement.account_id
+    };
+    if !still {
+        return Err(refused(ErrorCode::SignInRequired, "This Claktory isn't signed in to that account any more."));
+    }
+    let (_, backend_key) = account.identity().map_err(|error| refused(ErrorCode::Internal, error.to_string()))?;
+    let statement = api::sign_recovery_key(&backend_key, &making.statement);
+    if !api::verify_recovery_key_device(&statement, &request.device_sig) {
+        return Err(refused(ErrorCode::InvalidRequest, "This device's approval of the key doesn't check. Make it again."));
+    }
+    let Some(public) = account_recovery::public_of(&making.statement.public_key) else {
+        return Err(refused(ErrorCode::InvalidRequest, "That isn't a recovery key Claktory can use."));
+    };
+    let set = api::SetRecoveryKey { statement, device_sig: request.device_sig.clone() };
+    match account.signed_with::<api::RecoveryKeySet>("PUT", "/v1/account/recovery-key", &set).await {
+        Ok(_) => {}
+        Err(super::Failure::Refused(409, _)) => {
+            account.lock().recovery_making = None;
+            account.wake.notify_one();
+            return Err(refused(
+                ErrorCode::InvalidRequest,
+                "Your account's recovery key changed meanwhile. Look at it again, then make a new one if you still want to.",
+            ));
+        }
+        Err(super::Failure::Refused(status, body)) => {
+            tracing::warn!(status, error = body.error, "claktory.com refused the new recovery key");
+            return Err(refused(ErrorCode::InvalidRequest, format!("claktory.com didn't take the key: {}", body.message)));
+        }
+        Err(failure) => {
+            tracing::warn!(%failure, "couldn't set the new recovery key at claktory.com");
+            return Err(refused(ErrorCode::Unreachable, "Can't reach claktory.com. Check your internet connection and try again."));
+        }
+    }
+    let account_id = making.statement.account_id.clone();
+    {
+        let mut inner = account.lock();
+        inner.recovery_making = None;
+        inner.saved.recovery_account_key = making.statement.public_key.clone();
+    }
+    account.save();
+    // Set at claktory.com: if the seal fails here, the next check-in seals
+    // by itself (approved on a device paired here).
+    factory.vault.seal_to_account_key(&account_id, &public)?;
+    {
+        let mut inner = account.lock();
+        inner.saved.recovery_made_by = inner.saved.claktory_id.clone();
+        inner.saved.recovery_made_name.clear();
+        inner.saved.recovery_made_ms = now_ms();
+        inner.saved.recovery_waiting = None;
+    }
+    account.save();
+    record(factory, "You made a new recovery key for your account", now_ms());
+    factory.vault_changed();
+    changed(factory);
+    Ok(())
 }
 
 /// claktory.com's key isn't the one the vault is sealed to: the vault stays

@@ -43,7 +43,10 @@ CONFIGURE=(--disable-docs --disable-shared --enable-static --with-oniguruma=buil
 
 # A fresh folder, removed when it ends. In /private/tmp (the real path),
 # which the container engine's VM shares.
-FRESH="$(mktemp -d /private/tmp/claktory-jq.XXXXXX)"
+# The build service's builds stay in the job's own temporary folder:
+# /private/tmp/.cargo is another user's there.
+FRESH_BASE=/private/tmp; [[ "${CLAKTORY_BUILD_SERVICE:-}" != 1 ]] || FRESH_BASE="${TMPDIR%/}"
+FRESH="$(mktemp -d "$FRESH_BASE/claktory-jq.XXXXXX")"
 trap 'rm -rf "$FRESH"' EXIT
 
 # The pinned tarball, its hash checked on every build.

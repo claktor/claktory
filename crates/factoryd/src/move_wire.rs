@@ -146,8 +146,9 @@ pub enum Frame {
     },
     /// Target → source: imported and verified; it starts once committed.
     Ready {
-        /// The old computer's own app's pairing code with the moved
-        /// Claktory, if it had one.
+        /// Always None now (no pairing code exists for the old
+        /// computer's app: it comes over as a device let in by its account
+        /// key); kept so either side parses the other's.
         #[serde(default)]
         old_app_code: Option<String>,
     },

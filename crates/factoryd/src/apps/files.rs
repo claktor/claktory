@@ -1,4 +1,4 @@
-//! Files apps read (#339 follow-up 4, Fugo's ruling): a CSV or TSV file in
+//! Files apps read: a CSV or TSV file in
 //! the workspace or in one of a project's folders, as one read-only table,
 //! `rows`, read again at every query, so it's live.
 //!
@@ -874,7 +874,7 @@ mod tests {
         );
         assert_eq!(rows(&db, "SELECT severity, sum(count) FROM rows GROUP BY 1 ORDER BY 1")[0], [Text("high".into()), Integer(3)]);
         // A grouped WITH used twice is materialised, and SQLite asks to read
-        // it with no column for NOT EXISTS (Carne 30029).
+        // it with no column for NOT EXISTS.
         let twice = "WITH c AS (SELECT severity, sum(count) AS n FROM rows GROUP BY severity) \
                      SELECT severity, n FROM c UNION ALL SELECT 'none', 0 WHERE NOT EXISTS (SELECT 1 FROM c) ORDER BY 1";
         assert_eq!(rows(&db, twice), [vec![Text("high".into()), Integer(3)], vec![Text("low".into()), Integer(2)]]);

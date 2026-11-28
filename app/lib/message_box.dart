@@ -986,7 +986,7 @@ class _MessageBoxState extends State<MessageBox> {
             );
     } else {
       final workspace = backend.workspace.workspace;
-      final voice = target.takesVoice && voiceKnown(workspace);
+      final voice = target.takesVoice && micOffered(workspace);
       row = ListenableBuilder(
         listenable: Listenable.merge([
           _text,
@@ -1154,7 +1154,7 @@ class _MessageBoxState extends State<MessageBox> {
     // Voice messages, on a Mac, where the Claktory knows them (the
     // iPhone's are held to record, Mobile's).
     final voice =
-        !phone && blocked == null && target.takesVoice && voiceKnown(workspace);
+        !phone && blocked == null && target.takesVoice && micOffered(workspace);
     final recording = voice && (_voice.recording || _voice.starting);
     // The row's height: a Mac's 28; on a touch screen (an iPad) its
     // buttons are a finger's size, so it's at least that, and grows with

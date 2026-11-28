@@ -78,6 +78,9 @@ pub struct Saved {
     pub plan_bytes: u64,
     pub bytes_have: u64,
     pub bytes_total: u64,
+    /// A move with the account: the approval it started on, as this
+    /// Claktory checked it; it has no code (`code` is empty).
+    pub approved: Option<crate::account::moves::Approved>,
 }
 
 fn state_path(home: &Home) -> PathBuf {
@@ -112,6 +115,10 @@ struct Failed {
     target_os: String,
     target_arch: String,
     started_by_agent_id: String,
+    // Who approved a move with the account.
+    approved_by_device_id: String,
+    approved_by_name: String,
+    approval_key: String,
 }
 
 /// Keeps why the move failed, and what `shown` said of it, so the app shows
@@ -124,6 +131,9 @@ fn remember_failed(home: &Home, why: &str, shown: &v1::Move) {
         target_os: shown.target_os.clone(),
         target_arch: shown.target_arch.clone(),
         started_by_agent_id: shown.started_by_agent_id.clone(),
+        approved_by_device_id: shown.approved_by_device_id.clone(),
+        approved_by_name: shown.approved_by_name.clone(),
+        approval_key: shown.approval_key.clone(),
     };
     let written = serde_json::to_vec_pretty(&failed)
         .map_err(|error| error.to_string())
@@ -159,9 +169,6 @@ pub(crate) struct Moving {
     view: Mutex<Option<v1::Move>>,
     control: Mutex<Option<mpsc::UnboundedSender<Control>>>,
     freeze: Arc<AtomicBool>,
-    /// The person confirmed the digits here (ConfirmMove), for an agent
-    /// that started it to pass on to the other computer.
-    confirmed_here: AtomicBool,
 }
 
 impl Moving {
@@ -175,6 +182,9 @@ impl Moving {
             target_os: failed.target_os,
             target_arch: failed.target_arch,
             started_by_agent_id: failed.started_by_agent_id,
+            approved_by_device_id: failed.approved_by_device_id,
+            approved_by_name: failed.approved_by_name,
+            approval_key: failed.approval_key,
             error: failed.why,
             can_cancel: true,
             updated_ms: failed.at_ms,
@@ -192,11 +202,6 @@ impl Moving {
         locked(&self.view).as_ref().map(v1::Move::phase)
     }
 
-    /// The person confirmed the digits here, for the move under way.
-    pub(crate) fn confirmed_here(&self) -> bool {
-        self.confirmed_here.load(Ordering::Relaxed)
-    }
-
     fn set(&self, change: impl FnOnce(&mut v1::Move)) {
         let mut view = locked(&self.view);
         let view = view.get_or_insert_with(v1::Move::default);
@@ -208,7 +213,6 @@ impl Moving {
     fn clear(&self) {
         *locked(&self.view) = None;
         *locked(&self.control) = None;
-        self.confirmed_here.store(false, Ordering::Relaxed);
     }
 }
 
@@ -246,37 +250,129 @@ pub(crate) fn start_by(factory: &Arc<Factory>, code: &str, agent: &str, skip: Ve
     if cfg!(windows) {
         return Err(refused(NOT_ON_WINDOWS));
     }
-    if factory.moving.phase().is_some_and(|phase| phase != Phase::Failed) {
-        return Err(refused("A move is already under way."));
-    }
     let Some(code) = ReceiveCode::parse(code) else {
         return Err(refused("That isn't a receive code. Run factoryd receive on the other computer, and copy the code it shows."));
     };
-    if !code.version.is_empty() && crate::update::newer(crate::update::VERSION, &code.version) {
-        return Err(refused(format!(
-            "{} has Claktory {}, older than this one ({}). Update Claktory there, run factoryd receive again, and use its new code.",
-            code.machine,
-            code.version,
-            crate::update::VERSION
-        )));
-    }
-    if std::env::var_os(crate::update::SUPERVISED).is_none() && !HOLD_AT_FREEZE.load(Ordering::Relaxed) {
-        return Err(refused(
-            "This Claktory wasn't started by its background service, so it can't stop and start itself for the move. Restore it from Needs you, then try again, or run factoryd move in Terminal instead.",
-        ));
-    }
+    may_start(factory, &code).map_err(refused)?;
     let _ = std::fs::remove_file(failed_path(&factory.home));
     factory.moving.clear();
-    begin(factory, code, None, agent, skip);
+    begin(factory, code, None, agent, skip, None);
     Ok(())
 }
 
+/// Whether a move to the computer `code` names may start now: none under
+/// way, Claktory there not older, and this one able to stop and start
+/// itself. Why not, in a sentence for the person.
+pub(crate) fn may_start(factory: &Factory, code: &ReceiveCode) -> Result<(), String> {
+    if factory.moving.phase().is_some_and(|phase| phase != Phase::Failed) {
+        return Err("A move is already under way.".to_owned());
+    }
+    if !code.version.is_empty() && crate::update::newer(crate::update::VERSION, &code.version) {
+        return Err(format!(
+            "{} has Claktory {}, older than this one ({}). Update Claktory there, then run factoryd receive again.",
+            code.machine,
+            code.version,
+            crate::update::VERSION
+        ));
+    }
+    if std::env::var_os(crate::update::SUPERVISED).is_none() && !HOLD_AT_FREEZE.load(Ordering::Relaxed) {
+        return Err(
+            "This Claktory wasn't started by its background service, so it can't stop and start itself for the move. Restore it from Needs you, then try again."
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
+/// A move with the account, once this Claktory checked the approving
+/// device's own approval and took it (`account::moves`): it starts with no
+/// code and no digits, since the person approved it on that device; every
+/// device sees which one (`Move.approved_by_*`).
+pub(crate) fn start_approved(factory: &Arc<Factory>, approved: crate::account::moves::Approved) -> Result<(), String> {
+    let code = approved.code();
+    may_start(factory, &code)?;
+    let _ = std::fs::remove_file(failed_path(&factory.home));
+    factory.moving.clear();
+    begin(factory, code, None, "", Vec::new(), Some(approved));
+    Ok(())
+}
+
+/// Tests: the endpoint id this Claktory's move will dial from, made now
+/// (what it names taking a move with the account).
+#[cfg(feature = "test-hooks")]
+#[doc(hidden)]
+pub fn source_endpoint_for_test(home: &Home) -> String {
+    move_source::endpoint_id(home).expect("the move's key")
+}
+
+/// Tests: a move with the account, as if this Claktory had taken the
+/// person's approval from `approver_id`'s device: to the computer `code`
+/// names (its addresses too, which the service doesn't give), no secret.
+#[cfg(feature = "test-hooks")]
+#[doc(hidden)]
+pub fn start_approved_for_test(factory: &Arc<Factory>, code: &ReceiveCode, approver_id: &str, approver_name: &str) -> Result<(), String> {
+    let approved = crate::account::moves::Approved {
+        request_id: "test".to_owned(),
+        endpoint: code.endpoint.clone(),
+        relays: code.relays.clone(),
+        machine: code.machine.clone(),
+        version: code.version.clone(),
+        platform: format!("{}-{}", code.os, code.arch),
+        approver_id: approver_id.to_owned(),
+        approver_name: approver_name.to_owned(),
+        approval_key: "K".repeat(43),
+    };
+    let code = ReceiveCode { secret: String::new(), ..code.clone() };
+    may_start(factory, &code)?;
+    factory.moving.clear();
+    begin(factory, code, None, "", Vec::new(), Some(approved));
+    Ok(())
+}
+
+/// An approved move that couldn't start: every device shows why, until
+/// it's dismissed, as a move that failed.
+pub(crate) fn failed_before_start(factory: &Arc<Factory>, approved: &crate::account::moves::Approved, why: &str) {
+    if factory.moving.phase().is_some_and(|phase| phase != Phase::Failed) {
+        return;
+    }
+    let code = approved.code();
+    let mut shown = v1::Move::default();
+    factory.moving.set(|view| {
+        *view = v1::Move {
+            phase: Phase::Failed.into(),
+            target_machine: code.machine.clone(),
+            target_os: code.os.clone(),
+            target_arch: code.arch.clone(),
+            target_version: code.version.clone(),
+            error: why.to_owned(),
+            ..v1::Move::default()
+        };
+        approved_by(view, approved);
+        shown.clone_from(view);
+    });
+    remember_failed(&factory.home, why, &shown);
+    factory.broadcast_workspace(&factory.lock());
+}
+
+/// Who approved a move with the account, as the view shows it.
+fn approved_by(view: &mut v1::Move, approved: &crate::account::moves::Approved) {
+    view.approved_by_device_id.clone_from(&approved.approver_id);
+    view.approved_by_name.clone_from(&approved.approver_name);
+    view.approval_key.clone_from(&approved.approval_key);
+}
+
 /// Starts the driver: a new move, or one a restart interrupted while copying.
-fn begin(factory: &Arc<Factory>, code: ReceiveCode, resumed: Option<Saved>, agent: &str, skip: Vec<String>) {
+fn begin(
+    factory: &Arc<Factory>,
+    code: ReceiveCode,
+    resumed: Option<Saved>,
+    agent: &str,
+    skip: Vec<String>,
+    approved: Option<crate::account::moves::Approved>,
+) {
     let (control, controls) = mpsc::unbounded_channel();
     *locked(&factory.moving.control) = Some(control);
     factory.moving.freeze.store(false, Ordering::Relaxed);
-    factory.moving.confirmed_here.store(false, Ordering::Relaxed);
     factory.moving.set(|view| {
         *view = v1::Move {
             phase: Phase::Connecting.into(),
@@ -288,6 +384,9 @@ fn begin(factory: &Arc<Factory>, code: ReceiveCode, resumed: Option<Saved>, agen
             started_by_agent_id: agent.to_owned(),
             ..v1::Move::default()
         };
+        if let Some(approved) = &approved {
+            approved_by(view, approved);
+        }
         if let Some(saved) = &resumed {
             shown(view, saved);
         }
@@ -296,7 +395,7 @@ fn begin(factory: &Arc<Factory>, code: ReceiveCode, resumed: Option<Saved>, agen
     let weak = Arc::downgrade(factory);
     let agent = agent.to_owned();
     tokio::spawn(async move {
-        drive(weak, code, resumed, skip, agent, controls).await;
+        drive(weak, code, resumed, skip, agent, approved, controls).await;
     });
 }
 
@@ -333,6 +432,9 @@ fn shown(view: &mut v1::Move, saved: &Saved) {
     view.bytes_total = saved.bytes_total;
     view.round = saved.round;
     view.target_confirmed = true;
+    if let Some(approved) = &saved.approved {
+        approved_by(view, approved);
+    }
 }
 
 /// ConfirmMove.
@@ -341,7 +443,6 @@ pub(crate) fn confirm(factory: &Arc<Factory>) -> Result<(), RequestError> {
         return Err(refused("There are no digits to confirm now."));
     }
     send(factory, Control::Confirm)?;
-    factory.moving.confirmed_here.store(true, Ordering::Relaxed);
     factory.moving.set(|view| view.confirmed_here = true);
     factory.broadcast_workspace(&factory.lock());
     Ok(())
@@ -381,12 +482,19 @@ fn send(factory: &Arc<Factory>, control: Control) -> Result<(), RequestError> {
 /// At start: a move a restart interrupted while copying carries on.
 pub fn resume(factory: &Arc<Factory>) {
     let Some(saved) = saved(&factory.home).filter(|saved| saved.stage == Stage::Copying) else { return };
-    let Some(code) = ReceiveCode::parse(&saved.code) else {
-        move_source::forget(&factory.home);
-        return;
+    let code = match &saved.approved {
+        Some(approved) => approved.code(),
+        None => match ReceiveCode::parse(&saved.code) {
+            Some(code) => code,
+            None => {
+                move_source::forget(&factory.home);
+                return;
+            }
+        },
     };
     tracing::info!(target = %saved.target_machine, round = saved.round, "carrying on moving this Claktory");
-    begin(factory, code, Some(saved), "", Vec::new());
+    let approved = saved.approved.clone();
+    begin(factory, code, Some(saved), "", Vec::new(), approved);
 }
 
 /// The app's side of the person, in the normal backend.
@@ -506,6 +614,7 @@ async fn drive(
     resumed: Option<Saved>,
     skip: Vec<String>,
     started_by_agent_id: String,
+    approved: Option<crate::account::moves::Approved>,
     mut controls: mpsc::UnboundedReceiver<Control>,
 ) {
     let Some(factory) = weak.upgrade() else { return };
@@ -574,18 +683,22 @@ async fn drive(
         return fail(why);
     }
     let mut saved = resumed.unwrap_or_else(|| Saved {
-        code: code.text(),
+        // A move with the account has no code: its approval stands in.
+        code: if approved.is_some() { String::new() } else { code.text() },
         export_id: move_export::new_export_id(),
         round: 1,
         skip,
         started_by_agent_id,
+        approved: approved.clone(),
         ..Saved::default()
     });
     saved.target_machine.clone_from(&machine);
     saved.target_os.clone_from(&target.os);
     saved.target_arch.clone_from(&target.arch);
     saved.target_version.clone_from(&target.version);
-    if !confirmed_before {
+    // A move with the account was approved on the person's device, its
+    // approval checked here: no digits.
+    if !confirmed_before && approved.is_none() {
         // Where the folders will go, before the person confirms: those
         // outside the home folders go under the other computer's home.
         let planned = weak.upgrade().map(|factory| planned_map(&factory, &target, &saved.skip)).unwrap_or_default();
@@ -846,7 +959,13 @@ fn spared(mover: &str, agent: &str, command: &str) -> bool {
 /// The last round, import on the target, the fence and the commit.
 async fn finish_frozen(home: &Home, mut saved: Saved, shown: &watch::Sender<v1::Move>, mut cancel: watch::Receiver<bool>) -> Frozen {
     let machine = saved.target_machine.clone();
-    let Some(code) = ReceiveCode::parse(&saved.code) else { return Frozen::Failed("The move's state is damaged.".to_owned()) };
+    let code = match &saved.approved {
+        Some(approved) => approved.code(),
+        None => match ReceiveCode::parse(&saved.code) {
+            Some(code) => code,
+            None => return Frozen::Failed("The move's state is damaged.".to_owned()),
+        },
+    };
     let place = place(home);
     {
         let home = home.clone();
@@ -944,8 +1063,9 @@ async fn finish_frozen(home: &Home, mut saved: Saved, shown: &watch::Sender<v1::
 struct Arrival {
     name: String,
     color: String,
-    /// The token of this machine's own pairing code: only its app gets in.
-    token: String,
+    /// Whose tokens it takes on the loopback port: the tool token,
+    /// and the person's in test and QA builds.
+    home: Home,
 }
 
 impl Arrival {
@@ -954,30 +1074,57 @@ impl Arrival {
             std::fs::read_to_string(home.config_path()).ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default();
         let name = config["name"].as_str().map(str::trim).filter(|name| !name.is_empty()).unwrap_or(crate::remote::machine_name());
         let color = config["color"].as_str().filter(|color| !color.is_empty()).unwrap_or(crate::remote::key_color(home));
-        let token = std::fs::read_to_string(home.root().join("remote/local-pairing"))
-            .ok()
-            .and_then(|code| code.trim().split(['?', '&']).find_map(|part| part.strip_prefix("t=")).map(str::to_owned))
-            .unwrap_or_default();
-        Arrival { name: name.to_owned(), color: color.to_owned(), token }
+        Arrival { name: name.to_owned(), color: color.to_owned(), home: home.clone() }
     }
 }
 
+/// Serves frozen mode's clients: this computer's app on its socket, and
+/// the loopback port's.
 async fn serve_clients(listener: TcpListener, arrival: Arrival, shown: watch::Receiver<v1::Move>, cancel: watch::Sender<bool>) {
     let cancel = Arc::new(cancel);
+    let app = crate::authority::AppSocket::take(&arrival.home);
     loop {
-        let Ok((stream, peer)) = listener.accept().await else { continue };
-        let (arrival, shown, cancel) = (arrival.clone(), shown.clone(), cancel.clone());
-        tokio::spawn(async move {
-            if let Err(error) = serve_client(stream, arrival, shown, &cancel).await {
-                tracing::debug!(%peer, %error, "a client of frozen mode left");
+        let app_client = async {
+            match &app {
+                Some(app) => app.accept().await,
+                None => std::future::pending().await,
             }
-        });
+        };
+        let (arrival, shown, cancel) = (arrival.clone(), shown.clone(), cancel.clone());
+        tokio::select! {
+            accepted = listener.accept() => {
+                let Ok((stream, peer)) = accepted else { continue };
+                tokio::spawn(async move {
+                    if let Err(error) = serve_client(stream, Via::Port, arrival, shown, &cancel).await {
+                        tracing::debug!(%peer, %error, "a client of frozen mode left");
+                    }
+                });
+            }
+            accepted = app_client => {
+                let Some((stream, checked)) = accepted else { continue };
+                tokio::spawn(async move {
+                    if let Err(error) = serve_client(stream, Via::App(checked), arrival, shown, &cancel).await {
+                        tracing::debug!(%error, "the app's connection to frozen mode ended");
+                    }
+                });
+            }
+        }
     }
 }
 
-type Socket = tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>;
+/// How a client of frozen mode came: on the loopback port, or on the app's
+/// socket, Ok if it's Claktory's own app.
+enum Via {
+    Port,
+    App(Result<(), String>),
+}
 
-async fn answer(socket: &mut Socket, reply_to: u64, body: v1::server_message::Body) -> Result<(), String> {
+type Socket<S> = tokio_tungstenite::WebSocketStream<S>;
+
+async fn answer<S>(socket: &mut Socket<S>, reply_to: u64, body: v1::server_message::Body) -> Result<(), String>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     let message = v1::ServerMessage { reply_to, body: Some(body), ..Default::default() };
     socket.send(Message::Binary(message.encode_to_vec().into())).await.map_err(|error| error.to_string())
 }
@@ -994,14 +1141,19 @@ fn workspace(view: &v1::Move) -> v1::server_message::Body {
     })
 }
 
-/// One client: this computer's app, by its token; the move's view, and
-/// CancelMove while there's still a way back.
-async fn serve_client(
-    stream: tokio::net::TcpStream,
+/// One client: this computer's app (on its socket), or an agent's command
+/// with the tool token; the move's view, and CancelMove while there's
+/// still a way back.
+async fn serve_client<S>(
+    stream: S,
+    via: Via,
     arrival: Arrival,
     mut shown: watch::Receiver<v1::Move>,
     cancel: &watch::Sender<bool>,
-) -> Result<(), String> {
+) -> Result<(), String>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
     // As the normal backend: never a web page.
     #[allow(clippy::result_large_err)]
@@ -1029,7 +1181,26 @@ async fn serve_client(
         let why = format!("server speaks protocol {}, client sent {}", factory_protocol::PROTOCOL_VERSION, knock.protocol_version);
         return answer(&mut socket, hello.id, error(why)).await;
     }
-    if arrival.token.is_empty() || !crate::move_wire::same(&knock.token, &arrival.token) {
+    // A tool sees the view without what only the person reads (the
+    // digits), as on a running Claktory.
+    let (allowed, tool) = match via {
+        Via::App(checked) => (checked.is_ok(), false),
+        Via::Port if crate::authority::is_person_token(&arrival.home, &knock.token) => (true, false),
+        Via::Port => {
+            let tool = crate::authority::is_tool_token(&arrival.home, &knock.token);
+            (tool, tool)
+        }
+    };
+    let view_of = |view: &v1::Move| {
+        let mut body = workspace(view);
+        if let v1::server_message::Body::Workspace(workspace) = &mut body
+            && tool
+        {
+            crate::authority::strip_workspace(workspace);
+        }
+        body
+    };
+    if !allowed {
         tokio::time::sleep(Duration::from_secs(1)).await;
         let why = "This Claktory is moving to another computer; only this computer's own app can follow it.";
         let refusal = v1::server_message::Body::Error(v1::Error {
@@ -1042,14 +1213,15 @@ async fn serve_client(
     let welcome = v1::Welcome {
         protocol_version: factory_protocol::PROTOCOL_VERSION,
         server_version: env!("CARGO_PKG_VERSION").to_owned(),
-        device_id: "local".to_owned(),
+        device_id: if tool { crate::authority::TOOL_DEVICE } else { crate::remote::LOCAL_DEVICE }.to_owned(),
         name: arrival.name.clone(),
         color: arrival.color.clone(),
-        confirm_by_ms: 0,
+        // Only the move is shown while it's frozen.
+        ..Default::default()
     };
     answer(&mut socket, hello.id, v1::server_message::Body::Welcome(welcome)).await?;
     let first = shown.borrow_and_update().clone();
-    answer(&mut socket, 0, workspace(&first)).await?;
+    answer(&mut socket, 0, view_of(&first)).await?;
     loop {
         tokio::select! {
             changed = shown.changed() => {
@@ -1057,7 +1229,7 @@ async fn serve_client(
                     return Ok(());
                 }
                 let view = shown.borrow_and_update().clone();
-                answer(&mut socket, 0, workspace(&view)).await?;
+                answer(&mut socket, 0, view_of(&view)).await?;
             }
             frame = socket.next() => {
                 let message = match frame {

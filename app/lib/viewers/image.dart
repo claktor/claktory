@@ -50,9 +50,12 @@ Size? decodeWithin(Size real, Size decoded) {
 }
 
 class ImageViewer extends StatefulWidget {
-  const ImageViewer({super.key, required this.path});
+  const ImageViewer({super.key, required this.path, this.sealed});
 
   final String path;
+
+  /// The seal whose kept version shows, rather than the file.
+  final FileSeal? sealed;
 
   @override
   State<ImageViewer> createState() => _ImageViewerState();
@@ -62,6 +65,13 @@ class _ImageViewerState extends State<ImageViewer>
     with FileLoading<ImageViewer>, SingleTickerProviderStateMixin {
   @override
   String get path => widget.path;
+
+  @override
+  FileSeal? get sealed => widget.sealed;
+
+  @override
+  Widget sealedViewer(FileSeal sealed) =>
+      ImageViewer(path: path, sealed: sealed);
 
   @override
   String get loadingLabel => 'Loading image…';
@@ -537,6 +547,7 @@ class _ImageViewerState extends State<ImageViewer>
   bool get _commentable {
     final file = this.file;
     return file != null &&
+        sealed == null &&
         _image != null &&
         file.error.isEmpty &&
         !file.truncated &&
@@ -966,6 +977,7 @@ class _ImageViewerState extends State<ImageViewer>
       details: details,
       controls: controls,
       comments: comments == null ? null : CommentsButton(controller: comments),
+      notice: sealNotice(),
       phoneKind: PhoneViewerKind.media,
       phoneOverlay: badge == null && !commentAtRest
           ? null
@@ -1003,6 +1015,7 @@ class _ImageViewerState extends State<ImageViewer>
           PaneAction('Actual size', () => _zoomTo(1)),
         ],
         PaneAction('Reload', reload),
+        ...sealActions(),
       ],
       // A narrow iPad window: Draw beside Comment, until Comment is tapped.
       toolbar: image == null

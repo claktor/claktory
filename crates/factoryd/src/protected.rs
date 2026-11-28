@@ -1,4 +1,4 @@
-//! macOS's protected places (permissions.md P2, item 12): Documents,
+//! macOS's protected places: Documents,
 //! Desktop, Downloads, iCloud Drive and volumes, which macOS keeps from
 //! Claktory Agents until the person lets it in (Files and Folders). macOS
 //! has no way to ask whether it may, so Claktory keeps what it last found
@@ -334,8 +334,8 @@ fn used_by(config: &Config, places: &Arc<dyn Places>, root: &Path) -> Vec<String
 /// The Needs you item's words: "Your agents can't work in Documents" /
 /// "macOS hasn't let Claktory Agents into Documents, so commands in
 /// nixos-site fail. Turn it on for Claktory Agents in System Settings."
-/// (Trish 50063: a volume's switch in Files and Folders is "Removable
-/// Volumes" or "Network Volumes", so the last sentence names no place.)
+/// (a volume's switch in Files and Folders is "Removable Volumes" or
+/// "Network Volumes", so the last sentence names no place.)
 fn words(config: &Config, places: &Arc<dyn Places>, root: &Path, agent: &str) -> (String, String) {
     let name = factory_agent::tools::protected::place_name(root);
     let used = used_by(config, places, root);
@@ -405,7 +405,7 @@ pub(crate) fn view(factory: &Factory, config: &Config) -> Vec<v1::ProtectedPlace
 
 /// Workspace.protected_roots: every protected place on this computer, for
 /// the app to tell before anything is saved whether a path typed is in one,
-/// and name it (Illuso 49904).
+/// and name it.
 pub(crate) fn roots(factory: &Factory) -> Vec<v1::ProtectedRoot> {
     let places = factory.protected.places();
     places

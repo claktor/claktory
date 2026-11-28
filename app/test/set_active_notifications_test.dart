@@ -37,7 +37,6 @@ Future<(Backend, List<SetActive>)> _connect() async {
     transcript: TranscriptStore(),
     explorer: ExplorerStore(),
     extensionView: ExtensionViewStore(),
-    localPairing: () async => null,
     localEndpoint: 'ws://127.0.0.1:${server.port}',
   );
   unawaited(backend.run());

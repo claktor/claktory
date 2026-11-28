@@ -164,7 +164,8 @@ badging="$("$build_tools/aapt2" dump badging "$apk" | sed -n 1p)"
 [[ "$badging" == *"versionCode='$code'"* && "$badging" == *"versionName='${version#v}'"* ]] \
   || { echo "The APK says otherwise: $badging" >&2; exit 1; }
 if [[ -n "$firebase" ]]; then
-  "$build_tools/aapt2" dump resources "$apk" | grep -q 'string/google_app_id' \
+  resources="$("$build_tools/aapt2" dump resources "$apk")"
+  [[ "$resources" == *string/google_app_id* ]] \
     || { echo "The APK has no Firebase app id: is com.claktory.app's client in $firebase?" >&2; exit 1; }
 fi
 
@@ -187,10 +188,11 @@ if ((bundle)); then
   [[ "$("$JAVA_HOME/bin/jarsigner" -verify "$aab" 2>&1)" == *"jar verified."* ]] \
     || { echo "The bundle's signature doesn't verify" >&2; exit 1; }
   apk_cert="$("$build_tools/apksigner" verify --print-certs "$apk" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')"
-  aab_cert="$("$JAVA_HOME/bin/keytool" -printcert -jarfile "$aab" | sed -n 's/^[[:space:]]*SHA256: //p' | head -1 | tr -d ':' | tr 'A-F' 'a-f')"
+  aab_certs="$("$JAVA_HOME/bin/keytool" -printcert -jarfile "$aab")"
+  aab_cert="$(awk '$1 == "SHA256:" { print $2; exit }' <<<"$aab_certs" | tr -d ':' | tr 'A-F' 'a-f')"
   if [[ -n "$upload_key" ]]; then
     # Signed with the upload key's certificate, read from its keystore.
-    prop() { sed -n "s/^$1=//p" "$upload_key" | head -1; }
+    prop() { awk -v key="$1" 'index($0, key "=") == 1 { print substr($0, length(key) + 2); exit }' "$upload_key"; }
     upload_cert="$(CLAKTORY_UPLOAD_PASS="$(prop storePassword)" "$JAVA_HOME/bin/keytool" -exportcert \
       -keystore "$(prop storeFile)" -storepass:env CLAKTORY_UPLOAD_PASS -alias "$(prop keyAlias)" \
       | shasum -a 256 | cut -d' ' -f1)"

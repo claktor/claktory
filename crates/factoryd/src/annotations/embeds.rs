@@ -1,5 +1,5 @@
-//! The pictures and videos a Markdown file shows in place (#540), as the
-//! app decides them (app/lib/viewers/markdown_media.dart, Formaggio 43704):
+//! The pictures and videos a Markdown file shows in place, as the
+//! app decides them (app/lib/viewers/markdown_media.dart):
 //! `![alt](src)` in a paragraph or a list item, whose src is a local file
 //! with a picture's or a video's extension, or a `data:` picture. The app
 //! shows each as a block of its own, never its alt text; anything else

@@ -52,10 +52,20 @@ impl Display {
     }
 }
 
-/// Xvfb, running.
+/// The panel a desktop keeps at the bottom of its screen, as tall as KDE
+/// Plasma's: the window manager leaves it out of the work area, so pages
+/// read the screen less the panel (`screen.availHeight`) and a window
+/// maximised to the rest, as on a desktop.
+pub(crate) const PANEL: u16 = 44;
+
+/// Xvfb, running, with its window manager when there is one.
 pub struct Screen {
     pub display: Display,
     child: Child,
+    window_manager: Option<Child>,
+    /// Why it has no window manager though one is installed: said, and
+    /// the browser runs on the whole screen.
+    pub without_window_manager: Option<String>,
 }
 
 impl Screen {
@@ -102,10 +112,15 @@ impl Screen {
         }
         let child = command.spawn().map_err(|error| format!("couldn't start the screen (Xvfb): {error}"))?;
         drop(ready_write);
-        let mut screen = Screen { display: Display { number: 0, cookie_path, cookie }, child };
+        let mut screen =
+            Screen { display: Display { number: 0, cookie_path, cookie }, child, window_manager: None, without_window_manager: None };
         match read_number(ready_read) {
             Ok(number) => {
                 screen.display.number = number;
+                match window_manager(&screen.display, tmp, height) {
+                    Ok(window_manager) => screen.window_manager = window_manager,
+                    Err(why) => screen.without_window_manager = Some(why),
+                }
                 Ok(screen)
             }
             Err(why) => {
@@ -121,6 +136,9 @@ impl Screen {
 
     /// Stops it: asked, then made to.
     pub fn stop(&mut self) {
+        if let Some(window_manager) = &mut self.window_manager {
+            super::end(window_manager, Duration::from_secs(2));
+        }
         super::end(&mut self.child, Duration::from_secs(2));
     }
 }
@@ -183,6 +201,110 @@ fn read_number(ready: OwnedFd) -> Result<u32, String> {
     text.trim().parse().map_err(|_| "the screen (Xvfb) gave no display number".to_owned())
 }
 
+/// Openbox's settings: one desktop and the panel's margin. Openbox runs
+/// outside Chrome's fence, so nothing in it may start a program: no key or
+/// mouse bindings, and its only menu `menu`, which is empty.
+/// scripts/browser-image/test-window-manager.sh checks that in the image,
+/// with these settings copied: change both together.
+fn openbox_config(menu: &Path, theme: Option<&Path>) -> String {
+    let theme = theme.map(|theme| format!("\n  <theme><name>{}</name></theme>", xml_text(&theme.to_string_lossy()))).unwrap_or_default();
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<openbox_config xmlns="http://openbox.org/3.4/rc">
+  <margins><top>0</top><bottom>{PANEL}</bottom><left>0</left><right>0</right></margins>
+  <desktops><number>1</number></desktops>{theme}
+  <keyboard></keyboard>
+  <mouse></mouse>
+  <menu><file>{menu}</file></menu>
+</openbox_config>
+"#,
+        menu = xml_text(&menu.to_string_lossy()),
+    )
+}
+
+/// Openbox's theme, by its path: it won't start without one, and its own
+/// XDG folders (`window_manager`) have none. Ubuntu's, then NixOS's.
+const THEMES: [&str; 2] = ["/usr/share/themes/Clearlooks", "/run/current-system/sw/share/themes/Clearlooks"];
+
+/// The empty menu Openbox is given instead of the system's, whose items
+/// start programs.
+const OPENBOX_MENU: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<openbox_menu xmlns=\"http://openbox.org/3.4/menu\"></openbox_menu>\n";
+
+/// `text` with XML's special characters escaped.
+fn xml_text(text: &str) -> String {
+    text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
+/// Openbox on the screen, when it's installed: a desktop's window manager,
+/// so the work area stops above the panel and Chrome's window is maximised
+/// to it. Ready once it says so on the screen's root (`_NET_WORKAREA`).
+/// None without Openbox; Err when it's there but didn't start (the browser
+/// then runs on the whole screen, as without it).
+fn window_manager(display: &Display, tmp: &Path, height: u16) -> Result<Option<Child>, String> {
+    let Some(openbox) = super::chrome::find(&["openbox"]) else { return Ok(None) };
+    // Its own folders for everything XDG, so it reads nothing of the
+    // system's (/etc/xdg/openbox: its menu, its autostart).
+    let xdg = tmp.join("openbox");
+    for folder in ["config", "data"] {
+        std::fs::create_dir_all(xdg.join(folder)).map_err(|error| format!("couldn't make the window manager's folder: {error}"))?;
+    }
+    let menu = xdg.join("menu.xml");
+    let config = xdg.join("openbox.xml");
+    std::fs::write(&menu, OPENBOX_MENU).map_err(|error| format!("couldn't write the window manager's menu: {error}"))?;
+    let theme = THEMES.iter().map(Path::new).find(|theme| theme.is_dir());
+    std::fs::write(&config, openbox_config(&menu, theme)).map_err(|error| format!("couldn't write the window manager's settings: {error}"))?;
+    let log = File::create(tmp.join("openbox.log")).map_err(|error| format!("couldn't make the window manager's log: {error}"))?;
+    let mut command = Command::new(openbox);
+    command
+        .arg("--sm-disable")
+        .arg("--config-file")
+        .arg(&config)
+        .env_clear()
+        .env("PATH", super::chrome::PATH)
+        .env("HOME", tmp)
+        .env("XDG_CONFIG_HOME", xdg.join("config"))
+        .env("XDG_CONFIG_DIRS", xdg.join("config"))
+        .env("XDG_DATA_HOME", xdg.join("data"))
+        .env("XDG_DATA_DIRS", xdg.join("data"))
+        .env("DISPLAY", display.name())
+        .env("XAUTHORITY", &display.cookie_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(log);
+    // SAFETY: between fork and exec, only async-signal-safe calls.
+    unsafe {
+        command.pre_exec(|| {
+            super::die_with_parent();
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().map_err(|error| format!("couldn't start the window manager (Openbox): {error}"))?;
+    let deadline = Instant::now() + READY;
+    let usable = height.saturating_sub(PANEL);
+    loop {
+        if work_area_height(display).is_some_and(|height| height == u32::from(usable)) {
+            return Ok(Some(child));
+        }
+        if !matches!(child.try_wait(), Ok(None)) || Instant::now() > deadline {
+            super::end(&mut child, Duration::from_secs(2));
+            return Err("the window manager (Openbox) didn't start, so the browser has the whole screen".to_owned());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// The height of the screen's work area, as its window manager sets it on
+/// the root (`_NET_WORKAREA`: x, y, width, height for each desktop).
+fn work_area_height(display: &Display) -> Option<u32> {
+    use x11rb::connection::Connection as _;
+    use x11rb::protocol::xproto::{AtomEnum, ConnectionExt as _};
+    let connection = display.connect().ok()?;
+    let root = connection.setup().roots.first()?.root;
+    let atom = connection.intern_atom(false, b"_NET_WORKAREA").ok()?.reply().ok()?.atom;
+    let said = connection.get_property(false, root, atom, AtomEnum::CARDINAL, 0, 4).ok()?.reply().ok()?;
+    said.value32()?.nth(3)
+}
+
 fn xvfb_binary() -> Result<PathBuf, String> {
     super::chrome::find(&["Xvfb"]).ok_or_else(|| "Xvfb isn't installed: run Claktory's browser setup".to_owned())
 }
@@ -226,6 +348,20 @@ pub(crate) fn above_stdio(fd: OwnedFd) -> Result<OwnedFd, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Nothing in Openbox's settings can start a program: bindings empty,
+    /// and the menu it reads only the empty one given, its path escaped.
+    #[test]
+    fn openbox_is_given_no_bindings_and_only_an_empty_menu() {
+        let config = openbox_config(Path::new("/tmp/claktory-<1>&/openbox/menu.xml"), Some(Path::new("/usr/share/themes/Clearlooks")));
+        assert!(config.contains("<theme><name>/usr/share/themes/Clearlooks</name></theme>"), "{config}");
+        assert!(!openbox_config(Path::new("/tmp/menu.xml"), None).contains("<theme>"));
+        assert!(config.contains("<keyboard></keyboard>") && config.contains("<mouse></mouse>"), "{config}");
+        assert!(config.contains("<menu><file>/tmp/claktory-&lt;1&gt;&amp;/openbox/menu.xml</file></menu>"), "{config}");
+        assert_eq!(config.matches("<file>").count(), 1, "{config}");
+        assert!(!config.contains("<command") && !config.contains("<action"), "{config}");
+        assert!(!OPENBOX_MENU.contains("<item") && !OPENBOX_MENU.contains("<command"), "{OPENBOX_MENU}");
+    }
 
     #[test]
     fn the_cookie_file_holds_one_wild_cookie() {

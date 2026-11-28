@@ -1,4 +1,4 @@
-//! Signing in to Grok with a SuperGrok or X Premium+ subscription: xAI's
+//! Signing in to Grok with a Grok subscription: xAI's
 //! device sign-in (RFC 8628) at auth.x.ai, as its own command-line tool
 //! signs in, with the narrowest scopes that chat. The person opens xAI's
 //! page on any device and confirms the code there; Claktory never sees a
@@ -203,7 +203,7 @@ fn credential(body: &str, kept: Option<&str>) -> Result<Credential, Error> {
 
 impl OAuthFlow for GrokOAuth {
     fn name(&self) -> &str {
-        "Grok (SuperGrok or X Premium+)"
+        "Grok (your Grok subscription)"
     }
 
     fn is_subscription(&self) -> bool {

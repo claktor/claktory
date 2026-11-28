@@ -22,7 +22,7 @@ when one is missing. Nothing here is used by anything but the browser.
 | The firewall | nft table `inet claktory_browser`, from `/etc/claktory-browser.nft` (a copy of `scripts/claktory-browser.nft`), loaded by `/usr/local/sbin/claktory-browser-nft` (a copy of `scripts/claktory-browser-nft.sh`, which the Mac image uses too), which replaces only that table in one transaction and then adds the resolvers in `/etc/resolv.conf` to its sets `dns4` and `dns6` (port 53 only), run by `claktory-browser-nft.service` (`/etc/systemd/system`, enabled, wanted by sysinit.target, before network-pre.target, restarted with nftables.service). `/etc/nftables.conf` and nftables.service are left alone (Fugo) | root; 0644, the loader 0755 | the browser's user reaches neither this machine nor the local network, by any protocol |
 | User namespaces for the gate (Ubuntu 23.10 and later: only where `kernel.apparmor_restrict_unprivileged_userns` exists) | `/etc/apparmor.d/claktory-browser-gate`: profile `claktory-browser-gate` for the gate's path, `flags=(unconfined)`, `userns,` only; loaded with `apparmor_parser -r`, checked with `aa-status`. An older setup's `/etc/apparmor.d/claktory-browser-runner`, for the runner's path, is unloaded and removed (the setup check asks while it's there): the person can write that path, so it would give any program of theirs user namespaces | root, 0644 | the runner's private /proc and PID 1, which the gate makes |
 | X's socket folder | `/tmp/.X11-unix`, made at every boot by `/etc/tmpfiles.d/claktory-browser.conf` (`D! /tmp/.X11-unix 1777 root root -`, as systemd's own x11.conf); each runner mounts its own tmpfs over it and refuses to start unless it's a real folder of root's | root, 1777 | two browsers can't take each other's display (Ghiaccio, Fugo 38527) |
-| Packages | `google-chrome-stable` (Google's apt repository: brought in once with the key in `/etc/apt/keyrings/google-chrome.gpg`, then Chrome's own `google-chrome.sources` keeps it updated), `xvfb`, `xauth`, `tzdata` (the person's time zone, #435 change 3), fonts: a normal desktop set (Liberation and Liberation 2, DejaVu, Noto, Noto Color Emoji, Noto CJK; change 3) | | |
+| Packages | `google-chrome-stable` (Google's apt repository: brought in once with the key in `/etc/apt/keyrings/google-chrome.gpg`, then Chrome's own `google-chrome.sources` keeps it updated), `xvfb`, `xauth`, `openbox` (a window manager on the browser's screen, so it has a desktop's work area: optional, the browser runs without it), `tzdata` (the person's time zone, #435 change 3), fonts: a normal desktop set (Liberation and Liberation 2, DejaVu, Noto, Noto Color Emoji, Noto CJK; change 3) | | |
 
 The firewall's browser chain, matched by the user positively (`meta skuid
 "claktory-browser"`), in this order: accept established and related; accept DNS
@@ -107,7 +107,7 @@ let
   chrome = if lib.meta.availableOn pkgs.stdenv.hostPlatform pkgs.google-chrome then pkgs.google-chrome else pkgs.chromium;
 in {
   nixpkgs.config.allowUnfree = true;
-  environment.systemPackages = with pkgs; [ chrome xvfb xorg.xauth ];
+  environment.systemPackages = with pkgs; [ chrome xvfb xorg.xauth openbox ];
   # Fonts go in fonts.packages, where fontconfig (and so Chrome) finds them.
   fonts.packages = with pkgs; [ liberation_ttf dejavu_fonts noto-fonts noto-fonts-color-emoji noto-fonts-cjk-sans ];
   users.groups.claktory-browser = {};
@@ -161,7 +161,7 @@ archive's SHA-256 before anything reads it, loads it, checks the variant's
 digest before every run and runs it by that name, never by digest (`container`
 asks a registry for any digest reference). `scripts/browser-image.sh` builds it:
 a base (`browser-image/Containerfile.base`: Ubuntu 24.04 arm64, Chrome from
-Google's repository with the key pinned as above, Xvfb, xauth, the fonts, the
+Google's repository with the key pinned as above, Xvfb, xauth, Openbox, the fonts, the
 same policy, `/etc/claktory-browser.nft` and the loader) and, per release, the
 runner (that release's linux-aarch64 static factoryd) at
 `/opt/claktory-browser/runner`, root's, 0755, with the entrypoint

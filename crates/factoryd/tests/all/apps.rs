@@ -202,7 +202,10 @@ impl Stand {
                     done("")
                 }
                 Host::Call(call) => {
-                    self.log.lock().expect("log").push(format!("call {} {} by {}", call.tool, call.args, call.caller));
+                    self.log.lock().expect("log").push(format!(
+                        "call {} {} by {} (project {:?}, admin {}, tainted {})",
+                        call.tool, call.args, call.caller, call.caller_project, call.caller_admin, call.caller_tainted
+                    ));
                     answer(Host::CallResult(wire::CallResult {
                         text: format!("Sent for {}.", call.caller),
                         data: r#"{"message_id":7}"#.into(),
@@ -357,7 +360,14 @@ async fn an_app_is_reviewed_installed_set_up_given_to_agents_and_heard_from() {
     apply_request(&mut client, &mut view, grant("builder", &["send"])).await;
     let said = call(&mut client, &mut view, "builder", "telegram_send", r#"{"text":"Build failed"}"#).await;
     assert_eq!(said, "Sent for builder.");
-    assert!(stand.log().contains(&r#"call telegram_send {"text":"Build failed"} by builder"#.to_owned()), "{:?}", stand.log());
+    // The app is told who calls: Builder, of Site, not an admin agent, and
+    // having read outside content, since calling an app that reaches the
+    // internet is reading it.
+    assert!(
+        stand.log().contains(&r#"call telegram_send {"text":"Build failed"} by builder (project "site", admin false, tainted true)"#.to_owned()),
+        "{:?}",
+        stand.log()
+    );
     let prompt = system_prompt.lock().expect("prompt").clone();
     assert!(prompt.contains("# The Telegram app") && prompt.contains("Answer the person's messages with telegram_send."), "{prompt}");
     // Not what it wasn't given.
@@ -422,8 +432,8 @@ async fn an_app_is_reviewed_installed_set_up_given_to_agents_and_heard_from() {
             kind: "message".into(),
             scope: "read".into(),
             text: text.into(),
-            data: String::new(),
             dedupe_key: key.into(),
+            ..Default::default()
         })
     };
     stand.send(emit("Matt: Can you check the deploy?", "update:1"));
@@ -444,6 +454,15 @@ async fn an_app_is_reviewed_installed_set_up_given_to_agents_and_heard_from() {
     assert_eq!((events[0].from.as_str(), events[0].from_id.as_str()), ("Telegram", "telegram"));
     assert_eq!(events[0].text, "Matt: Can you check the deploy?");
     assert_eq!(events[1].text, "Matt: And the DNS.\nMatt: Thanks!");
+    // emit-to: that agent alone, though others are subscribed.
+    let to = |agent: &str, text: &str, key: &str| match emit(text, key) {
+        Host::Emit(emit) => Host::Emit(wire::Emit { to_agent: agent.into(), ..emit }),
+        _ => unreachable!(),
+    };
+    stand.send(to("writer", "Matt: For Writer.", "update:4"));
+    stand.send(to("builder", "Matt: For Builder.", "update:5"));
+    view.follow(&mut client, |view| heard(view).iter().any(|event| event.text.contains("For Builder.")) && idle(view, "builder")).await;
+    assert!(!heard(&view).iter().any(|event| event.text.contains("For Writer.")), "{:?}", heard(&view));
 
     // A crash: it starts again by itself.
     stand.send(Host::Crashed(wire::Crashed { app_id: "telegram".into(), error: "It ran out of memory (32 MB).".into() }));
@@ -561,9 +580,14 @@ async fn apps_leave_no_trace_where_they_are_not_offered() {
 #[ignore = "needs the dev Claktory, its apps host and a .clapp"]
 async fn dev_install() {
     let path = std::env::var("CLAPP").expect("CLAPP: the .clapp's path");
-    // The loopback port wants this machine's app's token.
-    let code = std::fs::read_to_string(std::env::var("HOME").expect("HOME") + "/.factory-dev/remote/local-pairing").expect("pairing code");
-    let token = reqwest::Url::parse(code.trim()).expect("code").query_pairs().find(|(key, _)| key == "t").expect("token").1.into_owned();
+    // Installing an app is the person's: the loopback port takes it only
+    // from a backend built for QA, which keeps the person's token in its
+    // home. A dev Claktory built by scripts/dev.sh has none: install
+    // the.clapp in Claktory Dev instead.
+    let token = std::fs::read_to_string(std::env::var("HOME").expect("HOME") + "/.factory-dev/qa-person-token")
+        .expect("no person token: install the app in Claktory Dev itself (only the person installs apps)")
+        .trim()
+        .to_owned();
     let mut client = Client::open("127.0.0.1:7421".parse().expect("address")).await;
     let hello =
         v1::Hello { protocol_version: factory_protocol::PROTOCOL_VERSION, client_version: "test".into(), token, ..Default::default() };

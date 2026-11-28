@@ -44,7 +44,9 @@ scripts/qa.sh --rev factory/frontend-2 up kenji   # a branch or commit instead o
 ```
 
 The first run for a commit exports it with `git archive` and builds factoryd,
-claktory-account and claktory-qa into the QA root. That takes a few minutes;
+its apps host (claktory-apps, beside factoryd, so a sandbox installs and runs
+apps such as Charts and Calendar), claktory-account and claktory-qa into the QA
+root. That takes a few minutes;
 after that the build is reused. It builds only what's committed, never
 uncommitted changes. Every commit shares one cargo build, so the script makes
 sure each commit's binaries really are its own. It builds one commit at a time

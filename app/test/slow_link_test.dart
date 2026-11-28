@@ -185,7 +185,6 @@ void main() {
         transcript: TranscriptStore(),
         explorer: ExplorerStore(),
         extensionView: ExtensionViewStore(),
-        localPairing: () async => null,
         localEndpoint: 'ws://127.0.0.1:${link.port}',
       );
       unawaited(backend.run());
@@ -373,7 +372,6 @@ void main() {
         explorer: ExplorerStore(),
         extensionView: ExtensionViewStore(),
         tunnels: _LinkTunnels(link.port),
-        localPairing: () async => null,
       )..deviceKey = ((_) => 'k' * 64);
       backend.connectTo(
         parsePairingCode('factory://?t=${'c' * 64}&e=${'a' * 64}&name=mini'),

@@ -86,16 +86,21 @@ class LoadingProgress extends StatelessWidget {
                       Positioned.fill(
                         child: ColoredBox(color: palette.selected),
                       ),
-                      // Its own height: as a loose child of the stack the
-                      // fill had none, and the bar never moved.
-                      PositionedDirectional(
-                        key: const ValueKey('loading-fill'),
-                        start: 0,
-                        top: 0,
-                        bottom: 0,
-                        width: barWidth * fraction,
-                        child: ColoredBox(color: palette.signal),
-                      ),
+                      // Before its size is known, a stretch of it goes
+                      // along the bar, so it never looks stuck.
+                      if (size == 0)
+                        const Positioned.fill(child: _Going())
+                      else
+                        // Its own height: as a loose child of the stack the
+                        // fill had none, and the bar never moved.
+                        PositionedDirectional(
+                          key: const ValueKey('loading-fill'),
+                          start: 0,
+                          top: 0,
+                          bottom: 0,
+                          width: barWidth * fraction,
+                          child: ColoredBox(color: palette.signal),
+                        ),
                     ],
                   ),
                 ),
@@ -122,6 +127,55 @@ class LoadingProgress extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// A third of the bar going along it, again and again, while how much
+/// there is to come isn't known; still, at its start, with reduced motion.
+class _Going extends StatefulWidget {
+  const _Going();
+
+  @override
+  State<_Going> createState() => _GoingState();
+}
+
+class _GoingState extends State<_Going> with SingleTickerProviderStateMixin {
+  late final _along = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1200),
+  );
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (MediaQuery.disableAnimationsOf(context)) {
+      _along.stop();
+    } else if (!_along.isAnimating) {
+      _along.repeat();
+    }
+  }
+
+  @override
+  void dispose() {
+    _along.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final color = Palette.of(context).signal;
+    return AnimatedBuilder(
+      key: const ValueKey('loading-going'),
+      animation: _along,
+      builder: (context, _) => FractionallySizedBox(
+        widthFactor: 1 / 3,
+        alignment: Alignment(
+          -2 + 4 * Curves.easeInOut.transform(_along.value),
+          0,
+        ),
+        child: ColoredBox(color: color),
       ),
     );
   }

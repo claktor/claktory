@@ -1,4 +1,4 @@
-// Settings → Notifications (#273 B4): which kinds notify, how much a
+// Settings → Notifications: which kinds notify, how much a
 // notification shows, quiet hours, whether this device gets them (the
 // system's permission, read again when the app comes back), a test
 // notification; and an agent's "Notify me". Each change sends the settings

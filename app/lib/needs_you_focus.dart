@@ -39,6 +39,7 @@ import 'needs_you_history.dart'
     show
         HistoryRow,
         NeedsYouTabs,
+        historyByAgent,
         historyEnded,
         historyPage,
         historyWhere,
@@ -1835,61 +1836,92 @@ class _QueueRow extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Row(
-                      children: [
-                        if (waiting && focusUrgent(item)) ...[
-                          ExtensionGlyph(
-                            icon: 'flag',
-                            name: '',
-                            color: palette.signal,
-                            size: 12,
-                          ),
-                          const SizedBox(width: Space.xs),
-                        ],
-                        // Its agent's role beside its name, cut first
-                        // (§3.10, Lucy 46817).
-                        Expanded(
-                          child: Builder(
-                            builder: (context) {
-                              final named = needsYouWho(workspace, item, who);
-                              return NameRoleLine(
-                                name: named.name,
-                                role: named.role,
-                                after: [
-                                  if (named.after.isNotEmpty)
-                                    TextSpan(text: named.after),
-                                ],
-                                style: type.label.copyWith(
-                                  color: waiting
-                                      ? palette.text
-                                      : palette.textMuted,
-                                  fontWeight: FontWeight.w600,
+                    // How long it has waited beside who asks while both
+                    // fit; narrower (a small window at a large text size),
+                    // on a line of its own under it. Once answered, how it
+                    // ended takes the second line, whatever its length
+                    // ("Answered on Matt's iPad Pro").
+                    LayoutBuilder(
+                      builder: (context, box) => Ticking(
+                        active: outcome == null && time > 0,
+                        builder: (context, now) {
+                          final age = outcome == null && time > 0
+                              ? formatAge(time, now)
+                              : '';
+                          final ageStyle = type.caption.copyWith(
+                            color: waitedADay(time, now)
+                                ? palette.signal
+                                : palette.textFaint,
+                          );
+                          final flag = waiting && focusUrgent(item);
+                          final beside =
+                              age.isEmpty ||
+                              box.maxWidth -
+                                      (flag ? 12 + Space.xs : 0) -
+                                      Space.s -
+                                      _textWidth(context, age, ageStyle) >=
+                                  _nameAtLeast;
+                          final ageText = Text(
+                            age,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: ageStyle,
+                          );
+                          final line = Row(
+                            children: [
+                              if (flag) ...[
+                                ExtensionGlyph(
+                                  icon: 'flag',
+                                  name: '',
+                                  color: palette.signal,
+                                  size: 12,
                                 ),
-                                roleStyle: type.label.copyWith(
-                                  color: palette.textMuted,
-                                  fontWeight: FontWeight.w400,
+                                const SizedBox(width: Space.xs),
+                              ],
+                              // Its agent's role beside its name, cut first.
+                              Expanded(
+                                child: Builder(
+                                  builder: (context) {
+                                    final named = needsYouWho(
+                                      workspace,
+                                      item,
+                                      who,
+                                    );
+                                    return NameRoleLine(
+                                      name: named.name,
+                                      role: named.role,
+                                      after: [
+                                        if (named.after.isNotEmpty)
+                                          TextSpan(text: named.after),
+                                      ],
+                                      style: type.label.copyWith(
+                                        color: waiting
+                                            ? palette.text
+                                            : palette.textMuted,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                      roleStyle: type.label.copyWith(
+                                        color: palette.textMuted,
+                                        fontWeight: FontWeight.w400,
+                                      ),
+                                    );
+                                  },
                                 ),
-                              );
-                            },
-                          ),
-                        ),
-                        const SizedBox(width: Space.s),
-                        // Once answered, how it ended takes the second
-                        // line, whatever its length ("Answered on Matt's
-                        // iPad Pro").
-                        if (outcome == null && time > 0)
-                          Ticking(
-                            active: true,
-                            builder: (context, now) => Text(
-                              formatAge(time, now),
-                              style: type.caption.copyWith(
-                                color: waitedADay(time, now)
-                                    ? palette.signal
-                                    : palette.textFaint,
                               ),
-                            ),
-                          ),
-                      ],
+                              if (age.isNotEmpty && beside) ...[
+                                const SizedBox(width: Space.s),
+                                ageText,
+                              ],
+                            ],
+                          );
+                          if (beside) return line;
+                          return Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisSize: MainAxisSize.min,
+                            children: [line, ageText],
+                          );
+                        },
+                      ),
                     ),
                     Text(
                       outcome?.words ?? what,
@@ -1921,6 +1953,7 @@ class _QueueRow extends StatelessWidget {
     NeedsYouKind.backendService ||
     NeedsYouKind.lidStuck => 'laptop-minimal',
     NeedsYouKind.protectedPlace => 'folder-lock',
+    NeedsYouKind.join => 'server',
     NeedsYouKind.chat => 'message-circle',
     NeedsYouKind.signIn => 'user',
     _ => 'arrow-left-right',
@@ -2344,7 +2377,9 @@ class _HistoryStageState extends State<_HistoryStage> {
                         Ticking(
                           active: true,
                           builder: (context, now) => Text(
-                            'Decided ${formatAge(decided, now)}',
+                            historyByAgent(record)
+                                ? formatAge(decided, now)
+                                : 'Decided ${formatAge(decided, now)}',
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: type.caption.copyWith(
@@ -2516,6 +2551,23 @@ class _StageReviewState extends State<_StageReview> {
 /// Who asks keeps at least this much of the stage's header beside its
 /// actions' words; with less, the actions are glyphs.
 const _whoAtLeast = 160.0;
+
+/// Who asks keeps at least this much of a queue row beside how long it
+/// has waited; with less, the wait goes on a line of its own.
+const _nameAtLeast = 80.0;
+
+/// How wide [text] is in [style] at the person's text size.
+double _textWidth(BuildContext context, String text, TextStyle style) {
+  final painter = TextPainter(
+    text: TextSpan(text: text, style: style),
+    textDirection: TextDirection.ltr,
+    textScaler: MediaQuery.textScalerOf(context),
+    maxLines: 1,
+  )..layout();
+  final width = painter.width;
+  painter.dispose();
+  return width;
+}
 
 /// How wide [labels] are as [Button]s side by side.
 double _buttonsWidth(BuildContext context, List<String> labels) {
@@ -3760,6 +3812,27 @@ ValueListenable<bool> focusModeOf(Backend backend) => _focusModeOf(backend);
 /// Focus mode on or off on this device.
 void setFocusMode(Backend backend, bool on) => _focusModeOf(backend).set(on);
 
+/// Something opens from focus mode in the window it hides (a file, a
+/// picture, a page beside a conversation): focus mode leaves first, so
+/// nothing ever opens out of sight, and the window shows the conversation
+/// it opens beside, [agentId]'s or that of the request on the stage. That
+/// agent; null outside focus mode, where nothing changes.
+String? leaveFocusModeToOpen(BuildContext context, {String? agentId}) {
+  final backend = AppScope.of(context);
+  final mode = _focusModeOf(backend);
+  if (!mode.value) return null;
+  final item = mode._session?.current;
+  final to =
+      agentId ??
+      (item != null && item.kind == NeedsYouKind.entry ? item.agentId : null);
+  setFocusMode(backend, false);
+  if (to == null || backend.workspace.agent(to) == null) return null;
+  if (backend.workspace.workspace.selectedAgentId != to) {
+    fireAndLog(backend.selectAgent(to));
+  }
+  return to;
+}
+
 /// Into focus mode, from the sidebar's Needs you, the chip, the page's
 /// Focus mode, the View menu or ⌘⇧N; [at], with that request on the
 /// stage (the chip's: its conversation's own).
@@ -3870,7 +3943,10 @@ class _FocusModeLayerState extends State<FocusModeLayer> {
             enabled: session == null,
             child: ExcludeFocus(
               excluding: session != null,
-              child: widget.child,
+              child: _BehindFocusMode(
+                behind: session != null,
+                child: widget.child,
+              ),
             ),
           ),
         ),
@@ -3884,3 +3960,23 @@ class _FocusModeLayerState extends State<FocusModeLayer> {
     );
   }
 }
+
+/// Whether the window [FocusModeLayer] holds is out of sight behind focus
+/// mode.
+class _BehindFocusMode extends InheritedWidget {
+  const _BehindFocusMode({required this.behind, required super.child});
+
+  final bool behind;
+
+  @override
+  bool updateShouldNotify(_BehindFocusMode old) => behind != old.behind;
+}
+
+/// Whether [context] is in the window focus mode hides. What it floats
+/// over the window from there (an expanded pane, in the window's overlay)
+/// is hidden too: drawn by the overlay, it would cover focus mode, and
+/// with the window's animations stopped it would never fade in, an
+/// unseen pane taking every click.
+bool behindFocusMode(BuildContext context) =>
+    context.dependOnInheritedWidgetOfExactType<_BehindFocusMode>()?.behind ??
+    false;

@@ -1,8 +1,8 @@
 import 'dart:io';
 
 /// One Rust build folder for the tunnel, shared by every checkout of the
-/// app on this computer (Bruno 37145: each checkout's own copy of the same
-/// dependencies came to 34 GB across 16).
+/// app on this computer (each checkout's own copy of the same dependencies
+/// came to 34 GB across 16).
 ///
 /// What cargo builds on the way (the dependencies, build scripts and
 /// fingerprints) goes in this shared folder, cargo's `build-dir`. What a

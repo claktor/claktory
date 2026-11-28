@@ -464,6 +464,24 @@ void main() {
     );
   });
 
+  testWidgets("a file in a Windows folder opens by a Windows path", (
+    tester,
+  ) async {
+    final workspace = snapshot(layout: withFilesOf('p1'));
+    workspace.projects[0].path = r'C:\Users\me\factory';
+    final harness = await showFiles(
+      tester,
+      workspace: workspace,
+      explorers: [tree()],
+    );
+    await tester.tap(find.text('pubspec.yaml'));
+    await settle(tester);
+    expect(
+      leaves(harness.last.setLayout.root).last.leaf.path,
+      r'C:\Users\me\factory\app\pubspec.yaml',
+    );
+  });
+
   testWidgets("a Files pane shows each of the project's folders", (
     tester,
   ) async {

@@ -682,6 +682,15 @@ bool voiceKnown(Workspace workspace) =>
     workspace.speechModel.state !=
         SpeechModelState.SPEECH_MODEL_STATE_UNSPECIFIED;
 
+/// Whether this device can record a voice message: the Windows app has no
+/// recorder yet, so it offers no mic, though Settings → Voice still looks
+/// after the Claktory's speech model for its other devices.
+bool get recordsHere => defaultTargetPlatform != TargetPlatform.windows;
+
+/// Whether the mic is offered here: [workspace]'s Claktory knows voice
+/// messages and this device can record them.
+bool micOffered(Workspace workspace) => recordsHere && voiceKnown(workspace);
+
 /// Why voice messages can't be sent to [model]'s Claktory at all, for the
 /// person; null when they can (once its model is there).
 String? voiceUnavailable(SpeechModel model) =>

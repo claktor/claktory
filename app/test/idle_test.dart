@@ -58,7 +58,6 @@ Future<(Backend, FakeTunnel)> _connected(HttpServer server) async {
     explorer: ExplorerStore(),
     extensionView: ExtensionViewStore(),
     tunnels: FakeTunnels(tunnel),
-    localPairing: () async => null,
   )..deviceKey = ((_) => 'k' * 64);
   backend.connectTo(parsePairingCode(_code));
   unawaited(backend.run());

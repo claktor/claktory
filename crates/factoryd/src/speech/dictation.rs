@@ -7,7 +7,7 @@
 //! AudioTranscribed).
 //!
 //! On a weak connection the app asks again, from its next connection, with
-//! the same request and upload ids (#401): a repeat waits with the first
+//! the same request and upload ids: a repeat waits with the first
 //! for the words, or gets them at once once they're there, without sending
 //! the recording again. So the answer is kept, in memory only, for an hour.
 //!

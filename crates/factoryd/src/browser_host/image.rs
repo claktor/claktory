@@ -290,6 +290,7 @@ async fn get(home: &Path, container: &Path, built: &Built) -> Result<(), String>
     let folder = folder(home)?;
     let archive = folder.join(format!("{}.oci.tar.zst", built.archive_sha256));
     let unpacked = folder.join("image.tar");
+    let record = loaded_record(home);
     let result = async {
         match shipped(home) {
             // A copy of its own (a clone on APFS), so what's hashed is what's unpacked.
@@ -302,7 +303,7 @@ async fn get(home: &Path, container: &Path, built: &Built) -> Result<(), String>
             }
         }
         let (container, built, archive_path, unpacked_path) = (container.to_path_buf(), built.clone(), archive.clone(), unpacked.clone());
-        tokio::task::spawn_blocking(move || load(&container, &built, &archive_path, &unpacked_path))
+        tokio::task::spawn_blocking(move || load(&container, &built, &archive_path, &unpacked_path, &record))
             .await
             .map_err(|error| error.to_string())?
     }
@@ -379,8 +380,9 @@ async fn download(url: &str, to: &Path) -> Result<(), String> {
 }
 
 /// Checks `archive` against the build, unpacks it into `unpacked` up to the
-/// cap, loads it, and checks what's loaded.
-fn load(container: &Path, built: &Built, archive: &Path, unpacked: &Path) -> Result<(), String> {
+/// cap, loads it, and checks what's loaded. `record` lists the tags this
+/// home loaded.
+fn load(container: &Path, built: &Built, archive: &Path, unpacked: &Path, record: &Path) -> Result<(), String> {
     *prep() = Prep::Loading;
     let sha256 = crate::encoding::sha256_file(archive, 1 << 20).map_err(|error| format!("Claktory can't read its archive ({error})."))?;
     if sha256 != built.archive_sha256 {
@@ -397,6 +399,7 @@ fn load(container: &Path, built: &Built, archive: &Path, unpacked: &Path) -> Res
     if !said.status.success() {
         return Err("Apple's container tool couldn't load it.".to_owned());
     }
+    remember(record, loaded_here(record).into_iter().chain([built.reference.clone()]));
     let printed = String::from_utf8_lossy(&said.stdout);
     let loaded = printed.lines().map(str::trim).rfind(|line| !line.is_empty()).unwrap_or_default();
     if loaded != built.reference {
@@ -406,15 +409,39 @@ fn load(container: &Path, built: &Built, archive: &Path, unpacked: &Path) -> Res
     if !ready(container, built) {
         return Err("What loaded isn't the image this version of Claktory was built with, so it isn't used.".to_owned());
     }
-    forget_earlier(container, built);
+    forget_earlier(container, built, record);
     Ok(())
 }
 
+/// Where a home lists the image tags it loaded: Apple's container keeps
+/// one store for every Claktory of this user (the real one, the dev one,
+/// QA's), so a home deletes only what it loaded itself.
+fn loaded_record(home: &Path) -> PathBuf {
+    home.join("cache").join("browser-images-loaded")
+}
+
+fn loaded_here(record: &Path) -> Vec<String> {
+    std::fs::read_to_string(record).unwrap_or_default().lines().map(str::trim).filter(|name| tagged(name)).map(str::to_owned).collect()
+}
+
+fn remember(record: &Path, names: impl Iterator<Item = String>) {
+    let mut kept: Vec<String> = Vec::new();
+    for name in names {
+        if !kept.contains(&name) {
+            kept.push(name);
+        }
+    }
+    let text: String = kept.iter().map(|name| format!("{name}\n")).collect();
+    if let Err(error) = std::fs::write(record, text) {
+        tracing::warn!(%error, "couldn't note which browser images this Claktory loaded");
+    }
+}
+
 /// Deletes earlier versions' tags of this build's image once its own is
-/// loaded (Pericolo 49287), so each update doesn't keep another: only
-/// names of its own repository, `localhost/claktory-browser:v…` (or
-/// `-dev`), never anything else in the store (Fugo 49292).
-fn forget_earlier(container: &Path, built: &Built) {
+/// loaded, so each update doesn't keep another: only names of its own
+/// repository, `localhost/claktory-browser:v…` (or `-dev`), that this home
+/// loaded (`record`), never anything else in the store.
+fn forget_earlier(container: &Path, built: &Built, record: &Path) {
     let said = std::process::Command::new(container)
         .args(["image", "list", "--format", "json"])
         .stdin(Stdio::null())
@@ -422,16 +449,17 @@ fn forget_earlier(container: &Path, built: &Built) {
         .output();
     let Some(said) = said.ok().filter(|said| said.status.success()) else { return };
     let listed: serde_json::Value = serde_json::from_slice(&said.stdout).unwrap_or_default();
-    for name in earlier(&listed, &built.reference) {
+    for name in earlier(&listed, &built.reference, &loaded_here(record)) {
         tracing::info!(%name, "deleting an earlier version's browser image");
         delete(container, &name);
     }
+    remember(record, [built.reference.clone()].into_iter());
 }
 
 /// The names in `container image list --format json` (one entry per tag,
 /// its name at `configuration.name`) that are earlier tags of
-/// `reference`'s repository, Claktory's own only.
-fn earlier(listed: &serde_json::Value, reference: &str) -> Vec<String> {
+/// `reference`'s repository, Claktory's own only, among `mine`.
+fn earlier(listed: &serde_json::Value, reference: &str, mine: &[String]) -> Vec<String> {
     let Some((repository, _)) = reference.rsplit_once(':') else { return Vec::new() };
     if !matches!(repository, "localhost/claktory-browser" | "localhost/claktory-browser-dev") {
         return Vec::new();
@@ -442,6 +470,7 @@ fn earlier(listed: &serde_json::Value, reference: &str) -> Vec<String> {
         .filter_map(|entry| entry.pointer("/configuration/name").and_then(serde_json::Value::as_str))
         .filter(|name| {
             *name != reference
+                && mine.iter().any(|loaded| loaded == name)
                 && tagged(name)
                 && name.strip_prefix(repository).and_then(|rest| rest.strip_prefix(":v")).is_some_and(|tag| !tag.is_empty())
         })
@@ -619,12 +648,15 @@ mod tests {
         let (home, built) = shipping("loads", &data);
         let container = stand_in(&home, &built.reference, &built.digest);
         assert!(!ready(&container, &built), "nothing loaded yet");
+        std::fs::create_dir_all(home.join("cache")).unwrap();
+        std::fs::write(loaded_record(&home), "localhost/claktory-browser:v0.0.1-earlier\n").unwrap();
         get(&home, &container, &built).await.expect("loaded");
         assert_eq!(std::fs::read(home.join("loaded.tar")).unwrap(), data, "what loaded is the archive unpacked");
         assert!(ready(&container, &built));
         assert!(left_in(&home).is_empty(), "{:?}", left_in(&home));
         let deleted = std::fs::read_to_string(home.join("deletes")).unwrap_or_default();
         assert_eq!(deleted, "localhost/claktory-browser:v0.0.1-earlier\n", "only the earlier version's tag");
+        assert_eq!(loaded_here(&loaded_record(&home)), std::slice::from_ref(&built.reference), "what it loaded is noted for next time");
         use std::os::unix::fs::PermissionsExt as _;
         let mode = std::fs::metadata(home.join("cache").join("browser-image")).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o700);
@@ -665,9 +697,11 @@ mod tests {
     }
 
     /// Pericolo 49287: `container image list --format json` has an entry
-    /// per tag, named at `configuration.name`; `id` differs per tag.
+    /// per tag, named at `configuration.name`; `id` differs per tag. Every
+    /// Claktory of the user shares the store, so only tags this home
+    /// loaded go.
     #[test]
-    fn only_earlier_tags_of_its_own_repository_are_deleted() {
+    fn only_earlier_tags_of_its_own_repository_that_it_loaded_are_deleted() {
         let entry = |name: &str| serde_json::json!({"id": "x", "configuration": {"name": name}, "variants": []});
         let listed = serde_json::json!([
             entry("localhost/claktory-browser-dev:v0.1.24-dev.w11test"),
@@ -680,13 +714,23 @@ mod tests {
             entry("ghcr.io/claktor/claktory-browser:v0.1.20"),
             serde_json::json!({"id": "y"}),
         ]);
-        assert_eq!(earlier(&listed, "localhost/claktory-browser:v0.1.25"), ["localhost/claktory-browser:v0.1.24"]);
+        let every: Vec<String> = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|entry| entry.pointer("/configuration/name").and_then(serde_json::Value::as_str))
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(earlier(&listed, "localhost/claktory-browser:v0.1.25", &every), ["localhost/claktory-browser:v0.1.24"]);
         assert_eq!(
-            earlier(&listed, "localhost/claktory-browser-dev:v0.1.24-dev.w11test2"),
+            earlier(&listed, "localhost/claktory-browser-dev:v0.1.24-dev.w11test2", &every),
             ["localhost/claktory-browser-dev:v0.1.24-dev.w11test"],
             "the dev Claktory's own only"
         );
-        assert!(earlier(&listed, "localhost/something:v1").is_empty(), "never another repository's");
-        assert!(earlier(&serde_json::json!({}), "localhost/claktory-browser:v0.1.25").is_empty());
+        let mine = ["localhost/claktory-browser-dev:v0.1.24-dev.w11test2".to_owned()];
+        assert!(earlier(&listed, "localhost/claktory-browser-dev:v0.1.25-dev.x", &mine) == mine, "another home's tag stays");
+        assert!(earlier(&listed, "localhost/claktory-browser:v0.1.25", &[]).is_empty(), "nothing this home loaded");
+        assert!(earlier(&listed, "localhost/something:v1", &every).is_empty(), "never another repository's");
+        assert!(earlier(&serde_json::json!({}), "localhost/claktory-browser:v0.1.25", &every).is_empty());
     }
 }

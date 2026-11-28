@@ -50,7 +50,7 @@ pub struct ModelInfo {
     /// The model takes image input (the catalog's input list, the same
     /// source as read_image's gate).
     pub image_input: bool,
-    /// An agent on it can make images (#403): its provider makes them on
+    /// An agent on it can make images: its provider makes them on
     /// this sign-in (ChatGPT's subscription, `Provider::images`) and the
     /// model takes image input, as Codex's own rule has it. Whether the
     /// plan allows it is factoryd's to add, from the plan it reads.
@@ -342,7 +342,7 @@ struct EnvState {
     out_of_credit_since: u64,
 }
 
-/// Which images went to Anthropic as files, beside the sign-ins (#382).
+/// Which images went to Anthropic as files, beside the sign-ins.
 pub const IMAGE_FILES: &str = "anthropic-files.jsonl";
 /// How long whose subscription it is holds once read (`files_for`), and
 /// how soon it's read again when it couldn't be.
@@ -362,10 +362,10 @@ struct Inner {
     /// Model lists fetched from a provider, in place of its bundled one, by
     /// provider id.
     fetched: Mutex<HashMap<String, Arc<Vec<Model>>>>,
-    /// Models added by their id, as the provider's list didn't have them
-    /// (friend bug #14), by provider id.
+    /// Models added by their id, as the provider's list didn't have them,
+    /// by provider id.
     added: Mutex<HashMap<String, Vec<Model>>>,
-    /// The images Anthropic holds as files (#382); None sends them inline.
+    /// The images Anthropic holds as files; None sends them inline.
     image_files: Option<Arc<ImageFiles>>,
     /// Whether each Anthropic subscription sign-in is the person's own
     /// (`files_for`), by `provider/account`, and until when that holds.
@@ -401,7 +401,7 @@ impl Registry {
         }
     }
 
-    /// Sends images read since #382 to Anthropic once, as files, keeping
+    /// Sends the images it reads to Anthropic once, as files, keeping
     /// which in `path` (None: only while it runs). Before it's cloned.
     #[must_use]
     pub fn keeping_image_files(mut self, path: Option<PathBuf>) -> Registry {
@@ -455,7 +455,7 @@ impl Registry {
         self.delete_files(forgotten).await;
     }
 
-    /// Forgets whose subscription each of the provider's accounts is (Fugo):
+    /// Forgets whose subscription each of the provider's accounts is:
     /// an account signed out of and in again under another plan is read
     /// anew, not judged on the old one.
     fn forget_whose(&self, id: &str) {
@@ -464,7 +464,7 @@ impl Registry {
 
     /// Where a request to `provider`'s `account` keeps its images as files:
     /// only Anthropic's, and only on a subscription that's the person's
-    /// own (Fugo, #382): a file is reachable to everyone with access to its
+    /// own: a file is reachable to everyone with access to its
     /// organization's workspace, so an API key's (often a company's) and a
     /// Team's or Enterprise's send images inline, as does a plan it can't
     /// read.
@@ -1110,7 +1110,7 @@ impl Registry {
     }
 
     /// What one of the provider's accounts has to spend, as its provider
-    /// says (#343 U8: OpenRouter's GET /key), read now: None when the
+    /// says (OpenRouter's GET /key), read now: None when the
     /// provider can't say, it has no such account, or its sign-ins are
     /// locked away. `ENV_ACCOUNT` is the key in the environment. Why a read
     /// failed is a short sentence with no body of the provider's answer.
@@ -1132,7 +1132,7 @@ impl Registry {
         credit(base_url, resolved.auth).await.map(Some).map_err(Error::Other)
     }
 
-    /// Makes one image on the provider (#403), on the account its requests
+    /// Makes one image on the provider, on the account its requests
     /// go to now (the first with room, else its first), signed in with its
     /// subscription. Never sent again by itself.
     pub async fn make_image(
@@ -1608,7 +1608,7 @@ impl Registry {
                         Ok(inner) => inner,
                         // A stored sign-in whose token the provider won't refresh: only
                         // signing in again helps, so it's skipped until then, and the
-                        // request goes to the next account (rivet-move.md §3 P2).
+                        // request goes to the next account.
                         Err(error)
                             if error.is_refused()
                                 && chosen.as_ref().is_some_and(|chosen| matches!(chosen.credential, Credential::Oauth { .. }))

@@ -1329,7 +1329,7 @@ fn send(factory: &Factory, config: &Config, settings: &NotificationsConfig, note
     // Only apps that show it count as reaching the person.
     let apps = factory.notify.showing();
     factory.send(Body::Notify(notify.clone()));
-    let pushed = push::queue(factory, config, settings, &notify, now);
+    let pushed = push::queue(factory, config, settings, &notify, now, push::Reach::UnlessInUse);
     tracing::info!(kind = ?note.kind, source = %note.source, apps, pushed, "notified the person");
     Delivered::Sent { apps, pushed }
 }

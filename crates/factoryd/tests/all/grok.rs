@@ -170,7 +170,7 @@ async fn a_grok_sign_in_is_kept_in_the_vault_alone_and_revoked_on_sign_out() {
     assert!(login.verification_url.starts_with(&format!("{base_url}/oauth2/device")), "{}", login.verification_url);
     view.follow(&mut client, |view| view.workspace.login.is_none()).await;
     let provider = grok(&view);
-    assert_eq!(provider.signed_in_with, "Grok (SuperGrok or X Premium+)");
+    assert_eq!(provider.signed_in_with, "Grok (your Grok subscription)");
     assert_eq!(provider.accounts.iter().map(|account| account.label.as_str()).collect::<Vec<_>>(), ["Grok …abcd"]);
 
     create(&mut client, &mut view, "Builder", "grok/grok-4.7", "high").await;

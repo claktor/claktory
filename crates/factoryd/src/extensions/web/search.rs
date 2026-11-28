@@ -8,9 +8,11 @@
 //! settled in its turn, after the wait, so requests queued behind a block
 //! or the hour's last one don't go out; the same search asked by several
 //! callers at once goes out once (a flight), and is dropped when no one
-//! waits for it any more.
+//! waits for it any more. With the person's Brave Search API key
+//! (`brave_api`), the API is asked first, within its free monthly credits,
+//! and the public engines only when it can't answer.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -57,6 +59,11 @@ pub(crate) enum Outcome {
     /// A page with no results and no sign of a block: its layout changed.
     /// What it began with, for the log.
     Broken(String),
+    /// An API's quota is used until this many ms from now.
+    Exhausted(i64),
+    /// An API refused this query (a filter it won't take, say), and only
+    /// this one: the next engine is asked, and this one stays as it was.
+    Refused(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,6 +76,8 @@ pub(crate) enum Block {
     Denied,
     /// Results that don't match the query: a soft block.
     Degraded,
+    /// An API refused its key.
+    KeyRefused,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -86,6 +95,9 @@ pub(crate) struct Options {
     pub(crate) recency: Option<Recency>,
     pub(crate) limit: usize,
 }
+
+/// The person's key for an API engine, from the vault.
+pub(crate) type ApiKey = Arc<zeroize::Zeroizing<String>>;
 
 /// One query's answer.
 #[derive(Clone, Debug, Serialize)]
@@ -116,7 +128,14 @@ pub(crate) struct Health {
     pub(crate) failing: f64,
     /// Answers about something else in a row (soft blocks): two cool it down.
     pub(crate) degraded: u32,
+    /// How often it was asked each day (days since 1970), over the last 31,
+    /// for an engine with a monthly budget.
+    pub(crate) days: BTreeMap<i64, usize>,
 }
+
+const DAY: i64 = 24 * HOUR;
+/// The days a monthly budget counts: any billing month falls within them.
+const MONTH_DAYS: i64 = 31;
 
 impl Health {
     /// Why it can't be asked now (with when it can), or None.
@@ -131,7 +150,23 @@ impl Health {
             let free = self.asked.front().map_or(now, |time| time + HOUR);
             return Some(format!("{} has had its {} searches this hour (after {})", engine.name(), self.asked.len(), clock(free)));
         }
+        if let Some(month) = policy.per_month {
+            let today = now.div_euclid(DAY);
+            self.days.retain(|day, _| *day > today - MONTH_DAYS);
+            let used: usize = self.days.values().sum();
+            if used >= month {
+                return Some(format!("{} has had its {used} free searches of the last {MONTH_DAYS} days", engine.name()));
+            }
+        }
         None
+    }
+
+    /// Counts a request being sent now.
+    pub(crate) fn asking(&mut self, policy: &Policy, now: i64) {
+        self.asked.push_back(now);
+        if policy.per_month.is_some() {
+            *self.days.entry(now.div_euclid(DAY)).or_default() += 1;
+        }
     }
 
     /// Whether its cooldown is over but it hasn't answered since: its next
@@ -149,6 +184,9 @@ impl Health {
 
     /// Records what an answer said, and how long to leave the engine alone.
     pub(crate) fn record(&mut self, policy: &Policy, outcome: &Result<Outcome, String>, now: i64) {
+        if matches!(outcome, Ok(Outcome::Refused(_))) {
+            return;
+        }
         let answered = matches!(outcome, Ok(Outcome::Results(_) | Outcome::NoResults));
         self.failing = self.failing * 0.7 + if answered { 0.0 } else { 0.3 };
         if !matches!(outcome, Ok(Outcome::Blocked(Block::Degraded))) {
@@ -162,6 +200,9 @@ impl Health {
                 self.why.clear();
                 return;
             }
+            Ok(Outcome::Refused(_)) => return,
+            Ok(Outcome::Exhausted(wait)) => ((*wait).clamp(MINUTE, MONTH_DAYS * DAY), "has used this month's searches"),
+            Ok(Outcome::Blocked(Block::KeyRefused)) => (HOUR, "refused its key (check it in Settings → Secrets)"),
             Ok(Outcome::Blocked(Block::Challenge)) => (doubled(policy.challenge_max_ms), "asked for a CAPTCHA"),
             Ok(Outcome::Blocked(Block::RateLimited)) => (doubled(policy.limited_max_ms), "rate-limited this computer"),
             Ok(Outcome::Blocked(Block::Denied)) => (HOUR, "denied access"),
@@ -187,7 +228,7 @@ impl Health {
 
 /// Asks an engine for a query: what its answer says, or why it couldn't
 /// be had. Real engines in use (`browser`); scripted ones in tests.
-pub(crate) type Wire = Arc<dyn Fn(Engine, String, Options) -> BoxFuture<'static, Result<Outcome, String>> + Send + Sync>;
+pub(crate) type Wire = Arc<dyn Fn(Engine, String, Options, Option<ApiKey>) -> BoxFuture<'static, Result<Outcome, String>> + Send + Sync>;
 
 /// What a search is the same as: the query as written (case and quotes
 /// count, runs of spaces don't), the domains as a set, and the recency.
@@ -284,7 +325,7 @@ impl Searcher {
         if let Some(text) = saved.as_ref().and_then(|path| std::fs::read_to_string(path).ok()) {
             let by_name: HashMap<String, Health> = serde_json::from_str(&text).unwrap_or_default();
             for (name, kept) in by_name {
-                if let Some(engine) = engines::ORDER.iter().find(|engine| engine.name() == name) {
+                if let Some(engine) = engines::ALL.iter().find(|engine| engine.name() == name) {
                     health.insert(*engine, kept);
                 }
             }
@@ -293,7 +334,7 @@ impl Searcher {
             wire,
             pace,
             saved,
-            turns: engines::ORDER.iter().map(|engine| (*engine, tokio::sync::Mutex::new(0))).collect(),
+            turns: engines::ALL.iter().map(|engine| (*engine, tokio::sync::Mutex::new(0))).collect(),
             state: Mutex::new(SearchState { health, ..SearchState::default() }),
             saving: Mutex::new(()),
             #[cfg(test)]
@@ -302,13 +343,20 @@ impl Searcher {
         Searcher { shared: Arc::new(shared) }
     }
 
-    /// Answers each query in turn, for `agent`. Also says what blocked,
-    /// once, for the person: a block hits their own browser's searches too.
-    pub(crate) async fn search(&self, agent: &str, queries: &[String], options: &Options) -> (Vec<Answer>, Vec<String>) {
+    /// Answers each query in turn, for `agent`, with the API first when
+    /// there's a `key` for it. Also says what blocked, once, for the
+    /// person: a block hits their own browser's searches too.
+    pub(crate) async fn search(
+        &self,
+        agent: &str,
+        queries: &[String],
+        options: &Options,
+        key: Option<ApiKey>,
+    ) -> (Vec<Answer>, Vec<String>) {
         let mut answers = Vec::new();
         let mut blocked = Vec::new();
         for query in queries {
-            let (answer, challenged) = self.one(agent, query, options).await;
+            let (answer, challenged) = self.one(agent, query, options, key.clone()).await;
             answers.push(answer);
             for engine in challenged {
                 if !blocked.contains(&engine) {
@@ -328,7 +376,7 @@ impl Searcher {
         (answers, notices)
     }
 
-    async fn one(&self, agent: &str, query: &str, options: &Options) -> (Answer, Vec<&'static str>) {
+    async fn one(&self, agent: &str, query: &str, options: &Options, api_key: Option<ApiKey>) -> (Answer, Vec<&'static str>) {
         let key = Key { query: normalized(query), domains: options.domains.clone(), recency: options.recency };
         let answer = |found: &Found| Answer {
             q: query.to_owned(),
@@ -362,7 +410,7 @@ impl Searcher {
                     let id = state.next_flight;
                     state.next_flight += 1;
                     let (sender, receiver) = watch::channel(None);
-                    let task = tokio::spawn(fly(self.shared.clone(), key.clone(), id, query.to_owned(), options.clone(), sender));
+                    let task = tokio::spawn(fly(self.shared.clone(), key.clone(), id, query.to_owned(), options.clone(), api_key, sender));
                     state.flights.insert(key.clone(), Flight { id, done: receiver.clone(), waiters: 1, task: task.abort_handle() });
                     (id, receiver)
                 }
@@ -420,8 +468,16 @@ fn fresh_for(found: &Found) -> i64 {
 
 /// One search, for everyone waiting on it: tries each engine in turn, then
 /// keeps what it found and hands it over.
-async fn fly(shared: Arc<Shared>, key: Key, id: u64, query: String, options: Options, done: watch::Sender<Option<Found>>) {
-    let found = ask_engines(&shared, &query, &options).await;
+async fn fly(
+    shared: Arc<Shared>,
+    key: Key,
+    id: u64,
+    query: String,
+    options: Options,
+    api_key: Option<ApiKey>,
+    done: watch::Sender<Option<Found>>,
+) {
+    let found = ask_engines(&shared, &query, &options, api_key).await;
     {
         let mut state = shared.state();
         if found.unavailable.is_none() {
@@ -467,16 +523,20 @@ fn order(shared: &Shared, options: &Options, now: i64) -> Vec<Engine> {
     ranked.into_iter().map(|(.., engine)| engine).collect()
 }
 
-/// Tries engines in turn (`order`) until one gives results that match the
-/// query. A block, a page it can't read or results about something else
-/// move on to the next; so does one engine finding nothing, but two
+/// Tries engines in turn until one gives results that match the query: the
+/// API first with a key (for a query it takes), then the public ones
+/// (`order`). A block, a page it can't read or results about something
+/// else move on to the next; so does one engine finding nothing, but two
 /// finding nothing is the answer.
-async fn ask_engines(shared: &Shared, query: &str, options: &Options) -> Found {
+async fn ask_engines(shared: &Shared, query: &str, options: &Options, api_key: Option<ApiKey>) -> Found {
     let mut reasons: Vec<(Engine, String)> = Vec::new();
     let mut challenged = Vec::new();
     let mut nothing: Option<String> = None;
-    for engine in order(shared, options, now_ms()) {
-        let outcome = match dispatch(shared, engine, query, options).await {
+    let api = api_key.filter(|_| super::brave_api::fits(query, options));
+    let first = api.as_ref().map(|_| Engine::BraveApi);
+    for engine in first.into_iter().chain(order(shared, options, now_ms())) {
+        let key = if engine.api() { api.clone() } else { None };
+        let outcome = match dispatch(shared, engine, query, options, key).await {
             Ok(outcome) => outcome,
             Err(why) => {
                 reasons.push((engine, why));
@@ -507,6 +567,16 @@ async fn ask_engines(shared: &Shared, query: &str, options: &Options) -> Found {
             Ok(Outcome::Broken(start)) => {
                 tracing::warn!(engine = engine.name(), start, "a search engine's page couldn't be read; its layout may have changed");
                 reasons.push((engine, format!("{} returned a page Claktory can't read", engine.name())));
+            }
+            Ok(Outcome::Exhausted(_)) => {
+                tracing::info!(engine = engine.name(), "a search API's quota is used; the public engines answer meanwhile");
+                let state = shared.state();
+                let health = &state.health[&engine];
+                reasons.push((engine, format!("{} {} (trying again after {})", engine.name(), health.why, clock(health.cooling_until))));
+            }
+            Ok(Outcome::Refused(why)) => {
+                tracing::info!(engine = engine.name(), why, "a search API refused a query");
+                reasons.push((engine, why));
             }
             Err(error) => {
                 tracing::warn!(engine = engine.name(), %error, "a search engine couldn't be reached");
@@ -559,7 +629,13 @@ fn unavailable(shared: &Shared, options: &Options, reasons: &[(Engine, String)])
 /// may be asked is settled only once its turn comes, so a block or the
 /// hour's budget reached by the requests before holds for the ones that
 /// waited behind them; and the answer is recorded before the turn passes.
-async fn dispatch(shared: &Shared, engine: Engine, query: &str, options: &Options) -> Result<Result<Outcome, String>, String> {
+async fn dispatch(
+    shared: &Shared,
+    engine: Engine,
+    query: &str,
+    options: &Options,
+    api_key: Option<ApiKey>,
+) -> Result<Result<Outcome, String>, String> {
     let policy = (shared.pace)(engine);
     // A first look, so a query doesn't wait for an engine that's out.
     if let Some(why) = shared.state().health.entry(engine).or_default().unavailable(engine, &policy, now_ms()) {
@@ -579,14 +655,16 @@ async fn dispatch(shared: &Shared, engine: Engine, query: &str, options: &Option
         if let Some(why) = health.unavailable(engine, &policy, now) {
             return Err(why);
         }
-        health.asked.push_back(now);
+        health.asking(&policy, now);
         *last = now;
     }
     shared.save();
-    let outcome = (shared.wire)(engine, query.to_owned(), options.clone()).await;
+    let outcome = (shared.wire)(engine, query.to_owned(), options.clone(), api_key).await;
     *last = now_ms();
+    // An API's results are what it found for the query: the soft-block
+    // check is for public engines that degrade results for scrapers.
     let outcome = match outcome {
-        Ok(Outcome::Results(hits)) if !relevant(query, &hits) => Ok(Outcome::Blocked(Block::Degraded)),
+        Ok(Outcome::Results(hits)) if !engine.api() && !relevant(query, &hits) => Ok(Outcome::Blocked(Block::Degraded)),
         other => other,
     };
     shared.state().health.entry(engine).or_default().record(&policy, &outcome, now_ms());
@@ -598,9 +676,13 @@ async fn dispatch(shared: &Shared, engine: Engine, query: &str, options: &Option
 fn browser() -> Wire {
     let clients: Arc<HashMap<Engine, OnceLock<Result<primp::Client, String>>>> =
         Arc::new(engines::ORDER.iter().map(|engine| (*engine, OnceLock::new())).collect());
-    Arc::new(move |engine, query, options| {
+    Arc::new(move |engine, query, options, api_key| {
         let clients = clients.clone();
         Box::pin(async move {
+            if engine.api() {
+                let Some(api_key) = api_key else { return Err("no key".to_owned()) };
+                return super::brave_api::ask(&api_key, &query, &options).await;
+            }
             let client = clients[&engine].get_or_init(|| client(engine)).clone()?;
             let response = engine.request(&client, &query, &options).send().await.map_err(|error| error.to_string())?;
             let (mut status, mut url) = (response.status(), response.url().to_string());
@@ -884,7 +966,7 @@ mod tests {
 
         fn wire(self: &Arc<Self>) -> Wire {
             let fake = self.clone();
-            Arc::new(move |engine, query, _options| {
+            Arc::new(move |engine, query, _options, _key| {
                 let fake = fake.clone();
                 Box::pin(async move {
                     fake.asked.lock().expect("lock").push((engine, query.clone()));
@@ -916,7 +998,7 @@ mod tests {
 
     /// No waiting between requests, and 3 an hour.
     fn quick(_engine: Engine) -> Policy {
-        Policy { gap_ms: 0, jitter_ms: 0, per_hour: 3, challenge_max_ms: 24 * HOUR, limited_max_ms: 6 * HOUR }
+        Policy { gap_ms: 0, jitter_ms: 0, per_hour: 3, challenge_max_ms: 24 * HOUR, limited_max_ms: 6 * HOUR, per_month: None }
     }
 
     fn results(query: &str) -> Vec<Hit> {
@@ -943,7 +1025,7 @@ mod tests {
 
     fn search(searcher: &Arc<Searcher>, agent: &str, query: &str) -> tokio::task::JoinHandle<(Vec<Answer>, Vec<String>)> {
         let (searcher, agent, query) = (searcher.clone(), agent.to_owned(), query.to_owned());
-        tokio::spawn(async move { searcher.search(&agent, &[query], &Options { limit: 8, ..Options::default() }).await })
+        tokio::spawn(async move { searcher.search(&agent, &[query], &Options { limit: 8, ..Options::default() }, None).await })
     }
 
     #[tokio::test]
@@ -953,7 +1035,7 @@ mod tests {
         let tasks: Vec<_> = (0..20).map(|n| search(&searcher, &format!("agent{}", n % 5), "tokio select")).collect();
         until("twenty wait on one search", || waiters(&searcher) == 20).await;
         // Each agent has 4 waiting: a fifth is turned away at once.
-        let (busy, _) = searcher.search("agent0", &["other".to_owned()], &Options::default()).await;
+        let (busy, _) = searcher.search("agent0", &["other".to_owned()], &Options::default(), None).await;
         assert!(busy[0].unavailable.as_deref().is_some_and(|why| why.contains("4 searches waiting")), "{busy:?}");
 
         fake.let_go();
@@ -967,11 +1049,11 @@ mod tests {
         // A different limit is a slice of the same answer; spacing doesn't
         // count, but case and quotes do; each caller gets its own words back.
         let options = Options { limit: 3, ..Options::default() };
-        let (answers, _) = searcher.search("a", &["  tokio   select ".to_owned()], &options).await;
+        let (answers, _) = searcher.search("a", &["  tokio   select ".to_owned()], &options, None).await;
         assert_eq!((answers[0].q.as_str(), answers[0].results.len()), ("  tokio   select ", 3));
         assert_eq!(fake.total(), 1);
-        searcher.search("a", &["Tokio select".to_owned()], &options).await;
-        searcher.search("a", &["\"tokio select\"".to_owned()], &options).await;
+        searcher.search("a", &["Tokio select".to_owned()], &options, None).await;
+        searcher.search("a", &["\"tokio select\"".to_owned()], &options, None).await;
         assert_eq!(fake.total(), 3);
     }
 
@@ -996,7 +1078,7 @@ mod tests {
 
         // Asked again, it goes out again, and the engine's turn is free.
         fake.let_go();
-        let (answers, _) = searcher.search("a", &["sqlite wal".to_owned()], &Options::default()).await;
+        let (answers, _) = searcher.search("a", &["sqlite wal".to_owned()], &Options::default(), None).await;
         assert!(!answers[0].engine.is_empty() && answers[0].unavailable.is_none(), "{answers:?}");
         assert_eq!(fake.total(), 2);
     }
@@ -1057,11 +1139,11 @@ mod tests {
         let options = Options { limit: 8, ..Options::default() };
         // DuckDuckGo's CAPTCHA, then Bing's results about something else:
         // Yahoo answers, in the same call.
-        let (answers, notices) = searcher.search("a", &["tokio select cancellation safety".to_owned()], &options).await;
+        let (answers, notices) = searcher.search("a", &["tokio select cancellation safety".to_owned()], &options, None).await;
         assert_eq!((answers[0].engine.as_str(), answers[0].results.len()), ("Yahoo", 8), "{answers:?}");
         assert_eq!(notices.len(), 1);
         // The next search starts with an engine not asked yet this hour.
-        let (answers, _) = searcher.search("a", &["sqlite wal checkpoint".to_owned()], &options).await;
+        let (answers, _) = searcher.search("a", &["sqlite wal checkpoint".to_owned()], &options, None).await;
         assert_eq!(answers[0].engine, "DuckDuckGo Lite");
         // One soft block doesn't cool Bing down; it's asked again.
         let health = |engine: Engine| searcher.shared.state().health.get(&engine).map(|health| (health.cooling_until > 0, health.failing > 0.0));
@@ -1103,7 +1185,7 @@ mod tests {
         });
         fake.let_go();
         let searcher = Searcher::with(fake.wire(), quick, None);
-        let (answers, notices) = searcher.search("a", &["sqlite wal".to_owned()], &Options::default()).await;
+        let (answers, notices) = searcher.search("a", &["sqlite wal".to_owned()], &Options::default(), None).await;
         let why = answers[0].unavailable.clone().expect("unavailable");
         assert!(why.starts_with("every search engine is busy or blocking searches from this computer; try again in 60 minutes (after "), "{why}");
         assert!(why.contains("DuckDuckGo asked for a CAPTCHA") && why.contains("Bing rate-limited this computer"), "{why}");
@@ -1113,14 +1195,14 @@ mod tests {
             ["DuckDuckGo, DuckDuckGo Lite, Ecosia, Brave and Marginalia are challenging this computer's IP; the person's own searches there may show a CAPTCHA for about an hour."],
         );
         // Asked again: nothing goes out.
-        searcher.search("a", &["other".to_owned()], &Options::default()).await;
+        searcher.search("a", &["other".to_owned()], &Options::default(), None).await;
         assert_eq!(fake.total(), engines::ORDER.len());
 
         // Offline: it says so.
         let fake = Fake::new(|_, _| Err("connection refused".to_owned()));
         fake.let_go();
         let searcher = Searcher::with(fake.wire(), quick, None);
-        let (answers, _) = searcher.search("a", &["sqlite wal".to_owned()], &Options::default()).await;
+        let (answers, _) = searcher.search("a", &["sqlite wal".to_owned()], &Options::default(), None).await;
         let why = answers[0].unavailable.clone().expect("unavailable");
         assert!(why.starts_with("no search engine could be reached from this computer; check its internet connection"), "{why}");
     }
@@ -1134,14 +1216,14 @@ mod tests {
         });
         fake.let_go();
         let searcher = Searcher::with(fake.wire(), quick, Some(path.clone()));
-        assert_eq!(searcher.search("a", &["first".to_owned()], &Options::default()).await.0[0].engine, "Bing");
+        assert_eq!(searcher.search("a", &["first".to_owned()], &Options::default(), None).await.0[0].engine, "Bing");
         assert_eq!(fake.asked(Engine::DuckDuckGo), 1);
         drop(searcher);
 
         let fake = Fake::new(|_, query| Ok(Outcome::Results(results(query))));
         fake.let_go();
         let again = Searcher::with(fake.wire(), quick, Some(path.clone()));
-        assert_ne!(again.search("a", &["second".to_owned()], &Options::default()).await.0[0].engine, "DuckDuckGo");
+        assert_ne!(again.search("a", &["second".to_owned()], &Options::default(), None).await.0[0].engine, "DuckDuckGo");
         assert_eq!(fake.asked(Engine::DuckDuckGo), 0, "still cooling down");
         let _ = std::fs::remove_file(path);
     }
@@ -1151,11 +1233,99 @@ mod tests {
         let fake = Fake::new(|_, _| Ok(Outcome::NoResults));
         fake.let_go();
         let searcher = Searcher::with(fake.wire(), quick, None);
-        let (answers, _) = searcher.search("a", &["zxqv nothing".to_owned()], &Options::default()).await;
+        let (answers, _) = searcher.search("a", &["zxqv nothing".to_owned()], &Options::default(), None).await;
         assert_eq!((answers[0].engine.as_str(), answers[0].results.len(), answers[0].unavailable.is_none()), ("Bing", 0, true));
         assert_eq!((fake.asked(Engine::DuckDuckGo), fake.asked(Engine::Bing), fake.total()), (1, 1, 2), "a second opinion, no more");
-        searcher.search("b", &["zxqv nothing".to_owned()], &Options::default()).await;
+        searcher.search("b", &["zxqv nothing".to_owned()], &Options::default(), None).await;
         assert_eq!(fake.total(), 2, "kept for a minute");
+    }
+
+    /// `quick`, with the API's month allowing 2.
+    fn quick_api(engine: Engine) -> Policy {
+        Policy { per_month: engine.api().then_some(2), ..quick(engine) }
+    }
+
+    fn key() -> Option<ApiKey> {
+        Some(Arc::new(zeroize::Zeroizing::new("test-key".to_owned())))
+    }
+
+    async fn engine_for(searcher: &Searcher, query: &str, key: Option<ApiKey>) -> Answer {
+        searcher.search("a", &[query.to_owned()], &Options { limit: 10, ..Options::default() }, key).await.0.remove(0)
+    }
+
+    #[tokio::test]
+    async fn with_a_key_the_api_answers_first_and_the_public_engines_are_spared() {
+        let fake = Fake::new(|engine, query| match engine {
+            Engine::BraveApi => Ok(Outcome::Results(vec![hit("Tokyo travel guide", "https://example.com/tokyo"); 5])),
+            _ => Ok(Outcome::Results(results(query))),
+        });
+        fake.let_go();
+        let searcher = Searcher::with(fake.wire(), quick_api, None);
+        assert_eq!(engine_for(&searcher, "no key", None).await.engine, "DuckDuckGo", "without one, as before");
+        assert_eq!(fake.asked(Engine::BraveApi), 0);
+        // Results the soft-block check would doubt are the API's answer all the same.
+        let answer = engine_for(&searcher, "tokio select cancellation safety", key()).await;
+        assert_eq!((answer.engine.as_str(), answer.results.len()), ("Brave Search API", 5));
+        assert_eq!((fake.total(), fake.asked(Engine::BraveApi)), (2, 1));
+        // Its month's 2: the third goes to the public engines.
+        assert_eq!(engine_for(&searcher, "second", key()).await.engine, "Brave Search API");
+        assert_ne!(engine_for(&searcher, "third", key()).await.engine, "Brave Search API");
+        assert_eq!(fake.asked(Engine::BraveApi), 2);
+        // A query too long for it goes to them too.
+        let long = "word ".repeat(80);
+        let fresh = Searcher::with(fake.wire(), quick_api, None);
+        assert_eq!(engine_for(&fresh, &long, key()).await.engine, "DuckDuckGo");
+        assert_eq!(fake.asked(Engine::BraveApi), 2);
+    }
+
+    #[tokio::test]
+    async fn the_api_out_of_credits_or_refusing_its_key_falls_back_and_waits() {
+        let fake = Fake::new(|engine, query| match (engine, query) {
+            (Engine::BraveApi, "used up") => Ok(Outcome::Exhausted(3 * DAY)),
+            (Engine::BraveApi, "bad filter") => Ok(Outcome::Refused("Brave refused this query (422)".into())),
+            (Engine::BraveApi, "bad key") => Ok(Outcome::Blocked(Block::KeyRefused)),
+            _ => Ok(Outcome::Results(results(query))),
+        });
+        fake.let_go();
+        let searcher = Searcher::with(fake.wire(), quick_api, None);
+        // A query it won't take: answered elsewhere, and the API is fine.
+        assert_eq!(engine_for(&searcher, "bad filter", key()).await.engine, "DuckDuckGo");
+        assert_eq!(engine_for(&searcher, "fine", key()).await.engine, "Brave Search API");
+        // The month used: the public engines answer, and it's left until it comes back.
+        let fresh = Searcher::with(fake.wire(), quick, None);
+        assert_eq!(engine_for(&fresh, "used up", key()).await.engine, "DuckDuckGo");
+        assert_ne!(engine_for(&fresh, "after", key()).await.engine, "Brave Search API");
+        assert_eq!(fake.asked(Engine::BraveApi), 3, "not asked again");
+        let (cooling_until, why) = {
+            let state = fresh.shared.state();
+            let health = &state.health[&Engine::BraveApi];
+            (health.cooling_until, health.why.clone())
+        };
+        assert!(cooling_until >= now_ms() + 3 * DAY - MINUTE && why == "has used this month's searches");
+        // A refused key: an hour's rest, and the person told where to look.
+        let other = Searcher::with(fake.wire(), quick, None);
+        assert_eq!(engine_for(&other, "bad key", key()).await.engine, "DuckDuckGo");
+        let why = other.shared.state().health[&Engine::BraveApi].why.clone();
+        assert_eq!(why, "refused its key (check it in Settings → Secrets)");
+    }
+
+    #[test]
+    fn a_monthly_budget_counts_the_last_31_days() {
+        let policy = Policy { per_month: Some(3), per_hour: 100, ..quick(Engine::BraveApi) };
+        let mut health = Health::default();
+        let start = 1_000_000_000_000;
+        for day in [0, 10, 20] {
+            health.asking(&policy, start + day * DAY);
+        }
+        let used = health.unavailable(Engine::BraveApi, &policy, start + 30 * DAY).expect("used");
+        assert_eq!(used, "Brave Search API has had its 3 free searches of the last 31 days");
+        assert_eq!(health.unavailable(Engine::BraveApi, &policy, start + 31 * DAY), None, "the first day left the window");
+        // Kept across a restart, as an older Claktory's file reads too.
+        let text = serde_json::to_string(&health).expect("json");
+        let kept: Health = serde_json::from_str(&text).expect("read");
+        assert_eq!(kept.days.values().sum::<usize>(), 2);
+        let older: Health = serde_json::from_str(r#"{"cooling_until":0,"why":"","strikes":0,"asked":[]}"#).expect("older");
+        assert!(older.days.is_empty());
     }
 
 
@@ -1243,7 +1413,7 @@ mod tests {
             for _ in 0..burst {
                 let Some((query, options)) = next.next() else { break 'run };
                 let began = std::time::Instant::now();
-                let (answers, notices) = searcher.search("measure", std::slice::from_ref(&query), &options).await;
+                let (answers, notices) = searcher.search("measure", std::slice::from_ref(&query), &options, None).await;
                 let latency = began.elapsed().as_millis();
                 let answer = &answers[0];
                 let ok = answer.unavailable.is_none() && !answer.results.is_empty();

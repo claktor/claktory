@@ -62,7 +62,7 @@ pub(crate) enum When {
         /// The least time between fires, in ms.
         gap: i64,
     },
-    /// Fires when pipes its agent may see change (friend bug #34): opened,
+    /// Fires when pipes its agent may see change: opened,
     /// closed, paused, resumed, a website shared or stopped, the other
     /// side online or offline.
     Pipes {

@@ -204,12 +204,15 @@ fn hide_seed() -> Result<(), String> {
 /// that site's cookies (Fugo 41236), no warning bar for the runner's fixed
 /// flags (R11, Fugo 41700), and Chrome never filling or saving a card or an
 /// address itself (W9, Fugo 41400), nor saving a password into the profile
-/// (logins live only in the vault, guard 10), no site's cookies sent to
-/// another's frames (guard 4), and Safe Browsing on with no way past its
-/// warning (guard 3: a flagged page is only ever Chrome's error page).
+/// (logins live only in the vault, guard 10), and Safe Browsing on with no
+/// way past its warning (guard 3: a flagged page is only ever Chrome's
+/// error page). Third-party cookies are left as Chrome has them by default,
+/// on: a browser that blocks them stands out, and sign-ins that go through
+/// another site's frame need them; each agent's profile holds only its own
+/// sign-ins.
 /// LocalNetworkAccessRestrictionsEnabled is for Chromes before 158, which
 /// call it unknown.
-pub(crate) const POLICY: &str = r#"{"LocalNetworkAccessRestrictionsEnabled": true, "LocalNetworkAccessBlockedForUrls": ["*"], "BrowserSignin": 0, "SyncDisabled": true, "CommandLineFlagSecurityWarningsEnabled": false, "AutofillCreditCardEnabled": false, "AutofillAddressEnabled": false, "PasswordManagerEnabled": false, "BlockThirdPartyCookies": true, "SafeBrowsingProtectionLevel": 1, "DisableSafeBrowsingProceedAnyway": true}"#;
+pub(crate) const POLICY: &str = r#"{"LocalNetworkAccessRestrictionsEnabled": true, "LocalNetworkAccessBlockedForUrls": ["*"], "BrowserSignin": 0, "SyncDisabled": true, "CommandLineFlagSecurityWarningsEnabled": false, "AutofillCreditCardEnabled": false, "AutofillAddressEnabled": false, "PasswordManagerEnabled": false, "SafeBrowsingProtectionLevel": 1, "DisableSafeBrowsingProceedAnyway": true}"#;
 
 /// Where Google Chrome and Chromium read their managed policy on Linux.
 pub(crate) const CHROME_POLICY: &str = "/etc/opt/chrome/policies/managed";

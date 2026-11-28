@@ -1,7 +1,10 @@
-//! The chart family of Claktory's A2UI catalog: Chart, Stat, Table and Map, the
-//! kinds of value only they take (a query's answer, series, a spark, a
-//! Stat's color, a Table's columns) and their rules across properties.
-//! `a2ui.rs` checks everything else and asks here for these.
+//! The chart family of Claktory's A2UI catalog: Chart, Stat, Table, Map and
+//! Calendar, the kinds of value only they take (a query's answer, series, a
+//! spark, a Stat's color, a Table's columns, a Calendar's zone and tools),
+//! their rules across properties, and what a Calendar's rows open
+//! (`open_cells`). `a2ui.rs` checks everything else and asks here for these.
+
+use std::collections::BTreeMap;
 
 use serde_json::{Map, Value};
 
@@ -15,6 +18,10 @@ const MAX_SERIES: usize = 12;
 const MAX_SPARK: usize = 200;
 /// A Stat's most thresholds.
 const MAX_THRESHOLDS: usize = 10;
+/// A Calendar's most tools (the menus in its bar).
+const MAX_TOOLS: usize = 8;
+/// A time zone's offset from UTC, in minutes: UTC-14:00 to UTC+14:00.
+const MAX_ZONE_MINUTES: i64 = 840;
 
 /// The charts' palette by name: the renderer gives each the
 /// theme's shade; "text" is the text's own color. Never a value.
@@ -58,6 +65,13 @@ pub(super) enum Kind {
     Whole(u64, u64),
     /// true or false, never a binding.
     Flag,
+    /// The Claktory's time zone, for a Calendar to say when it isn't the
+    /// device's: {start, end, name?}, its offset from UTC in whole minutes
+    /// at the start and end of what's shown (a change of summer time
+    /// between them), and its name (at most 64 characters).
+    MacZone,
+    /// A list of at most `MAX_TOOLS` components' ids.
+    Tools,
 }
 
 const TIME_MAX: u64 = 8_640_000_000_000_000;
@@ -149,6 +163,27 @@ pub(super) fn catalog(component: &str) -> Option<Props> {
             ("legend", FLAG, false),
             ("height", super::Kind::Chart(Kind::Range(120.0, 480.0)), false),
         ],
+        // What agents have scheduled, as a day, a week or an agenda from
+        // `anchor` (ms since 1970): the rows of `data`, by their columns'
+        // names (id, start, end, title, agent, color, allDay, kind,
+        // repeat, detail, open, live). Each row's `open` says where it
+        // opens in Claktory, which the device follows itself
+        // (`open_cells`). Its `action` goes with {anchor, view} added when
+        // the person moves or changes the view.
+        "Calendar" => &[
+            ("data", TABLE, true),
+            ("view", Choice(&["day", "week", "agenda"]), false),
+            ("anchor", super::Kind::Chart(Kind::Whole(0, TIME_MAX)), false),
+            ("weekStart", Choice(&["monday", "sunday", "saturday"]), false),
+            ("macZone", super::Kind::Chart(Kind::MacZone), false),
+            ("tools", super::Kind::Chart(Kind::Tools), false),
+            ("emptyTitle", DynString, false),
+            ("agendaEmptyTitle", DynString, false),
+            ("emptyBody", DynString, false),
+            ("label", DynString, false),
+            ("action", super::Kind::Action, false),
+            ("height", super::Kind::Chart(Kind::Range(240.0, 2000.0)), false),
+        ],
         _ => return None,
     })
 }
@@ -158,7 +193,7 @@ pub(super) fn catalog(component: &str) -> Option<Props> {
 /// Charts app may set for a newer catalog than this one, after a roll-back
 /// say. What's left out never reaches a device; known keys are still checked.
 pub(super) fn lenient(component: &str) -> bool {
-    matches!(component, "Chart" | "Stat" | "Row" | "Map" | "Table")
+    matches!(component, "Chart" | "Stat" | "Row" | "Map" | "Table" | "Calendar")
 }
 
 /// Rules across a component's properties, once each property is checked on
@@ -269,7 +304,94 @@ pub(super) fn check(kind: Kind, value: &Value, at: &str) -> Result<(), Invalid> 
             Value::Bool(_) => Ok(()),
             _ => Err(invalid(at, "this is true or false")),
         },
+        Kind::MacZone => {
+            let Value::Object(zone) = value else { return Err(invalid(at, "macZone is {start, end, name?}")) };
+            only(zone, at, &["start", "end", "name"])?;
+            for key in ["start", "end"] {
+                match zone.get(key).and_then(Value::as_i64) {
+                    Some(minutes) if (-MAX_ZONE_MINUTES..=MAX_ZONE_MINUTES).contains(&minutes) => {}
+                    _ => {
+                        return Err(invalid(
+                            format!("{at}/{key}"),
+                            format!("this is a whole number of minutes from -{MAX_ZONE_MINUTES} to {MAX_ZONE_MINUTES}"),
+                        ));
+                    }
+                }
+            }
+            match zone.get("name") {
+                None => Ok(()),
+                Some(Value::String(name)) if name.chars().count() <= 64 && !name.chars().any(char::is_control) => Ok(()),
+                Some(_) => Err(invalid(format!("{at}/name"), "a zone's name is a line of at most 64 characters")),
+            }
+        }
+        Kind::Tools => match value {
+            Value::Array(ids) if ids.len() <= MAX_TOOLS => {
+                ids.iter().enumerate().try_for_each(|(index, id)| super::check(super::Kind::Id, id, &format!("{at}/{index}")))
+            }
+            _ => Err(invalid(at, format!("tools are a list of at most {MAX_TOOLS} components' ids"))),
+        },
     }
+}
+
+/// Checks what every Calendar's rows open, wherever the rows are (in the
+/// component, or in `data` where it's bound): each `open` cell is null,
+/// "agent:<id>", "item:<agent>:<n>", "monitor:<agent>:m<n>" (or a bare
+/// <n>) or "task:<agent>:<task id>", ids being letters, digits, _ and -
+/// up to 64; anything else refuses the message. A cell naming an agent
+/// that's gone stays as it is, so a device can say the agent was deleted.
+pub(super) fn open_cells(components: &BTreeMap<String, Value>, data: &Value) -> Result<(), Invalid> {
+    for (id, component) in components {
+        if component.get("component").and_then(Value::as_str) != Some("Calendar") {
+            continue;
+        }
+        let table = match component.pointer("/data/@path").and_then(Value::as_str) {
+            Some(path) => data.pointer(path),
+            None => component.get("data"),
+        };
+        let Some(Value::Object(table)) = table else { continue };
+        let Some(columns) = table.get("columns").and_then(Value::as_array) else { continue };
+        if let Some(twice) = columns.iter().enumerate().find_map(|(at, name)| columns[..at].contains(name).then_some(name)) {
+            return Err(invalid("", format!("Calendar \"{id}\"'s rows name the column {twice} twice")));
+        }
+        let Some(open) = columns.iter().position(|name| name == "open") else { continue };
+        let Some(Value::Array(rows)) = table.get("rows") else { continue };
+        for (index, row) in rows.iter().enumerate() {
+            let Some(cell) = row.as_array().and_then(|cells| cells.get(open)) else { continue };
+            let shaped = match cell {
+                Value::Null => true,
+                Value::String(target) => open_agent(target).is_some(),
+                _ => false,
+            };
+            if !shaped {
+                return Err(invalid(
+                    "",
+                    format!(
+                        "Calendar \"{id}\"'s row {index} opens {cell}, which isn't agent:<id>, item:<agent>:<n>, monitor:<agent>:m<n> or task:<agent>:<task id>"
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The agent an open cell names, when it's one of the four shapes.
+fn open_agent(target: &str) -> Option<&str> {
+    let id = |id: &str| !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    let number = |n: &str| !n.is_empty() && n.len() <= 18 && n.chars().all(|c| c.is_ascii_digit());
+    let (kind, rest) = target.split_once(':')?;
+    let (agent, place) = match kind {
+        "agent" => (rest, None),
+        _ => rest.split_once(':').map(|(agent, place)| (agent, Some(place)))?,
+    };
+    let shaped = match (kind, place) {
+        ("agent", None) => true,
+        ("item", Some(n)) => number(n),
+        ("monitor", Some(m)) => number(m.strip_prefix('m').unwrap_or(m)),
+        ("task", Some(task)) => id(task),
+        _ => false,
+    };
+    (shaped && id(agent)).then_some(agent)
 }
 
 /// An agent's id as a color names it: lowercase letters, digits, - and _.
@@ -307,6 +429,7 @@ mod tests {
 
     use super::super::Applied;
     use super::super::tests::{S, apply, created};
+    use super::TIME_MAX;
 
     #[test]
     fn charts_stats_and_tables_take_a_querys_answer() {
@@ -463,6 +586,144 @@ mod tests {
         let newer = component(json!({"id": "m", "component": "Map", "data": users, "basemap": "satellite"}));
         let Ok(Applied::Changed(sent)) = apply(&mut content, newer) else { panic!("applied") };
         assert!(!sent.contains("basemap"));
+    }
+
+    #[test]
+    fn a_calendar_takes_its_rows_view_zone_and_tools() {
+        let mut content = created();
+        let rows = json!({"columns": ["id", "start", "end", "title", "agent", "open"], "rows": [
+            ["m1", 1_764_770_400_000u64, null, "Logs", "lea", "monitor:lea:m3"],
+            ["m2", 1_764_770_400_000u64, null, "Disk", "lea", "monitor:lea:3"],
+            ["i1", 1_764_770_400_000u64, null, "Ship", "lea", "item:lea:12"],
+            ["t1", 1_764_770_400_000u64, null, "Build", "lea", "task:lea:task-7"],
+            ["a1", 1_764_770_400_000u64, null, "Release", "lea", "agent:lea"],
+            ["e1", 1_764_770_400_000u64, null, "Launch", "lea", null],
+        ]});
+        let good = json!({"version": "1.0", "updateComponents": {"surfaceId": S, "components": [
+            {"id": "cal", "component": "Calendar", "data": {"@path": "/rows"}, "view": "week", "anchor": 1_764_770_400_000u64,
+             "weekStart": "monday", "macZone": {"start": 60, "end": 60}, "tools": ["agent_menu", "show_menu", "more_menu"],
+             "emptyTitle": "Nothing on the calendar this week", "agendaEmptyTitle": "Nothing on the calendar coming up",
+             "emptyBody": {"@path": "/empty"}, "label": "Calendar",
+             "action": {"event": {"name": "calendar"}}, "height": 240},
+            {"id": "day", "component": "Calendar", "data": rows, "view": "day", "anchor": 0, "weekStart": "sunday",
+             "macZone": {"start": -840, "end": 840, "name": "Europe/Rome"}, "tools": [], "height": 2000},
+            {"id": "agenda", "component": "Calendar", "data": rows, "view": "agenda", "anchor": TIME_MAX, "weekStart": "saturday"},
+        ]}});
+        let Ok(Applied::Changed(sent)) = apply(&mut content, good) else { panic!("applied") };
+        assert!(sent.contains("Nothing on the calendar coming up"), "the agenda's own empty title reaches devices");
+        let component = |component: Value| json!({"version": "1.0", "updateComponents": {"surfaceId": S, "components": [component]}});
+        let calendar = |extra: Value| {
+            let mut calendar = json!({"id": "c", "component": "Calendar", "data": {"@path": "/rows"}});
+            calendar.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            component(calendar)
+        };
+        for (wrong, why) in [
+            (component(json!({"id": "c", "component": "Calendar"})), "Calendar needs data"),
+            (calendar(json!({"view": "month"})), "one of day, week, agenda"),
+            (calendar(json!({"weekStart": "tuesday"})), "one of monday, sunday, saturday"),
+            (calendar(json!({"anchor": -1})), "whole number from 0"),
+            (calendar(json!({"anchor": {"@path": "/a"}})), "whole number from 0"),
+            (calendar(json!({"macZone": {"start": 841, "end": 0}})), "from -840 to 840"),
+            (calendar(json!({"macZone": {"start": 0, "end": -841}})), "from -840 to 840"),
+            (calendar(json!({"macZone": {"start": 1.5, "end": 0}})), "whole number of minutes"),
+            (calendar(json!({"macZone": {"start": 0}})), "whole number of minutes"),
+            (calendar(json!({"macZone": {"start": 0, "end": 0, "name": "x".repeat(65)}})), "at most 64 characters"),
+            (calendar(json!({"macZone": {"start": 0, "end": 0, "name": "Rome\nfake"}})), "at most 64 characters"),
+            (calendar(json!({"macZone": {"start": 0, "end": 0, "dst": true}})), "isn't allowed here"),
+            (calendar(json!({"macZone": "UTC+1"})), "macZone is {start, end, name?}"),
+            (calendar(json!({"tools": ["a", "b", "c", "d", "e", "f", "g", "h", "i"]})), "at most 8"),
+            (calendar(json!({"tools": ["1menu"]})), "a component's id"),
+            (calendar(json!({"tools": {"componentId": "m", "path": "/t"}})), "at most 8"),
+            (calendar(json!({"height": 239})), "from 240 to 2000"),
+            (calendar(json!({"height": 2001})), "from 240 to 2000"),
+            (calendar(json!({"action": {"event": {"name": "go", "context": {"x": {"@call": "f"}}}}})), "aren't supported"),
+            (calendar(json!({"label": 3})), "a string"),
+            (calendar(json!({"agendaEmptyTitle": ["x"]})), "a string"),
+            (calendar(json!({"@open": "x"})), "has no property \"@open\""),
+        ] {
+            let before = content.snapshot(S);
+            let error = apply(&mut content, wrong.clone()).unwrap_err();
+            assert!(error.contains(why), "{wrong}: {error}");
+            assert_eq!(content.snapshot(S), before, "{wrong} changed nothing");
+        }
+        // A newer catalog's settings on a Calendar are left out, as on a Chart.
+        let Ok(Applied::Changed(sent)) = apply(&mut content, calendar(json!({"monthGrid": true}))) else { panic!("applied") };
+        assert!(!sent.contains("monthGrid"));
+    }
+
+    /// What a Calendar's rows open is checked at every push, bound or not:
+    /// only the four shapes. One naming an agent that's gone reaches devices
+    /// as it is, so they can say the agent was deleted.
+    #[test]
+    fn a_calendars_rows_open_only_known_places_and_keep_an_agent_that_is_gone() {
+        let message = |body: Value| body.to_string();
+        let mut content = super::super::Content::default();
+        let rows = |open: Value| json!({"columns": ["id", "title", "open"], "rows": [["a", "Logs", "monitor:lea:m1"], ["b", "Old", open]]});
+        let create = json!({"version": "1.0", "createSurface": {"surfaceId": S, "components": [
+            {"id": "root", "component": "Calendar", "data": {"@path": "/rows"}},
+        ], "dataModel": {"rows": rows(json!("item:gone:4"))}}});
+        assert_eq!(content.apply(S, &message(create)), Ok(Applied::Created));
+        let snapshot: Value = serde_json::from_str(&content.snapshot(S)).unwrap();
+        assert_eq!(snapshot.pointer("/createSurface/dataModel/rows/rows/1/2"), Some(&json!("item:gone:4")));
+        assert_eq!(snapshot.pointer("/createSurface/dataModel/rows/rows/0/2"), Some(&json!("monitor:lea:m1")));
+
+        let update = |open: Value| message(json!({"version": "1.0", "updateDataModel": {"surfaceId": S, "path": "/rows", "value": rows(open)}}));
+        assert_eq!(content.apply(S, &update(json!("task:lea:task-2"))), Ok(Applied::Changed(update(json!("task:lea:task-2")))));
+        assert_eq!(content.apply(S, &update(json!("agent:gone"))), Ok(Applied::Changed(update(json!("agent:gone")))));
+
+        for wrong in [
+            json!("agent:"),
+            json!("agent:lea:4"),
+            json!("item:lea:x"),
+            json!("item:lea:-4"),
+            json!("item:lea"),
+            json!("monitor:lea:mx"),
+            json!("monitor:lea:m"),
+            json!("task:lea:a b"),
+            json!("task:lea/../x:1"),
+            json!("file:/etc/passwd"),
+            json!("https://example.com"),
+            json!(4),
+            json!({"agent": "lea"}),
+        ] {
+            let before = content.snapshot(S);
+            let error = content.apply(S, &update(wrong.clone())).unwrap_err().to_string();
+            assert!(error.contains("row 1 opens") && error.contains("isn't agent:<id>"), "{wrong}: {error}");
+            assert_eq!(content.snapshot(S), before, "{wrong} changed nothing");
+        }
+
+        // Rows in the component itself, too.
+        let literal = |open: Value| {
+            message(json!({"version": "1.0", "updateComponents": {"surfaceId": S, "components": [
+                {"id": "root", "component": "Calendar", "data": rows(open)},
+            ]}}))
+        };
+        assert!(matches!(content.apply(S, &literal(json!("item:gone:1"))), Ok(Applied::Changed(_))));
+        let snapshot: Value = serde_json::from_str(&content.snapshot(S)).unwrap();
+        let root = snapshot["createSurface"]["components"].as_array().unwrap().iter().find(|c| c["id"] == "root").unwrap().clone();
+        assert_eq!(root.pointer("/data/rows/1/2"), Some(&json!("item:gone:1")));
+        assert!(content.apply(S, &literal(json!("item:lea:one"))).is_err());
+        // Without an open column, nothing to check.
+        let plain = message(json!({"version": "1.0", "updateComponents": {"surfaceId": S, "components": [
+            {"id": "root", "component": "Calendar", "data": {"columns": ["id"], "rows": [["x"]]}},
+        ]}}));
+        assert!(matches!(content.apply(S, &plain), Ok(Applied::Changed(_))));
+        // A column named twice, bound or literal: no second "open" past the check.
+        let rebind = message(json!({"version": "1.0", "updateComponents": {"surfaceId": S, "components": [
+            {"id": "root", "component": "Calendar", "data": {"@path": "/rows"}},
+        ]}}));
+        assert!(content.apply(S, &rebind).is_ok());
+        let before = content.snapshot(S);
+        let twice = json!({"columns": ["id", "open", "open"], "rows": [["a", "agent:lea", "https://example.com"]]});
+        let bound = message(json!({"version": "1.0", "updateDataModel": {"surfaceId": S, "path": "/rows", "value": twice}}));
+        let literal = message(json!({"version": "1.0", "updateComponents": {"surfaceId": S, "components": [
+            {"id": "root", "component": "Calendar", "data": {"columns": ["id", "title", "id"], "rows": []}},
+        ]}}));
+        for wrong in [bound, literal] {
+            let error = content.apply(S, &wrong).unwrap_err().to_string();
+            assert!(error.contains("twice"), "{wrong}: {error}");
+            assert_eq!(content.snapshot(S), before);
+        }
     }
 
     #[test]

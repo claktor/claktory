@@ -1,5 +1,5 @@
 //! Apps' events, to the agents subscribed to them that have the event's
-//! scope. Bursts are folded: an agent hears an app at most once per window
+//! scope (emit-to: to one of them alone). Bursts are folded: an agent hears an app at most once per window
 //! (5 s), what came meanwhile in one event, a line each; an event whose
 //! dedupe key was seen lately is dropped.
 
@@ -77,6 +77,7 @@ pub(super) fn emit(factory: &Arc<Factory>, emitted: Emit) {
             .get(&spec.kind)
             .into_iter()
             .flatten()
+            .filter(|agent| emitted.to_agent.is_empty() || **agent == emitted.to_agent)
             .filter(|agent| inner.config.agent(agent).is_some())
             .filter(|agent| app.grants.get(*agent).is_some_and(|scopes| scopes.contains(&spec.scope)))
             .cloned()
